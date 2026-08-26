@@ -1,0 +1,103 @@
+{
+  "state": {
+    "run_id": "r1",
+    "actor": "team",
+    "status": "running",
+    "seq": 7,
+    "blueprint_sha": "abc123",
+    "stage": "execute",
+    "stage_index": 0,
+    "members": [
+      {
+        "name": "backend",
+        "role": "coordinator",
+        "state": "waiting",
+        "detail": "approval",
+        "blocked_on": {
+          "inbox_id": "inbox-1",
+          "policy": "ask",
+          "tool": "bash"
+        },
+        "since_seq": 5,
+        "spent_usd": 0,
+        "turns": 1
+      },
+      {
+        "name": "designer",
+        "state": "submitted",
+        "since_seq": 7,
+        "spent_usd": 0.42,
+        "turns": 0,
+        "submitted": true
+      },
+      {
+        "name": "frontend",
+        "state": "idle",
+        "since_seq": 1,
+        "spent_usd": 0,
+        "turns": 0
+      },
+      {
+        "name": "mediator",
+        "advisory": true,
+        "state": "inactive",
+        "since_seq": 1,
+        "spent_usd": 0,
+        "turns": 0
+      }
+    ],
+    "spent_usd": 0.42,
+    "budget_usd": 5,
+    "turns": 1,
+    "tree_spent_usd": 0.42,
+    "spawn_depth": 0,
+    "inbox": [
+      {
+        "id": "inbox-1",
+        "kind": "tool_approval",
+        "question": "aprobar bash para backend?",
+        "agent": "backend",
+        "on_timeout": "deny"
+      }
+    ],
+    "active_timer": "stage:execute",
+    "next_inbox_id": 2
+  },
+  "why": {
+    "run_id": "r1",
+    "lines": [
+      {
+        "depth": 0,
+        "text": "run r1: running"
+      },
+      {
+        "depth": 1,
+        "text": "etapa \"execute\" avanza cuando: all"
+      },
+      {
+        "depth": 2,
+        "text": "falta el submit de: backend, frontend"
+      },
+      {
+        "depth": 1,
+        "text": "backend: waiting (approval) desde seq 5"
+      },
+      {
+        "depth": 2,
+        "text": "espera aprobación de la tool \"bash\" (inbox inbox-1)"
+      },
+      {
+        "depth": 2,
+        "text": "para no volver a preguntar por esta tool:"
+      },
+      {
+        "depth": 1,
+        "text": "presupuesto: 0.4200 de 5.0000 USD gastados en el árbol"
+      }
+    ],
+    "fix": [
+      "iash inbox approve inbox-1",
+      "iash agent tool policy --agent backend --allow bash"
+    ]
+  }
+}
