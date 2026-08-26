@@ -1,14 +1,14 @@
 package kernel
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// EventType is the type of a log event.
+//
+// The namespace is hierarchical and dot-separated (`stage.entered`, not
+// `stage_entered`) because watchers match by prefix: `stage.*` has to be able to
+// mean "everything that happens to stages" without a hand-maintained list.
 type EventType string
 
 const (
-	// Implementation note.
+	// --- run lifecycle ---
 	RunStarted   EventType = "run.started"
 	RunPrompt    EventType = "run.prompt"
 	RunPaused    EventType = "run.paused"
@@ -17,18 +17,18 @@ const (
 	RunExpired   EventType = "run.expired"
 	RunResult    EventType = "run.result"
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// RunQuiescent is an EVENT, not a terminal state. The system having gone
+	// silent does not mean it should be killed: it means someone has to be told.
+	// See decide.go:checkQuiescence.
 	RunQuiescent EventType = "run.quiescent"
 
-	// Implementation note.
+	// --- stages ---
 	StageEntered   EventType = "stage.entered"
 	StageSubmitted EventType = "stage.submitted"
 	StageAdvanced  EventType = "stage.advanced"
 	StageTimeout   EventType = "stage.timeout"
 
-	// Implementation note.
+	// --- agents ---
 	AgentActivated EventType = "agent.activated"
 	AgentSteered   EventType = "agent.steered"
 	AgentNotified  EventType = "agent.notified"
@@ -37,38 +37,38 @@ const (
 	AgentUnblocked EventType = "agent.unblocked"
 	AgentFailed    EventType = "agent.failed"
 
-	// Implementation note.
+	// --- tools ---
 	ToolCall          EventType = "tool.call"
 	ToolCallCompleted EventType = "tool.call_completed"
 	ToolCallDenied    EventType = "tool.call_denied"
 
-	// Implementation note.
+	// --- model ---
 	LLMResponse EventType = "llm.response"
 
-	// Implementation note.
+	// --- resources ---
 	LockAcquired     EventType = "lock.acquired"
 	LockReleased     EventType = "lock.released"
 	ResourceConflict EventType = "resource.conflict"
 
-	// Implementation note.
+	// --- budget ---
 	BudgetWarning  EventType = "budget.warning"
 	BudgetExceeded EventType = "budget.exceeded"
 
-	// Implementation note.
+	// --- human in the loop ---
 	InboxCreated EventType = "inbox.created"
 	InboxReplied EventType = "inbox.replied"
 	InboxTimeout EventType = "inbox.timeout"
 
-	// Implementation note.
+	// --- clock ---
 	TimerTick EventType = "timer.tick"
 )
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Source says who produced the event.
+//
+// It exists for one concrete reason: derived events (the ones the reducer itself
+// emits via Emit) must NOT re-trigger watchers, or a watcher on `stage.*` loops
+// forever on the `stage.advanced` events it caused itself. See the
+// `e.Source != SourceRuntime` guard in decide.go.
 type Source string
 
 const (
@@ -78,16 +78,16 @@ const (
 	SourceTrigger Source = "trigger"
 )
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Event is one log entry. The log is the source of truth: state is derived with
+// fold(Decide, State0, events) and the snapshot is only a cache.
+//
+// Every field is plain serializable data. No pointers to anything live, no
+// functions, no channels: an event has to be writable as NDJSON, readable six
+// months later, and produce exactly the same state.
 type Event struct {
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// Seq is the sequence number within the run. The single log writer assigns
+	// it, NOT the reducer: the reducer returns events with Seq 0 because
+	// deciding the global order is not its job.
 	Seq int64 `json:"seq"`
 
 	ID    string    `json:"id"`
@@ -98,26 +98,27 @@ type Event struct {
 	Source Source `json:"source"`
 	Actor  string `json:"actor,omitempty"`
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// CorrelationID groups the whole causal chain that started from one root
+	// cause. CausedBy holds the direct parents. Together they are what lets
+	// `event trace` rebuild the tree and `run why` walk backwards.
 	CorrelationID string   `json:"correlation_id,omitempty"`
 	CausedBy      []string `json:"caused_by,omitempty"`
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// Depth is causal depth. It is the brake on watcher cascades: without it, a
+	// watcher reacting to what another watcher caused has no bottom, and the
+	// bottom is paid in dollars. See Config.MaxDepth.
 	Depth int `json:"depth"`
 
 	Payload map[string]any `json:"payload,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Str reads a string from the payload. Returns "" if it is missing or of another
+// type.
+//
+// It deliberately returns no error. The payload comes from JSON, where anything
+// can be absent, and a reducer littered with `if err != nil` for every optional
+// field would be unreadable. A missing field is a normal case, not a failure:
+// what is mandatory is verified by the schema (spec/events.md), not here.
 func (e Event) Str(key string) string {
 	if e.Payload == nil {
 		return ""
@@ -126,12 +127,12 @@ func (e Event) Str(key string) string {
 	return s
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Num reads a number from the payload.
+//
+// It accepts float64 (what encoding/json produces), int and int64 (what tests
+// and hand-built events produce). Without this normalization, an event built in
+// Go and the same event after a JSON round-trip would give different results,
+// and replay would stop being faithful.
 func (e Event) Num(key string) float64 {
 	if e.Payload == nil {
 		return 0
@@ -152,10 +153,10 @@ func (e Event) Num(key string) float64 {
 	return 0
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// json_Number is the minimal interface of json.Number, declared here to avoid
+// importing encoding/json into the kernel. This is not purism: the architecture
+// test (internal/arch_test.go) checks the kernel's import graph, and the smaller
+// that graph is, the stronger the purity guarantee.
 type json_Number interface {
 	Float64() (float64, error)
 }
