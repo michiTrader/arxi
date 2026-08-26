@@ -55,7 +55,7 @@
       {
         "id": "inbox-1",
         "kind": "tool_approval",
-        "question": "aprobar bash para backend?",
+        "question": "aprobar bash for backend?",
         "agent": "backend",
         "on_timeout": "deny"
       }
@@ -72,27 +72,27 @@
       },
       {
         "depth": 1,
-        "text": "etapa \"execute\" avanza cuando: all"
+        "text": "stage \"execute\" advances when: all"
       },
       {
         "depth": 2,
-        "text": "falta el submit de: backend, frontend"
+        "text": "missing the submit of: backend, frontend"
       },
       {
         "depth": 1,
-        "text": "backend: waiting (approval) desde seq 5"
+        "text": "backend: waiting (approval) from seq 5"
       },
       {
         "depth": 2,
-        "text": "espera aprobación de la tool \"bash\" (inbox inbox-1)"
+        "text": "waits approval of the tool \"bash\" (inbox inbox-1)"
       },
       {
         "depth": 2,
-        "text": "para no volver a preguntar por esta tool:"
+        "text": "for not volver a ask for this tool:"
       },
       {
         "depth": 1,
-        "text": "presupuesto: 0.4200 de 5.0000 USD gastados en el árbol"
+        "text": "budget: 0.4200 of 5.0000 USD spent en the tree"
       }
     ],
     "fix": [

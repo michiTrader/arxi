@@ -1,10 +1,10 @@
-// Package internal_test verifica los límites arquitectónicos con el compilador
-// como testigo, no con la buena voluntad de quien escribe el próximo commit.
-//
-// Esto es la respuesta concreta a la concesión de ADR-0007: Rust garantiza más
-// cosas en el tipo, pero Go permite verificar el grafo de imports con `go list`
-// y eso es una garantía que Rust NO da por defecto. Si el kernel importa
-// net/http, este test falla y explica por qué está mal.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 package internal_test
 
 import (
@@ -27,10 +27,10 @@ func list(t *testing.T, pkg string) pkgInfo {
 	out, err := exec.Command("go", "list", "-json", pkg).Output()
 	if err != nil {
 		if _, err2 := exec.LookPath("go"); err2 != nil {
-			t.Skip("go no está en el PATH")
+			t.Skip("go not is en the PATH")
 		}
-		// Si go existe y falla, es un error de verdad: saltear acá sería
-		// convertir el test en decorativo.
+		// Implementation note.
+		// Implementation note.
 		t.Fatalf("go list %s: %v", pkg, err)
 	}
 	var p pkgInfo
@@ -40,13 +40,13 @@ func list(t *testing.T, pkg string) pkgInfo {
 	return p
 }
 
-// ownClosure devuelve solo los paquetes DEL PROYECTO en la clausura de deps.
-//
-// Esta función existe por un falso positivo real: la primera versión usaba
-// `go list -deps` completo, y la clausura de `fmt` incluye os, time, syscall y
-// medio runtime. El test fallaba diciendo que el kernel importaba `os` cuando
-// lo único que hacía era importar `fmt`. Lo que importa es qué importa el
-// paquete DIRECTAMENTE, y qué paquetes nuestros arrastra.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func ownClosure(t *testing.T, pkg string) []pkgInfo {
 	t.Helper()
 	root := list(t, pkg)
@@ -61,29 +61,29 @@ func ownClosure(t *testing.T, pkg string) []pkgInfo {
 	return out
 }
 
-// forbidden mapea cada import prohibido en el kernel a la razón. La razón va en
-// el mensaje de error porque un test que dice "no importes time" sin explicar
-// por qué se termina silenciando con un //nolint.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 var forbidden = map[string]string{
-	"time":         "time.Now() dentro del reducer rompe replay y el reloj virtual de --sim",
-	"net":          "el reducer no habla con nadie: devuelve efectos y otro los ejecuta",
-	"net/http":     "el reducer no habla con nadie: devuelve efectos y otro los ejecuta",
-	"os":           "leer env o archivos hace que el mismo log dé estados distintos según la máquina",
-	"os/exec":      "ejecutar procesos es un efecto, y los efectos los devuelve, no los hace",
-	"math/rand":    "aleatoriedad sin semilla explícita hace el fold irreproducible",
-	"crypto/rand":  "aleatoriedad sin semilla explícita hace el fold irreproducible",
-	"database/sql": "la persistencia es del ejecutor; el estado se deriva del log",
-	"io":           "I/O es del ejecutor por definición",
-	"bufio":        "I/O es del ejecutor por definición",
+	"time":         "time.Now() inside of the reducer breaks replay and the clock virtual of --sim",
+	"net":          "the reducer not habla with nadie: returns effects and another the executes",
+	"net/http":     "the reducer not habla with nadie: returns effects and another the executes",
+	"os":           "read env or files makes that the same log dé states distintos according to the máquina",
+	"os/exec":      "ejecutar procesos is a effect, and the effects the returns, not the makes",
+	"math/rand":    "aleatoriedad without semilla explícita makes the fold irreproducible",
+	"crypto/rand":  "aleatoriedad without semilla explícita makes the fold irreproducible",
+	"database/sql": "the persistencia is of the executor; the state is derives of the log",
+	"io":           "I/O is of the executor for definición",
+	"bufio":        "I/O is of the executor for definición",
 }
 
 func TestKernelEsPuro(t *testing.T) {
 	for _, p := range ownClosure(t, mod+"internal/kernel") {
 		for _, imp := range p.Imports {
 			if why, bad := forbidden[imp]; bad {
-				t.Errorf("%s importa %q.\n  por qué está mal: %s\n"+
-					"  qué hacer: devolvé un Effect que describa la operación y "+
-					"que el ejecutor la haga (ver docs/design/10-ejecucion.md §10.1)",
+				t.Errorf("%s importa %q.\n  for what is badly: %s\n"+
+					"  what make: devolvé a Effect that describa the operación and "+
+					"that the executor the haga (see docs/design/10-execution.md §10.1)",
 					p.ImportPath, imp, why)
 			}
 		}
@@ -94,9 +94,9 @@ func TestKernelNoImportaOtrasCapas(t *testing.T) {
 	p := list(t, mod+"internal/kernel")
 	for _, d := range p.Deps {
 		if strings.HasPrefix(d, mod) {
-			t.Errorf("el kernel depende de %s.\n"+
-				"El kernel es la capa de abajo: no puede saber que existe nadie más. "+
-				"Si necesita un dato, se lo pasan por Config o por Event.", d)
+			t.Errorf("the kernel depends of %s.\n"+
+				"The kernel is the capa of abajo: not can know that exists nadie more. "+
+				"Si needs a dato, is lo pasan for Config or for Event.", d)
 		}
 	}
 }
@@ -105,10 +105,10 @@ func TestSurfaceNoImportaElEjecutor(t *testing.T) {
 	p := list(t, mod+"internal/surface")
 	for _, d := range p.Deps {
 		if strings.HasPrefix(d, mod+"internal/exec") {
-			t.Errorf("la superficie importa %s.\n"+
-				"La superficie es una declaración de capacidades: describe qué se "+
-				"puede hacer, no cómo. Si importa al ejecutor, dejan de poder "+
-				"generarse el manifiesto y los docs sin arrastrar todo el runtime.", d)
+			t.Errorf("the surface importa %s.\n"+
+				"The surface is a declaración of capabilities: describe what is "+
+				"can make, not how. Si importa to the executor, dejan of poder "+
+				"generarse the manifest and the docs without arrastrar everything the runtime.", d)
 		}
 	}
 }

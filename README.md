@@ -1,148 +1,148 @@
 # iash
 
-Sistemas de agentes que se pueden depurar.
+Sistemas of agentes that is can depurar.
 
-La tesis del proyecto cabe en una línea:
+The tesis of the project cabe en a línea:
 
-> **Una sola función pura produce `run`, `--sim`, `replay` y `why` como la misma
+> **A sola función pure produce `run`, `--sim`, `replay` and `why` como the same
 > maquinaria.**
 
-Todo lo demás es consecuencia de eso.
+Todo lo demás is consequence of that.
 
-## El núcleo
+## The núcleo
 
 ```go
 Decide(State, Event, Config) -> (State', []Effect)
 ```
 
-Pura. No mira el reloj, no toca la red, no escribe nada. Todo lo que quiere que
-pase en el mundo lo **describe** como un `Effect` y lo devuelve; otro lo ejecuta.
+Pura. No mira the clock, not toca the network, not writes nothing. Todo lo that quiere that
+happen en the world lo **describe** como a `Effect` and lo returns; another lo executes.
 
-Esa restricción no es estética. Es lo que hace que cuatro features sean una:
+Esa restricción not is estética. Es lo that makes that four features sean a:
 
-| feature | qué es |
+| feature | what is |
 |---|---|
-| `iash run` | fold + ejecutor real |
-| `iash run --sim` | fold + ejecutor falso |
-| `iash run replay` | fold sobre un log viejo, sin ejecutor |
-| `iash run why` | leer el `State` que salió del fold |
+| `iash run` | fold + executor real |
+| `iash run --sim` | fold + executor fake |
+| `iash run replay` | fold sobre a log old, without executor |
+| `iash run why` | read the `State` that salió of the fold |
 
-En un diseño donde el reducer llama a la red, `replay` es un segundo programa que
-reimplementa la lógica del primero. Siempre está desactualizado y nadie se da
-cuenta hasta que hace falta.
+En a diseño where the reducer llama a the network, `replay` is a second programa that
+reimplementa the logic of the first. Siempre is desactualizado and nadie is da
+cuenta until that makes missing.
 
-Y la pureza está **verificada, no prometida**: `internal/arch_test.go` corre
-`go list` sobre el paquete y falla si el kernel importa `time`, `net`, `os` o
+Y the pureza is **verificada, not prometida**: `internal/arch_test.go` runs
+`go list` sobre the paquete and fails if the kernel importa `time`, `net`, `os` or
 `math/rand`.
 
-## Qué hace distinto
+## Qué makes distinto
 
-**Detecta el silencio.** El modo de falla más caro no es el que grita: es el run
-que no falla, no termina y no avanza. `iash` lo detecta y emite `run.quiescent`
-con un diagnóstico que nombra la regla de avance que no se cumple — incluso en el
-caso difícil, donde todos entregaron y la regla igual es insatisfacible
+**Detecta the silence.** The modo of fails more expensive not is the that grita: is the run
+that not fails, not termina and not advances. `iash` lo detecta and emite `run.quiescent`
+with a diagnóstico that nombra the rule of avance that not is meets — incluso en the
+case difficult, where all submitted and the rule igual is unsatisfiable
 (ADR-0004).
 
-**El diagnóstico es derivado, no hard-codeado.** `run why` lee referencias
-estructuradas (`blocked_ref`) y produce remedios ejecutables. No hay un `case`
-por blueprint:
+**The diagnóstico is derived, not hard-codeado.** `run why` lee references
+estructuradas (`blocked_ref`) and produce remedies ejecutables. No there is a `case`
+for blueprint:
 
 ```
 $ iash why runs/r1/state.json
 run r1: running
-└─ backend: waiting (approval) desde seq 5
-   └─ espera aprobación de la tool "bash" (inbox inbox-1)
-└─ presupuesto: 0.4200 de 5.0000 USD gastados en el árbol
+└─ backend: waiting (approval) from seq 5
+   └─ waits approval of the tool "bash" (inbox inbox-1)
+└─ budget: 0.4200 of 5.0000 USD spent en the tree
 
-posibles remedios:
+posibles remedies:
   $ iash inbox approve inbox-1
   $ iash agent tool policy --agent backend --allow bash
 ```
 
-**Los defaults son decisiones de seguridad.** Si algún miembro puede escribir
-archivos, el workspace pasa a `worktree` solo: dos agentes en un mismo directorio
-se pisan y el resultado es basura difícil de atribuir. Un timeout de etapa
-escala, no falla — fallar por defecto entrena al usuario a poner timeouts
-absurdos. Las herramientas mutantes no se autorizan solas.
+**The defaults are decisions of security.** Si some member can write
+files, the workspace happens a `worktree` only: two agentes en a same directory
+is pisan and the resultado is basura difficult of atribuir. A timeout of stage
+escala, not fails — fail for defecto entrena to the usuario a poner timeouts
+absurdos. The tools mutantes not is autorizan solas.
 
-**El gasto es auditable.** El presupuesto es del árbol (`TreeSpentUSD`), así que
-un spawn anidado no puede multiplicar el techo de la raíz. Y cuando N causas se
-fusionan en un turno, las N quedan registradas en `SpawnTurn.Coalesced`: un
-ahorro que no se puede auditar es un ahorro que nadie va a creer.
+**The spending is auditable.** The budget is of the tree (`TreeSpentUSD`), so that
+a spawn anidado not can multiplicar the techo of the raíz. Y when N causes is
+fusionan en a turn, the N quedan registradas en `SpawnTurn.Coalesced`: a
+saving that not is can auditar is a saving that nadie va a creer.
 
-**Una declaración, tres superficies.** Cada capacidad se declara una sola vez y
-se proyecta por puro join de strings — sin tabla de traducción que se
+**A declaración, three superficies.** Cada capability is declara a sola vez and
+is proyecta for pure join of strings — without tabla of traducción that is
 desincronice:
 
 | declaración | CLI | tool | protocolo |
 |---|---|---|---|
 | `["run","start"]` | `run start` | `iash_run_start` | `run.start` |
 
-Son **45 capacidades declaradas**, de las cuales **32 se exponen como tools** a
-los agentes. La diferencia no es un descuido: hay cosas que un humano puede hacer
-desde la terminal y un agente no debería poder hacerse a sí mismo. `iash surface`
-muestra las 32; `iash schema` emite el manifiesto que consume un agente.
+Son **45 capabilities declared**, of the cuales **32 is expose como tools** a
+the agentes. The diferencia not is a descuido: there is cosas that a human can make
+from the terminal and a agente not should poder hacerse a yes same. `iash surface`
+shows the 32; `iash schema` emite the manifest that consumes a agente.
 
 ## Estado
 
-Lo que corre hoy:
+Lo that runs today:
 
 ```
-iash schema        emitir el manifiesto de la superficie (JSON)
-iash surface       ver la superficie completa, legible
-iash why <archivo> explicar por qué un run no avanza
-iash version       versión del binario y de la superficie
+iash schema        emitir the manifest of the surface (JSON)
+iash surface       see the surface complete, readable
+iash why <file> explicar for what a run not advances
+iash version       version of the binario and of the surface
 ```
 
-El resto de la superficie está **declarada y verificada por tests, pero sin
-ejecutor**. La CLI es honesta al respecto: para un comando declarado y no
-implementado te dice eso, con su nombre de tool y su tipo de protocolo, en vez de
-mentir con "unknown command".
+The rest of the surface is **declared and verificada for tests, pero without
+executor**. The CLI is honesta to the respecto: for a command declared and not
+implemented te dice that, with its name of tool and its tipo of protocolo, en vez of
+mentir with "unknown command".
 
-Falta: el ejecutor (`internal/exec`), carga de blueprints, `serve` (protocolo
-NDJSON), triggers y eval.
+Falta: the executor (`internal/exec`), load of blueprints, `serve` (protocolo
+NDJSON), triggers and eval.
 
-## Compilar y testear
+## Compilar and test
 
 Requiere Go 1.22.
 
 ```bash
-go build -o iash ./cmd/iash
+go build -or iash ./cmd/iash
 go test ./...
 ```
 
-Los tests **no son opcionales**. Go no da `match` exhaustivo, así que un `switch`
-sobre `Effect` al que le falta una variante compila igual; la red que lo atrapa es
-`go test` (ADR-0007). Por la misma razón, cada test protege una decisión y su
-mensaje de falla nombra la consecuencia y el remedio — un `t.Fatal("mismatch")`
-no cumple el contrato del proyecto.
+The tests **not are opcionales**. Go not da `match` exhaustivo, so that a `switch`
+sobre `Effect` to the that le missing a variant compila igual; the network that lo atrapa is
+`go test` (ADR-0007). Por the same reason, each test protects a decision and its
+mensaje of fails nombra the consequence and the remedy — a `t.Fatal("mismatch")`
+not meets the contract of the project.
 
-Para regenerar los golden:
+Para regenerar the golden:
 
 ```bash
 UPDATE_GOLDEN=1 go test ./internal/kernel
 ```
 
-## Dónde leer
+## Dónde read
 
-| ruta | qué hay |
+| ruta | what there is |
 |---|---|
-| [`docs/design/10-ejecucion.md`](docs/design/10-ejecucion.md) | el modelo de ejecución completo |
-| [`docs/adr/`](docs/adr/) | por qué cada decisión, y qué se rompe si se revierte |
-| [`spec/events.md`](spec/events.md) | el catálogo de eventos y el contrato de `blocked_ref` |
+| [`docs/design/10-execution.md`](docs/design/10-execution.md) | the model of execution complete |
+| [`docs/adr/`](docs/adr/) | for what each decision, and what is breaks if is revierte |
+| [`spec/events.md`](spec/events.md) | the catálogo of events and the contract of `blocked_ref` |
 
-Los ADR son el mejor punto de entrada: cada uno dice qué se decidió, qué
-alternativa se descartó y **cuál es el test que hace cumplir la decisión**.
+The ADR are the mejor punto of input: each one dice what is decidió, what
+alternative is discarded and **which is the test that makes meet the decision**.
 
-## Organización del código
+## Organización of the code
 
 ```
-internal/kernel/    el reducer puro: Decide, State, Event, Effect, Explain
-internal/surface/   la superficie declarada una vez y sus tres proyecciones
-internal/arch_test  los límites de arquitectura, verificados con go list
-cmd/iash/           la CLI
-spec/               contratos de eventos
+internal/kernel/    the reducer pure: Decide, State, Event, Effect, Explain
+internal/surface/   the surface declared a vez and their three proyecciones
+internal/arch_test  the límites of arquitectura, verificados with go list
+cmd/iash/           the CLI
+spec/               contracts of events
 ```
 
-El kernel no importa nada del resto del proyecto. Es la única capa que tiene que
-seguir siendo pura, y hay un test que lo hace cumplir.
+The kernel not importa nothing of the rest of the project. Es the single capa that has that
+continue siendo pure, and there is a test that lo makes meet.

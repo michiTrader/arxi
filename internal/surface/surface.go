@@ -1,20 +1,20 @@
-// Package surface declara TODA la capacidad de iash una sola vez.
-//
-// La idea central: la CLI, las herramientas que ven los agentes y los mensajes
-// del protocolo NDJSON no son tres cosas que hay que mantener sincronizadas.
-// Son tres proyecciones de esta lista.
-//
-//	Cmd{Path: []string{"run","start"}}  ->  CLI:       iash run start
-//	                                    ->  tool:      iash_run_start
-//	                                    ->  protocolo: run.start
-//
-// El costo de agregar una capacidad es una entrada acá. El costo de olvidarse
-// de exponerla en algún lado es cero, porque no hay "algún lado": hay una
-// derivación mecánica y tests que verifican que no haya excepciones.
-//
-// Esto es lo que hace posible que un agente de iash use iash. Un agente que
-// puede leer `iash schema` puede descubrir qué sabe hacer el sistema sin que
-// nadie le escriba un prompt con la lista.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 package surface
 
 import (
@@ -22,30 +22,30 @@ import (
 	"strings"
 )
 
-// SurfaceVersion versiona la superficie ENTERA, no cada herramienta.
-//
-// La alternativa que se descartó era `@v1` por herramienta. Suena más
-// granular y es peor: obliga a cada cliente a negociar versión por
-// herramienta, y en la práctica las capacidades evolucionan juntas. Con un
-// número y los campos Since/DeprecatedIn por comando, un cliente sabe qué
-// esperar con una sola comparación.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 const SurfaceVersion = 1
 
-// Kind dice dónde se expone una capacidad. Son flags porque casi todas se
-// exponen en más de un lugar.
+// Implementation note.
+// Implementation note.
 type Kind uint8
 
 const (
-	// CLIOnly es para lo que un humano hace en su terminal y un agente no
-	// debería poder hacer solo (instalar un proveedor, abrir el diseñador).
+	// Implementation note.
+	// Implementation note.
 	CLIOnly Kind = 1 << iota
-	// AgentTool se expone como herramienta a los agentes.
+	// Implementation note.
 	AgentTool
-	// Protocol se expone como mensaje del protocolo NDJSON.
+	// Implementation note.
 	Protocol
 )
 
-// Policy es la política por defecto de una herramienta expuesta a agentes.
+// Implementation note.
 type Policy string
 
 const (
@@ -54,7 +54,7 @@ const (
 	PolicyDeny  Policy = "deny"
 )
 
-// Param es un parámetro de un comando.
+// Implementation note.
 type Param struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`
@@ -65,7 +65,7 @@ type Param struct {
 	Enum       []string `json:"enum,omitempty"`
 }
 
-// Cmd es una capacidad del sistema declarada una sola vez.
+// Implementation note.
 type Cmd struct {
 	Path         []string
 	Desc         string
@@ -78,18 +78,18 @@ type Cmd struct {
 	DeprecatedIn int
 }
 
-// Name es el nombre como herramienta: iash_run_start.
+// Implementation note.
 func (c Cmd) Name() string { return "iash_" + strings.Join(c.Path, "_") }
 
-// CLI es la invocación como CLI: run start.
+// Implementation note.
 func (c Cmd) CLI() string { return strings.Join(c.Path, " ") }
 
-// ProtocolType es el tipo de mensaje del protocolo: run.start.
-//
-// Que esto sea una función de una línea y no una tabla de traducción es el
-// punto entero del diseño. Por eso `cancel` se llama cancel y no abort: el
-// nombre del verbo de la CLI ES el nombre del mensaje del protocolo, y si
-// hubiera dos vocabularios habría que mantener el mapeo a mano para siempre.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func (c Cmd) ProtocolType() string { return strings.Join(c.Path, ".") }
 
 func p(name, typ, desc string) Param   { return Param{Name: name, Type: typ, Desc: desc} }
@@ -98,230 +98,230 @@ func pos(pp Param) Param               { pp.Positional = true; pp.Required = tru
 func def(pp Param, d string) Param     { pp.Default = d; return pp }
 func enum(pp Param, v ...string) Param { pp.Enum = v; return pp }
 
-// Registry es la superficie completa.
+// Implementation note.
 var Registry = []Cmd{
-	// ---- núcleo: proveedores y modelos -------------------------------------
-	{Path: []string{"provider", "add"}, Desc: "registrar un proveedor de modelos",
+	// Implementation note.
+	{Path: []string{"provider", "add"}, Desc: "registrar a proveedor of modelos",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre del proveedor")),
+		Params: []Param{pos(p("name", "string", "name of the proveedor")),
 			p("base-url", "string", "endpoint compatible OpenAI"),
-			p("api-key-env", "string", "variable de entorno con la clave")}},
-	{Path: []string{"model", "list"}, Desc: "listar modelos disponibles",
+			p("api-key-env", "string", "variable of entorno with the key")}},
+	{Path: []string{"model", "list"}, Desc: "list modelos disponibles",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
-	{Path: []string{"model", "enable"}, Desc: "habilitar un modelo",
-		Kind: CLIOnly, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "id del modelo"))}},
-	{Path: []string{"model", "disable"}, Desc: "deshabilitar un modelo",
-		Kind: CLIOnly, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "id del modelo"))}},
+	{Path: []string{"model", "enable"}, Desc: "habilitar a model",
+		Kind: CLIOnly, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "id of the model"))}},
+	{Path: []string{"model", "disable"}, Desc: "deshabilitar a model",
+		Kind: CLIOnly, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "id of the model"))}},
 
-	// ---- run: el verbo central ---------------------------------------------
-	// Un solo namespace: `run <actor>`. No hay `run team` ni `run agent`,
-	// porque un equipo ES un agente con kind distinto. Dos verbos obligarían al
-	// usuario a saber de qué tipo es algo antes de poder usarlo.
-	{Path: []string{"run", "start"}, Desc: "arrancar un run sobre un actor (agente o equipo)",
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
+	{Path: []string{"run", "start"}, Desc: "start a run sobre a actor (agente or equipo)",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{
-			pos(p("actor", "string", "agente o equipo a ejecutar")),
-			pos(p("prompt", "string", "objetivo del run")),
-			// --budget es OBLIGATORIO y no tiene default. Un default invisible
-			// es una factura sorpresa; que el usuario tenga que escribir el
-			// número es la única forma de que sepa que existe.
-			req(p("budget", "number", "techo de gasto en USD para el árbol completo")),
-			def(p("max-turns", "number", "techo de turnos"), "0"),
-			enum(def(p("workspace", "string", "aislamiento de filesystem"), "auto"),
+			pos(p("actor", "string", "agente or equipo a ejecutar")),
+			pos(p("prompt", "string", "objetivo of the run")),
+			// Implementation note.
+			// Implementation note.
+			// Implementation note.
+			req(p("budget", "number", "techo of spending en USD for the tree complete")),
+			def(p("max-turns", "number", "techo of turns"), "0"),
+			enum(def(p("workspace", "string", "aislamiento of filesystem"), "auto"),
 				"shared", "worktree", "copy", "none"),
-			p("sim", "bool", "ejecutar con ejecutor falso, sin gastar dinero"),
-			p("attach", "bool", "seguir la salida en vivo")}},
-	{Path: []string{"run", "list"}, Desc: "listar runs",
+			p("sim", "bool", "ejecutar with executor fake, without gastar money"),
+			p("attach", "bool", "continue the output en live")}},
+	{Path: []string{"run", "list"}, Desc: "list runs",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{p("status", "string", "filtrar por estado")}},
-	{Path: []string{"run", "show"}, Desc: "ver el estado de un run",
+		Params: []Param{p("status", "string", "filtrar for state")}},
+	{Path: []string{"run", "show"}, Desc: "see the state of a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run"))}},
-	// `run why` es la razón de existir del log estructurado: responde
-	// "¿por qué no pasa nada?" caminando el grafo de espera.
-	{Path: []string{"run", "why"}, Desc: "explicar por qué un run no avanza, y cómo desbloquearlo",
+		Params: []Param{pos(p("run", "string", "id of the run"))}},
+	// Implementation note.
+	// Implementation note.
+	{Path: []string{"run", "why"}, Desc: "explicar for what a run not advances, and how desbloquearlo",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run"))}},
-	{Path: []string{"run", "tree"}, Desc: "ver el árbol de runs y su gasto",
+		Params: []Param{pos(p("run", "string", "id of the run"))}},
+	{Path: []string{"run", "tree"}, Desc: "see the tree of runs and its spending",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run raíz"))}},
-	{Path: []string{"run", "result"}, Desc: "obtener el resultado de un run",
+		Params: []Param{pos(p("run", "string", "id of the run raíz"))}},
+	{Path: []string{"run", "result"}, Desc: "obtener the resultado of a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run"))}},
-	{Path: []string{"run", "attach"}, Desc: "seguir un run en vivo",
+		Params: []Param{pos(p("run", "string", "id of the run"))}},
+	{Path: []string{"run", "attach"}, Desc: "continue a run en live",
 		Kind: CLIOnly | Protocol, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run"))}},
-	{Path: []string{"run", "pause"}, Desc: "pausar un run",
+		Params: []Param{pos(p("run", "string", "id of the run"))}},
+	{Path: []string{"run", "pause"}, Desc: "pausar a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run"))}},
-	{Path: []string{"run", "unpause"}, Desc: "reanudar un run",
+		Params: []Param{pos(p("run", "string", "id of the run"))}},
+	{Path: []string{"run", "unpause"}, Desc: "resume a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			p("budget", "number", "nuevo techo de gasto")}},
-	// `cancel`, no `abort`. Ver ProtocolType(): el verbo de la CLI es el tipo
-	// del mensaje del protocolo, así que tener dos palabras para lo mismo
-	// significaría mantener una tabla de traducción para siempre.
-	{Path: []string{"run", "cancel"}, Desc: "cancelar un run",
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			p("budget", "number", "new techo of spending")}},
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
+	{Path: []string{"run", "cancel"}, Desc: "cancel a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			p("reason", "string", "motivo, queda en el log")}},
-	{Path: []string{"run", "fork"}, Desc: "bifurcar un run desde un seq",
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			p("reason", "string", "motivo, remains en the log")}},
+	{Path: []string{"run", "fork"}, Desc: "bifurcar a run from a seq",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			p("at-seq", "number", "seq desde donde bifurcar")}},
-	{Path: []string{"run", "replay"}, Desc: "reproducir un run desde su log, sin ejecutar efectos",
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			p("at-seq", "number", "seq from where bifurcar")}},
+	{Path: []string{"run", "replay"}, Desc: "replay a run from its log, without ejecutar effects",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			p("until-seq", "number", "reproducir hasta este seq")}},
-	{Path: []string{"run", "prompt"}, Desc: "inyectar una causa nueva en un run vivo",
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			p("until-seq", "number", "replay until this seq")}},
+	{Path: []string{"run", "prompt"}, Desc: "inyectar a cause nueva en a run live",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			pos(p("text", "string", "el mensaje")),
-			p("to", "string", "destinatario; si falta usa steer_target del blueprint"),
-			// CAS sobre seq, no sobre turn (ADR-0006). El turno no identifica
-			// una versión del estado; el seq sí.
-			p("if-seq", "number", "solo aplicar si el run está en este seq"),
-			enum(def(p("on-busy", "string", "qué hacer si el destinatario está ocupado"), "queue"),
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			pos(p("text", "string", "the mensaje")),
+			p("to", "string", "destinatario; if missing uses steer_target of the blueprint"),
+			// Implementation note.
+			// Implementation note.
+			p("if-seq", "number", "only apply if the run is en this seq"),
+			enum(def(p("on-busy", "string", "what make if the destinatario is busy"), "queue"),
 				"reject", "queue", "steer")}},
-	{Path: []string{"run", "steer"}, Desc: "corregir el rumbo de un run vivo",
+	{Path: []string{"run", "steer"}, Desc: "fix the rumbo of a run live",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			pos(p("text", "string", "la corrección")),
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			pos(p("text", "string", "the fix")),
 			p("to", "string", "destinatario"),
-			p("if-seq", "number", "solo aplicar si el run está en este seq"),
-			enum(def(p("on-busy", "string", "qué hacer si está ocupado"), "steer"),
+			p("if-seq", "number", "only apply if the run is en this seq"),
+			enum(def(p("on-busy", "string", "what make if is busy"), "steer"),
 				"reject", "queue", "steer")}},
 
-	// ---- agentes y roles ---------------------------------------------------
-	{Path: []string{"agent", "list"}, Desc: "listar agentes",
+	// Implementation note.
+	{Path: []string{"agent", "list"}, Desc: "list agentes",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
-	{Path: []string{"agent", "create"}, Desc: "crear un agente",
+	{Path: []string{"agent", "create"}, Desc: "create a agente",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre")),
-			p("model", "string", "modelo a usar"),
+		Params: []Param{pos(p("name", "string", "name")),
+			p("model", "string", "model a use"),
 			p("role", "string", "rol"),
-			p("tools", "string", "herramientas, separadas por coma"),
-			// advisory es un rasgo del rol, no un flag de una feature: significa
-			// "opina pero no decide" y cada blueprint interpreta la
-			// consecuencia (no cuenta para el quórum, no bloquea el avance...).
-			p("advisory", "bool", "opina pero no cuenta para reglas de avance")}},
-	{Path: []string{"agent", "show"}, Desc: "ver un agente",
+			p("tools", "string", "tools, separadas for coma"),
+			// Implementation note.
+			// Implementation note.
+			// Implementation note.
+			p("advisory", "bool", "opina pero not cuenta for rules of avance")}},
+	{Path: []string{"agent", "show"}, Desc: "see a agente",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre"))}},
-	{Path: []string{"agent", "tool", "policy"}, Desc: "cambiar la política de herramientas de un agente",
+		Params: []Param{pos(p("name", "string", "name"))}},
+	{Path: []string{"agent", "tool", "policy"}, Desc: "change the política of tools of a agente",
 		Kind: CLIOnly, Mutates: true, Since: 1,
 		Params: []Param{req(p("agent", "string", "agente")),
-			p("allow", "string", "herramienta a permitir"),
-			p("ask", "string", "herramienta a preguntar"),
-			p("deny", "string", "herramienta a denegar")}},
-	{Path: []string{"role", "define"}, Desc: "definir un rol reutilizable",
+			p("allow", "string", "tool a permitir"),
+			p("ask", "string", "tool a ask"),
+			p("deny", "string", "tool a denegar")}},
+	{Path: []string{"role", "define"}, Desc: "definir a rol reutilizable",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre del rol")),
-			p("advisory", "bool", "el rol opina pero no decide"),
-			p("tools", "string", "herramientas por defecto")}},
+		Params: []Param{pos(p("name", "string", "name of the rol")),
+			p("advisory", "bool", "the rol opina pero not decides"),
+			p("tools", "string", "tools for defecto")}},
 
-	// ---- blueprints --------------------------------------------------------
-	{Path: []string{"blueprint", "validate"}, Desc: "validar un blueprint sin ejecutarlo",
+	// Implementation note.
+	{Path: []string{"blueprint", "validate"}, Desc: "validar a blueprint without ejecutarlo",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("path", "string", "archivo del blueprint"))}},
-	{Path: []string{"blueprint", "create"}, Desc: "crear un blueprint",
+		Params: []Param{pos(p("path", "string", "file of the blueprint"))}},
+	{Path: []string{"blueprint", "create"}, Desc: "create a blueprint",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre"))}},
-	{Path: []string{"blueprint", "install"}, Desc: "instalar un blueprint publicado",
+		Params: []Param{pos(p("name", "string", "name"))}},
+	{Path: []string{"blueprint", "install"}, Desc: "instalar a blueprint publicado",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("ref", "string", "referencia del blueprint"))}},
+		Params: []Param{pos(p("ref", "string", "reference of the blueprint"))}},
 
-	// ---- estado compartido -------------------------------------------------
-	{Path: []string{"state", "get"}, Desc: "leer una clave del estado del run",
+	// Implementation note.
+	{Path: []string{"state", "get"}, Desc: "read a key of the state of the run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("key", "string", "clave"))}},
-	{Path: []string{"state", "set"}, Desc: "escribir una clave del estado del run",
+		Params: []Param{pos(p("key", "string", "key"))}},
+	{Path: []string{"state", "set"}, Desc: "write a key of the state of the run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
-		Params: []Param{pos(p("key", "string", "clave")), pos(p("value", "string", "valor")),
-			p("if-seq", "number", "compare-and-swap sobre el seq del run")}},
-	{Path: []string{"state", "lock"}, Desc: "tomar un lock cooperativo",
+		Params: []Param{pos(p("key", "string", "key")), pos(p("value", "string", "valor")),
+			p("if-seq", "number", "compare-and-swap sobre the seq of the run")}},
+	{Path: []string{"state", "lock"}, Desc: "tomar a lock cooperativo",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
-		Params: []Param{pos(p("key", "string", "clave")),
-			p("ttl", "string", "vencimiento del lock")}},
+		Params: []Param{pos(p("key", "string", "key")),
+			p("ttl", "string", "vencimiento of the lock")}},
 
-	// ---- eventos -----------------------------------------------------------
-	{Path: []string{"event", "emit"}, Desc: "emitir un evento custom.*",
+	// Implementation note.
+	{Path: []string{"event", "emit"}, Desc: "emitir a event custom.*",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
-		Params: []Param{pos(p("type", "string", "tipo; los agentes solo pueden custom.*")),
+		Params: []Param{pos(p("type", "string", "tipo; the agentes only can custom.*")),
 			p("payload", "string", "payload JSON")}},
-	{Path: []string{"event", "log"}, Desc: "ver el log de eventos de un run",
+	{Path: []string{"event", "log"}, Desc: "see the log of events of a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "id del run")),
-			p("type", "string", "filtrar por tipo"),
-			p("since-seq", "number", "desde este seq")}},
-	{Path: []string{"event", "trace"}, Desc: "seguir la cadena causal de un evento",
+		Params: []Param{pos(p("run", "string", "id of the run")),
+			p("type", "string", "filtrar for tipo"),
+			p("since-seq", "number", "from this seq")}},
+	{Path: []string{"event", "trace"}, Desc: "continue the cadena causal of a event",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("event", "string", "id del evento"))}},
+		Params: []Param{pos(p("event", "string", "id of the event"))}},
 
-	// ---- triggers ----------------------------------------------------------
-	// `trigger`, no `schedule`: cron es UNA de las fuentes. Llamarlo schedule
-	// haría que webhook y file-watch parezcan features de segunda.
-	{Path: []string{"trigger", "create"}, Desc: "crear un disparador",
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
+	{Path: []string{"trigger", "create"}, Desc: "create a disparador",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{
-			pos(p("name", "string", "nombre del trigger")),
+			pos(p("name", "string", "name of the trigger")),
 			req(p("on", "string", "cron:|every:|at:|webhook:|file:|event:")),
 			req(p("then", "string", "run:|emit:|notify:")),
-			// Un trigger sin techo de gasto por período es una suscripción
-			// abierta a la factura del proveedor.
-			req(p("budget", "number", "techo de gasto por período")),
-			req(p("budget-period", "string", "período del techo: day|week|month")),
-			enum(def(p("on-missed", "string", "qué hacer si se perdió una ejecución"), "skip"),
+			// Implementation note.
+			// Implementation note.
+			req(p("budget", "number", "techo of spending for período")),
+			req(p("budget-period", "string", "período of the techo: day|week|month")),
+			enum(def(p("on-missed", "string", "what make if is perdió a execution"), "skip"),
 				"skip", "run-once", "run-all"),
-			enum(def(p("overlap", "string", "qué hacer si la anterior sigue corriendo"), "skip"),
+			enum(def(p("overlap", "string", "what make if the anterior continues corriendo"), "skip"),
 				"skip", "queue", "parallel", "cancel-previous")}},
-	{Path: []string{"trigger", "list"}, Desc: "listar disparadores",
+	{Path: []string{"trigger", "list"}, Desc: "list disparadores",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
-	{Path: []string{"trigger", "show"}, Desc: "ver un disparador",
+	{Path: []string{"trigger", "show"}, Desc: "see a disparador",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre"))}},
-	{Path: []string{"trigger", "pause"}, Desc: "pausar un disparador",
+		Params: []Param{pos(p("name", "string", "name"))}},
+	{Path: []string{"trigger", "pause"}, Desc: "pausar a disparador",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "nombre"))}},
+		Params: []Param{pos(p("name", "string", "name"))}},
 
-	// ---- inbox: el humano en el bucle --------------------------------------
-	{Path: []string{"inbox"}, Desc: "ver preguntas pendientes",
+	// Implementation note.
+	{Path: []string{"inbox"}, Desc: "see questions pendientes",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
-	{Path: []string{"inbox", "approve"}, Desc: "aprobar una solicitud",
+	{Path: []string{"inbox", "approve"}, Desc: "aprobar a solicitud",
 		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
-		Params: []Param{pos(p("id", "string", "id del item"))}},
-	{Path: []string{"inbox", "reject"}, Desc: "rechazar una solicitud",
+		Params: []Param{pos(p("id", "string", "id of the item"))}},
+	{Path: []string{"inbox", "reject"}, Desc: "rechazar a solicitud",
 		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
-		Params: []Param{pos(p("id", "string", "id del item")),
+		Params: []Param{pos(p("id", "string", "id of the item")),
 			p("reason", "string", "motivo")}},
-	{Path: []string{"inbox", "reply"}, Desc: "responder una pregunta",
+	{Path: []string{"inbox", "reply"}, Desc: "responder a question",
 		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
-		Params: []Param{pos(p("id", "string", "id del item")),
-			pos(p("text", "string", "la respuesta"))}},
+		Params: []Param{pos(p("id", "string", "id of the item")),
+			pos(p("text", "string", "the answer"))}},
 
-	// ---- evaluación --------------------------------------------------------
-	// eval sale gratis del reducer puro: es el mismo fold sobre casos fijos.
-	{Path: []string{"eval", "run"}, Desc: "correr una suite de evaluación",
+	// Implementation note.
+	// Implementation note.
+	{Path: []string{"eval", "run"}, Desc: "correr a suite of evaluación",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
-		Params: []Param{pos(p("suite", "string", "archivo de la suite")),
-			req(p("budget", "number", "techo de gasto de la suite"))}},
-	{Path: []string{"eval", "compare"}, Desc: "comparar dos corridas de evaluación",
+		Params: []Param{pos(p("suite", "string", "file of the suite")),
+			req(p("budget", "number", "techo of spending of the suite"))}},
+	{Path: []string{"eval", "compare"}, Desc: "comparar two corridas of evaluación",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
 		Params: []Param{pos(p("a", "string", "corrida A")), pos(p("b", "string", "corrida B"))}},
 
-	// ---- meta --------------------------------------------------------------
-	{Path: []string{"design"}, Desc: "abrir el diseñador interactivo de blueprints",
+	// Implementation note.
+	{Path: []string{"design"}, Desc: "open the diseñador interactivo of blueprints",
 		Kind: CLIOnly, Since: 1},
-	// `schema` es lo que hace la superficie reflexiva: un agente lee esto y
-	// descubre qué sabe hacer el sistema, sin que nadie le escriba la lista.
-	{Path: []string{"schema"}, Desc: "emitir el manifiesto de la superficie",
+	// Implementation note.
+	// Implementation note.
+	{Path: []string{"schema"}, Desc: "emitir the manifest of the surface",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
-	{Path: []string{"serve"}, Desc: "servir el protocolo NDJSON por stdio o socket",
+	{Path: []string{"serve"}, Desc: "servir the protocolo NDJSON for stdio or socket",
 		Kind: CLIOnly, Since: 1,
 		Params: []Param{def(p("listen", "string", "dirección; vacío = stdio"), "")}},
 }
 
-// ToolDecl es una herramienta tal como la ve un agente o un cliente MCP.
+// Implementation note.
 type ToolDecl struct {
 	Name         string         `json:"name"`
 	Description  string         `json:"description"`
@@ -334,13 +334,13 @@ type ToolDecl struct {
 	ProtocolType string         `json:"protocol_type"`
 }
 
-// Manifest es la superficie proyectada a un documento único y versionado.
+// Implementation note.
 type Manifest struct {
 	SurfaceVersion int        `json:"surface_version"`
 	Tools          []ToolDecl `json:"tools"`
 }
 
-// BuildManifest proyecta el Registry al manifiesto de herramientas.
+// Implementation note.
 func BuildManifest() Manifest {
 	m := Manifest{SurfaceVersion: SurfaceVersion}
 	for _, c := range Registry {
@@ -349,8 +349,8 @@ func BuildManifest() Manifest {
 		}
 		pol := c.ToolPolicy
 		if pol == "" {
-			// Sin política declarada, deny. Un default permisivo convierte
-			// cada olvido en un agujero de seguridad silencioso.
+			// Implementation note.
+			// Implementation note.
 			pol = PolicyDeny
 		}
 		m.Tools = append(m.Tools, ToolDecl{
@@ -369,7 +369,7 @@ func BuildManifest() Manifest {
 	return m
 }
 
-// jsonSchema deriva el schema de entrada de los Params declarados.
+// Implementation note.
 func jsonSchema(c Cmd) map[string]any {
 	props := map[string]any{}
 	var required []string
@@ -396,11 +396,11 @@ func jsonSchema(c Cmd) map[string]any {
 			required = append(required, name)
 		}
 	}
-	// Todo lo que lee acepta --json. Se agrega acá y no a mano en cada comando
-	// para que sea imposible olvidarse: una salida legible por máquina que
-	// existe "en la mayoría" de los comandos no sirve para automatizar nada.
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
 	if !c.Mutates {
-		props["json"] = map[string]any{"type": "boolean", "description": "salida JSON"}
+		props["json"] = map[string]any{"type": "boolean", "description": "output JSON"}
 	}
 	s := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
@@ -409,7 +409,7 @@ func jsonSchema(c Cmd) map[string]any {
 	return s
 }
 
-// Lookup busca un comando por su path.
+// Implementation note.
 func Lookup(path ...string) *Cmd {
 	for i := range Registry {
 		if len(Registry[i].Path) != len(path) {

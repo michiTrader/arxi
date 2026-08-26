@@ -1,9 +1,9 @@
-# Catálogo de eventos
+# Catálogo of events
 
-El log es la fuente de verdad. Este documento es el contrato de lo que puede
+The log is the source of truth. Este document is the contract of lo that can
 aparecer en él.
 
-## Forma común
+## Forma common
 
 ```json
 {
@@ -21,46 +21,46 @@ aparecer en él.
 }
 ```
 
-| campo | para qué |
+| field | for what |
 |---|---|
-| `seq` | Orden dentro del run. Lo asigna el escritor único, **nunca** el reducer. |
-| `type` | Namespace jerárquico con punto. Los watchers matchean por prefijo (`stage.*`), así que el punto no es cosmético. |
-| `source` | `human`, `agent`, `runtime`, `trigger`. Los eventos `runtime` (derivados) **no** vuelven a disparar watchers: si lo hicieran, un watcher sobre `stage.*` entraría en bucle con los `stage.advanced` que él mismo causó. |
-| `correlation_id` | Agrupa la cadena causal completa desde la causa raíz. |
-| `caused_by` | Padres directos. Junto con `correlation_id` permite que `event trace` reconstruya el árbol. |
-| `depth` | Profundidad causal. Es el freno de la cascada de watchers (§`max_depth`). |
+| `seq` | Orden inside of the run. Lo assigns the writer single, **never** the reducer. |
+| `type` | Namespace jerárquico with punto. The watchers matchean for prefijo (`stage.*`), so that the punto not is cosmético. |
+| `source` | `human`, `agent`, `runtime`, `trigger`. The events `runtime` (derived) **not** vuelven a disparar watchers: if lo hicieran, a watcher sobre `stage.*` entraría en bucle with the `stage.advanced` that él same causó. |
+| `correlation_id` | Agrupa the cadena causal complete from the cause raíz. |
+| `caused_by` | Padres directos. Junto with `correlation_id` permite that `event trace` reconstruya the tree. |
+| `depth` | Profundidad causal. Es the freno of the cascada of watchers (§`max_depth`). |
 
-## Ciclo de vida del run
+## Ciclo of vida of the run
 
 | tipo | payload | notas |
 |---|---|---|
-| `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `parent_run_id?`, `spawn_depth?` | `blueprint_sha` congela la config: sin él, un replay usaría la config de hoy. |
-| `run.prompt` | `text`, `to?` | Inyecta una causa nueva en un run vivo. |
+| `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `parent_run_id?`, `spawn_depth?` | `blueprint_sha` congela the config: without él, a replay usaría the config of today. |
+| `run.prompt` | `text`, `to?` | Inyecta a cause nueva en a run live. |
 | `run.paused` / `run.unpaused` | — | |
 | `run.cancelled` | `reason?` | |
 | `run.expired` | — | |
-| `run.quiescent` | **`diagnosis`** (obligatorio), `stage` | Ver abajo. |
+| `run.quiescent` | **`diagnosis`** (required), `stage` | Ver abajo. |
 | `run.result` | `summary`, `result_from?` | |
 
 ### `run.quiescent`
 
-No es un estado terminal, es un aviso. `diagnosis` es **obligatorio**: un evento
-que solo dice "el run está quieto" no le sirve a nadie. Tiene que nombrar la
-causa concreta — la regla de avance que no se cumple, o quién está esperando qué.
+No is a state terminal, is a aviso. `diagnosis` is **required**: a event
+that only dice "the run is still" not le works a nadie. Tiene that nombrar the
+cause concrete — the rule of avance that not is meets, or who is waiting what.
 
-Si nadie observa el evento, el run falla arrastrando el diagnóstico en `result`.
+Si nadie observa the event, the run fails arrastrando the diagnóstico en `result`.
 
 ## Etapas
 
 | tipo | payload |
 |---|---|
 | `stage.entered` | `stage`, `index` |
-| `stage.submitted` | — (el actor es quien entregó) |
+| `stage.submitted` | — (the actor is who entregó) |
 | `stage.advanced` | `from`, `to`, `to_index` |
 | `stage.timeout` | `stage` |
 
-`stage.advanced` **siempre** precede al `stage.entered` correspondiente. El orden
-entre ellos es semántico, y por eso `orderEffects` usa un sort estable.
+`stage.advanced` **always** precede to the `stage.entered` correspondiente. The order
+between ellos is semántico, and for that `orderEffects` uses a sort estable.
 
 ## Agentes
 
@@ -74,33 +74,33 @@ entre ellos es semántico, y por eso `orderEffects` usa un sort estable.
 | `agent.unblocked` | — |
 | `agent.failed` | `error` |
 
-### La regla de `blocked_ref`
+### The rule of `blocked_ref`
 
-**Todo `agent.blocked` debe traer `blocked_ref`: un objeto con los datos
-necesarios para desbloquear.**
+**Todo `agent.blocked` must traer `blocked_ref`: a objeto with the datos
+necesarios for unblock.**
 
-Esta es la regla que hace que `run why` no tenga casos cableados. En vez de una
-lista de `if` por cada situación conocida, `why` camina la referencia y arma el
-comando concreto:
+Esta is the rule that makes that `run why` not tenga cases cableados. En vez of a
+list of `if` for each situación conocida, `why` walks the reference and builds the
+command concrete:
 
-| `blocked_on` | `blocked_ref` | remedio derivado |
+| `blocked_on` | `blocked_ref` | remedy derived |
 |---|---|---|
 | `approval` | `{inbox_id, tool, policy}` | `iash inbox approve <inbox_id>` |
 | `lock` | `{key, holder}` | `iash state unlock <key>` |
-| `peer` | `{peer}` | (informativo: espera en cadena) |
+| `peer` | `{peer}` | (informativo: waits en cadena) |
 | `budget` | `{}` | `iash run unpause <run> --budget <mayor>` |
 | `timer` | `{timer_id}` | (informativo) |
 | `tool` | `{tool}` | (informativo) |
 | `workspace` | `{path}` | `iash run show <run> --workspace` |
 
-Cuando aparezca una razón nueva de bloqueo, trae su referencia y `why` la muestra
-sin cambios de código. Si alguien emite un bloqueo sin referencia, `why` lo
-delata explícitamente en vez de mostrar una línea vacía:
+Cuando aparezca a reason nueva of block, trae its reference and `why` the shows
+without cambios of code. Si someone emite a block without reference, `why` lo
+delata explícitamente en vez of show a línea vacía:
 
-> bloqueado sin referencia estructurada: es una violación del schema, todo
-> waiting:* debe traer blocked_ref
+> blocked without reference structured: is a violación of the schema, everything
+> waiting:* must traer blocked_ref
 
-## Herramientas y modelo
+## Herramientas and model
 
 | tipo | payload |
 |---|---|
@@ -109,8 +109,8 @@ delata explícitamente en vez de mostrar una línea vacía:
 | `tool.call_denied` | `tool`, `policy` |
 | `llm.response` | `cost_usd`, `tokens_in?`, `tokens_out?`, `model?` |
 
-`tool.call_denied` con `policy: "ask"` **no es un error**: es una pregunta. Crea
-un item de inbox y deja `blocked_ref` para que el remedio sea automático.
+`tool.call_denied` with `policy: "ask"` **not is a error**: is a question. Crea
+a item of inbox and leaves `blocked_ref` for that the remedy sea automático.
 
 ## Recursos
 
@@ -119,9 +119,9 @@ un item de inbox y deja `blocked_ref` para que el remedio sea automático.
 | `lock.acquired` / `lock.released` | `key` |
 | `resource.conflict` | `path`, `agents?` |
 
-`resource.conflict` no falla el run. Despierta a quien lo observe; si nadie
-observa, queda registrado y la quiescencia lo detecta más tarde. Fallar acá haría
-que un merge conflict trivial mate media hora de trabajo.
+`resource.conflict` not fails the run. Despierta a who lo observe; if nadie
+observa, remains registrado and the quiescence lo detecta more tarde. Fallar here haría
+that a merge conflict trivial mate media hour of work.
 
 ## Presupuesto
 
@@ -130,13 +130,13 @@ que un merge conflict trivial mate media hora de trabajo.
 | `budget.warning` | `tree_spent_usd`, `budget_usd`, `pct` |
 | `budget.exceeded` | `tree_spent_usd`, `budget_usd` |
 
-Los dos reportan el gasto del **árbol**, no del run: con spawn anidado, el gasto
-del run solo es una fracción engañosa.
+The two reportan the spending of the **tree**, not of the run: with spawn anidado, the spending
+of the run only is a fracción engañosa.
 
-`budget.warning` se emite **una vez** (marcado en `State.BudgetWarned`). Un aviso
-que se repite en cada llamada es un aviso que el usuario aprende a ignorar.
+`budget.warning` is emite **a vez** (marcado en `State.BudgetWarned`). A aviso
+that is repeats en each call is a aviso that the usuario aprende a ignorar.
 
-## Humano en el bucle
+## Humano en the bucle
 
 | tipo | payload |
 |---|---|
@@ -144,8 +144,8 @@ que se repite en cada llamada es un aviso que el usuario aprende a ignorar.
 | `inbox.replied` | `inbox_id`, `text` |
 | `inbox.timeout` | `inbox_id` |
 
-`on_timeout` se decide **cuando se crea la pregunta**, no cuando expira: en el
-momento del timeout ya no hay nadie mirando.
+`on_timeout` is decides **when is creates the question**, not when expires: en the
+momento of the timeout ya not there is nadie mirando.
 
 ## Reloj
 
@@ -153,13 +153,13 @@ momento del timeout ya no hay nadie mirando.
 |---|---|
 | `timer.tick` | `timer_id` |
 
-Los timers se arman con offsets relativos en milisegundos, no timestamps
-absolutos. Eso es lo que permite que el reloj virtual de `--sim` ejecute el mismo
-fold sin esperar media hora de verdad.
+The timers is arman with offsets relativos en milisegundos, not timestamps
+absolutos. Eso is lo that permite that the clock virtual of `--sim` ejecute the same
+fold without wait media hour of truth.
 
-## Eventos de usuario
+## Eventos of usuario
 
-`custom.*` está reservado para eventos emitidos por agentes vía
-`iash event emit`. Los agentes **solo** pueden emitir en ese namespace: si
-pudieran emitir `stage.advanced`, podrían saltarse la regla de avance de su
-propio blueprint.
+`custom.*` is reservado for events emitidos for agentes vía
+`iash event emit`. The agentes **only** can emitir en ese namespace: if
+pudieran emitir `stage.advanced`, podrían saltarse the rule of avance of its
+own blueprint.
