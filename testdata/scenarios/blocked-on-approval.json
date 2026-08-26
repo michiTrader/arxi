@@ -55,7 +55,7 @@
       {
         "id": "inbox-1",
         "kind": "tool_approval",
-        "question": "aprobar bash for backend?",
+        "question": "approve bash for backend?",
         "agent": "backend",
         "on_timeout": "deny"
       }
@@ -80,19 +80,19 @@
       },
       {
         "depth": 1,
-        "text": "backend: waiting (approval) from seq 5"
+        "text": "backend: waiting (approval) since seq 5"
       },
       {
         "depth": 2,
-        "text": "waits approval of the tool \"bash\" (inbox inbox-1)"
+        "text": "waits for approval of the tool \"bash\" (inbox inbox-1)"
       },
       {
         "depth": 2,
-        "text": "for not volver a ask for this tool:"
+        "text": "to avoid being asked about this tool again:"
       },
       {
         "depth": 1,
-        "text": "budget: 0.4200 of 5.0000 USD spent en the tree"
+        "text": "budget: 0.4200 of 5.0000 USD spent in the tree"
       }
     ],
     "fix": [

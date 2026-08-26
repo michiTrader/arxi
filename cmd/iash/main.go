@@ -1,10 +1,10 @@
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Command iash is the binary.
+//
+// Today it truly implements three commands (schema, surface, why) and for
+// everything else it answers "declared but not implemented" with the exact name
+// of the capability. That is on purpose: the surface is frozen and verified by
+// tests BEFORE the executor exists, so adding a new command is implementing
+// something that was already promised, not inventing a new promise.
 package main
 
 import (
@@ -44,15 +44,15 @@ func main() {
 		return
 	}
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// Everything else: if it is declared, say so precisely. An "unknown command"
+	// when the command DOES exist in the surface is the worst possible answer:
+	// it sends the user hunting for a typo they never made.
 	for n := len(args); n >= 1; n-- {
 		if c := surface.Lookup(args[:n]...); c != nil {
 			fmt.Fprintf(os.Stderr,
-				"iash %s is declared in the surface but not yet implemented.\n\n"+
+				"iash %s is declared in the surface but not implemented yet.\n\n"+
 					"  description: %s\n  tool:        %s\n  protocol:    %s\n  since:       surface v%d\n\n"+
-					"See the complete surface: iash surface\n",
+					"See the whole surface: iash surface\n",
 				c.CLI(), c.Desc, c.Name(), c.ProtocolType(), c.Since)
 			os.Exit(2)
 		}
@@ -64,24 +64,24 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`iash - systems of agentes that is can depurar
+	fmt.Print(`iash - agent systems you can actually debug
 
-USO
+USAGE
   iash <command> [args]
 
-IMPLEMENTADO HOY
-  schema            emitir the manifest of the surface (JSON)
-  surface           see the surface complete, readable
-  why <file>     explicar for what a run not advances
-  version           version of the binario and of the surface
+IMPLEMENTED TODAY
+  schema          emit the surface manifest (JSON)
+  surface         see the whole surface, human readable
+  why <file>      explain why a run is not advancing
+  version         version of the binary and of the surface
 
-The rest of the surface is declared and verificada for tests, pero still
-without executor. 'iash surface' list everything lo that va a existir.
+The rest of the surface is declared and verified by tests, but has no executor
+yet. 'iash surface' lists everything that is going to exist.
 
-DISEÑO
-  docs/design/10-execution.md   the model of execution
-  docs/adr/                     for what each decision
-  spec/events.md                the catálogo of events
+DESIGN
+  docs/design/10-execution.md   the execution model
+  docs/adr/                     why each decision
+  spec/events.md                the event catalogue
 `)
 }
 
@@ -93,39 +93,39 @@ func cmdSchema() {
 	}
 }
 
-// Implementation note.
-// Implementation note.
+// cmdSurface renders the SAME manifest as cmdSchema, in human format.
+// Two views, one source: if they diverge it is a bug, not a product decision.
 func cmdSurface() {
 	m := surface.BuildManifest()
-	fmt.Printf("surface v%d · %d capabilities expuestas a agentes\n", m.SurfaceVersion, len(m.Tools))
+	fmt.Printf("surface v%d · %d capabilities exposed to agents\n", m.SurfaceVersion, len(m.Tools))
 
-	grupo := ""
+	group := ""
 	for _, c := range surface.Registry {
-		if g := c.Path[0]; g != grupo {
-			grupo = g
-			fmt.Printf("\n%s\n", strings.ToUpper(grupo))
+		if g := c.Path[0]; g != group {
+			group = g
+			fmt.Printf("\n%s\n", strings.ToUpper(group))
 		}
-		var marcas []string
+		var marks []string
 		if c.Kind&surface.AgentTool != 0 {
-			marcas = append(marcas, "tool")
+			marks = append(marks, "tool")
 		}
 		if c.Kind&surface.Protocol != 0 {
-			marcas = append(marcas, "proto")
+			marks = append(marks, "proto")
 		}
 		if c.Mutates {
-			marcas = append(marcas, "muta")
+			marks = append(marks, "mutates")
 		}
 		if c.ToolPolicy != "" {
-			marcas = append(marcas, string(c.ToolPolicy))
+			marks = append(marks, string(c.ToolPolicy))
 		}
-		fmt.Printf("  %-28s %-46s %s\n", c.CLI(), c.Desc, strings.Join(marcas, ","))
+		fmt.Printf("  %-28s %-46s %s\n", c.CLI(), c.Desc, strings.Join(marks, ","))
 	}
-	fmt.Printf("\nTotal declared (incluye CLI-only): %d\n", len(surface.Registry))
+	fmt.Printf("\nTotal declared (includes CLI-only): %d\n", len(surface.Registry))
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// cmdWhy reads a state from JSON and explains it. That this works with no
+// executor is the proof that the reducer is genuinely pure: `run why` needs
+// nothing from the runtime, only the state that came out of the fold.
 func cmdWhy(args []string) {
 	asJSON := false
 	var path string
@@ -137,9 +137,9 @@ func cmdWhy(args []string) {
 		}
 	}
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "uso: iash why <file.json> [--json]\n\n"+
-			"The file can ser {\"state\":..., \"config\":...} or a State suelto.\n"+
-			"Try with: testdata/scenarios/blocked-on-approval.json")
+		fmt.Fprintln(os.Stderr, "usage: iash why <file.json> [--json]\n\n"+
+			"The file can be {\"state\":..., \"config\":...} or a bare State.\n"+
+			"Try: testdata/scenarios/blocked-on-approval.json")
 		os.Exit(2)
 	}
 	raw, err := os.ReadFile(path)
@@ -180,7 +180,7 @@ func cmdWhy(args []string) {
 		fmt.Printf("%s└─ %s\n", strings.Repeat("   ", l.Depth-1), l.Text)
 	}
 	if len(w.Fix) > 0 {
-		fmt.Println("\nposibles remedies:")
+		fmt.Println("\npossible remedies:")
 		for _, f := range w.Fix {
 			fmt.Printf("  $ %s\n", f)
 		}

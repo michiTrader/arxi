@@ -1,89 +1,88 @@
-# ADR-0005: A only mechanism of inyección da queue, follow-up and coalescing
+# ADR-0005: A single injection mechanism gives queue, follow-up and coalescing
 
-- Estado: aceptada
-- Afecta a: `internal/kernel/decides.go` (`applyInjection`, `applyTurnDone`), `internal/kernel/state.go` (`PendingCauses`)
+- Status: accepted
+- Affects: `internal/kernel/decide.go` (`applyInjection`, `applyTurnDone`), `internal/kernel/state.go` (`PendingCauses`)
 
-## Contexto
+## Context
 
-Tres requerimientos that arrived for separado and parecen three features:
+Three requirements that arrived separately and look like three features:
 
-1. **`on_busy: queue`** — if le send something a a agente that is thinking, the
-   text not is loses ni lo interrumpe: waits.
-2. **Follow-up** — mandarle a segunda instrucción a a agente that ya is
-   working en the first.
-3. **Coalescing** — if arrive five causes of wake while is busy, not
-   open five turns.
+1. **`on_busy: queue`** — if you send something to an agent that is thinking, the
+   text is neither lost nor does it interrupt them: it waits.
+2. **Follow-up** — sending a second instruction to an agent who is already
+   working on the first.
+3. **Coalescing** — if five wake causes arrive while it is busy, do not open five
+   turns.
 
-The way natural of implementarlas is a for a: a cola for (1), a field of
-continuación for (2), a contador with ventana for (3). Tres estructuras that
-interactúan, and the interacciones are where viven the bugs: ¿the follow-up entra a
-the cola or the saltea? ¿the coalescing cuenta the that are en cola?
+The natural way to implement them is one at a time: a queue for (1), a
+continuation field for (2), a counter with a window for (3). Three structures
+that interact, and the interactions are where the bugs live: does the follow-up
+go into the queue or skip it? does the coalescing count the ones already queued?
 
-## Decisión
+## Decision
 
-A only field of state: `PendingCauses`.
+A single state field: `PendingCauses`.
 
-Tres tipos of event (`run.prompt`, `agent.steered`, `agent.notified`) entran for
-the **same** función, `applyInjection`, because are the same done with distinta
-procedencia: *llegó text for someone*. Si the destinatario is busy, the
-text is acumula en `PendingCauses`. Cuando the turn current termina,
-`applyTurnDone` drena the list en **a** `SpawnTurn`.
+Three event types (`run.prompt`, `agent.steered`, `agent.notified`) go through
+the **same** function, `applyInjection`, because they are the same fact with
+different provenance: *text arrived for somebody*. If the addressee is busy, the
+text accumulates in `PendingCauses`. When the current turn ends, `applyTurnDone`
+drains the list into **one** `SpawnTurn`.
 
-The three features caen solas:
+The three features fall out on their own:
 
-- Acumular en vez of lose **is** `on_busy: queue`.
-- `queue` sobre someone that ya works **is** follow-up.
-- Drenar N causes en a `SpawnTurn` **is** coalescing.
+- Accumulating instead of losing **is** `on_busy: queue`.
+- `queue` on somebody who is already working **is** follow-up.
+- Draining N causes into one `SpawnTurn` **is** coalescing.
 
-No there is interacción between features that pueda tener bugs, because not there is three
-features. Hay a mechanism.
+There is no interaction between features that could have bugs, because there are
+not three features. There is one mechanism.
 
-### The coalescing is audita
+### The coalescing is audited
 
-`SpawnTurn.Coalesced` carries the causes that is fusionaron.
+`SpawnTurn.Coalesced` carries the causes that were merged.
 
-Esto not is telemetría opcional. N causes fusionadas en 1 turn is a
-**multiplicador direct of facturación**: is the diferencia between pay five
-turns and pay one. Si the number not remains en the log, nadie can verificar that the
-coalescing hizo lo that dice, ni explicar a factura, ni notar that left of
-work after of a refactor. A saving that not is can auditar is a saving
-that nadie va a creer.
+This is not optional telemetry. N causes merged into 1 turn is a **direct
+billing multiplier**: it is the difference between paying for five turns and
+paying for one. If the number does not end up in the log, nobody can verify the
+coalescing did what it claims, nor explain an invoice, nor notice it stopped
+working after a refactor. A saving you cannot audit is a saving nobody is going
+to believe.
 
-### The broadcast not wakes a the inactive
+### Broadcast does not wake the inactive
 
-A bug that encontró a test. A `steer` with destinatario `*` abría a turn for
-a member `advisory` that nadie había activado still:
+A bug found by a test. A `steer` addressed to `*` opened a turn for an `advisory`
+member nobody had activated yet:
 
 ```go
 if target == "*" && m.State == MemberInactive { continue }
 ```
 
-A broadcast le habla a who is participando, not a who still not was
-invocado. Sin this filtro, each fix to the equipo pays a turn for each
-opinador that nadie called — and the advisory existen justamente for not costar
-plata until that is the needs.
+A broadcast talks to whoever is participating, not to whoever has not been
+invoked yet. Without this filter, every correction to the team pays for a turn
+for each commenter nobody called — and advisory members exist precisely so they
+cost no money until they are needed.
 
-## Alternativa discarded
+## Discarded alternative
 
-**Interrumpir the turn en curso and reiniciarlo with the contexto new.** Es lo that
-parece more receptivo. Se descarta because tira a the basura the work ya pagado:
-the turn interrumpido ya consumió tokens. Con inyecciones frecuentes, the agente
-never termina a turn and the spending crece without producir nothing. Esperar the fin of the
-turn is more lento and estrictamente more barato.
+**Interrupt the running turn and restart it with the new context.** That is what
+looks more responsive. Discarded because it throws away work already paid for:
+the interrupted turn already consumed tokens. With frequent injections, the agent
+never finishes a turn and spending grows without producing anything. Waiting for
+the end of the turn is slower and strictly cheaper.
 
-## Consecuencias
+## Consequences
 
-- A inyección a someone busy tarda until the fin of the turn en tener effect.
-  Es the cost aceptado a change of not quemar work pagado.
-- `PendingCauses` is parte of the state, so that is reconstruye for fold and
-  `run why` can reportar "there is 3 causes waiting that termine the turn".
-- The three tipos of event share camino, so that a bug en the logic of
-  encolado is manifiesta en the three a the vez — more visible, and with a only lugar
-  for arreglarlo.
+- An injection to somebody busy takes until the end of the turn to have effect.
+  That is the accepted cost of not burning paid work.
+- `PendingCauses` is part of the state, so it is reconstructed by fold and
+  `run why` can report "there are 3 causes waiting for the turn to finish".
+- The three event types share a path, so a bug in the queueing logic shows up in
+  all three at once — more visible, and with a single place to fix it.
 
-## Cómo is verifies
+## How it is verified
 
-`decide_test.go` cubre: that a inyección sobre someone busy not genere
-`SpawnTurn` en the momento, that to the terminar the turn is genere exactly one with
-all the causes en `Coalesced`, and that a broadcast not toque a the members
-`MemberInactive`. Ese último test is the that encontró the bug.
+`decide_test.go` covers: that an injection onto somebody busy generates no
+`SpawnTurn` at that moment, that when the turn ends exactly one is generated with
+all the causes in `Coalesced`, and that a broadcast does not touch
+`MemberInactive` members. That last test is the one that found the bug.

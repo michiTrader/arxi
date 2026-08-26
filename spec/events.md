@@ -1,9 +1,9 @@
-# Catálogo of events
+# Event catalogue
 
-The log is the source of truth. Este document is the contract of lo that can
-aparecer en él.
+The log is the source of truth. This document is the contract for what may appear
+in it.
 
-## Forma common
+## Common shape
 
 ```json
 {
@@ -21,50 +21,50 @@ aparecer en él.
 }
 ```
 
-| field | for what |
+| field | why |
 |---|---|
-| `seq` | Orden inside of the run. Lo assigns the writer single, **never** the reducer. |
-| `type` | Namespace jerárquico with punto. The watchers matchean for prefijo (`stage.*`), so that the punto not is cosmético. |
-| `source` | `human`, `agent`, `runtime`, `trigger`. The events `runtime` (derived) **not** vuelven a disparar watchers: if lo hicieran, a watcher sobre `stage.*` entraría en bucle with the `stage.advanced` that él same causó. |
-| `correlation_id` | Agrupa the cadena causal complete from the cause raíz. |
-| `caused_by` | Padres directos. Junto with `correlation_id` permite that `event trace` reconstruya the tree. |
-| `depth` | Profundidad causal. Es the freno of the cascada of watchers (§`max_depth`). |
+| `seq` | Order within the run. Assigned by the single writer, **never** by the reducer. |
+| `type` | Hierarchical namespace with dots. Watchers match by prefix (`stage.*`), so the dot is not cosmetic. |
+| `source` | `human`, `agent`, `runtime`, `trigger`. `runtime` (derived) events do **not** re-trigger watchers: if they did, a watcher on `stage.*` would loop on the `stage.advanced` it caused itself. |
+| `correlation_id` | Groups the whole causal chain from the root cause. |
+| `caused_by` | Direct parents. Together with `correlation_id` it lets `event trace` rebuild the tree. |
+| `depth` | Causal depth. It is the brake on the watcher cascade (§`max_depth`). |
 
-## Ciclo of vida of the run
+## Run lifecycle
 
-| tipo | payload | notas |
+| type | payload | notes |
 |---|---|---|
-| `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `parent_run_id?`, `spawn_depth?` | `blueprint_sha` congela the config: without él, a replay usaría the config of today. |
-| `run.prompt` | `text`, `to?` | Inyecta a cause nueva en a run live. |
+| `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `parent_run_id?`, `spawn_depth?` | `blueprint_sha` freezes the config: without it, a replay would use today's config. |
+| `run.prompt` | `text`, `to?` | Injects a new cause into a live run. |
 | `run.paused` / `run.unpaused` | — | |
 | `run.cancelled` | `reason?` | |
 | `run.expired` | — | |
-| `run.quiescent` | **`diagnosis`** (required), `stage` | Ver abajo. |
+| `run.quiescent` | **`diagnosis`** (required), `stage` | See below. |
 | `run.result` | `summary`, `result_from?` | |
 
 ### `run.quiescent`
 
-No is a state terminal, is a aviso. `diagnosis` is **required**: a event
-that only dice "the run is still" not le works a nadie. Tiene that nombrar the
-cause concrete — the rule of avance that not is meets, or who is waiting what.
+It is not a terminal state, it is a notice. `diagnosis` is **required**: an event
+that only says "the run is idle" is useless to everybody. It has to name the
+concrete cause — the advance rule that is not met, or who is waiting for what.
 
-Si nadie observa the event, the run fails arrastrando the diagnóstico en `result`.
+If nobody observes the event, the run fails carrying the diagnosis in `result`.
 
-## Etapas
+## Stages
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `stage.entered` | `stage`, `index` |
-| `stage.submitted` | — (the actor is who entregó) |
+| `stage.submitted` | — (the actor is whoever submitted) |
 | `stage.advanced` | `from`, `to`, `to_index` |
 | `stage.timeout` | `stage` |
 
-`stage.advanced` **always** precede to the `stage.entered` correspondiente. The order
-between ellos is semántico, and for that `orderEffects` uses a sort estable.
+`stage.advanced` **always** precedes the corresponding `stage.entered`. The order
+between them is semantic, and that is why `orderEffects` uses a stable sort.
 
-## Agentes
+## Agents
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `agent.activated` | — |
 | `agent.steered` | `text`, `to?` |
@@ -74,92 +74,91 @@ between ellos is semántico, and for that `orderEffects` uses a sort estable.
 | `agent.unblocked` | — |
 | `agent.failed` | `error` |
 
-### The rule of `blocked_ref`
+### The `blocked_ref` rule
 
-**Todo `agent.blocked` must traer `blocked_ref`: a objeto with the datos
-necesarios for unblock.**
+**Every `agent.blocked` must bring `blocked_ref`: an object with the data needed
+to unblock it.**
 
-Esta is the rule that makes that `run why` not tenga cases cableados. En vez of a
-list of `if` for each situación conocida, `why` walks the reference and builds the
-command concrete:
+This is the rule that keeps `run why` free of hard-wired cases. Instead of a list
+of `if`s for every known situation, `why` walks the reference and builds the
+concrete command:
 
-| `blocked_on` | `blocked_ref` | remedy derived |
+| `blocked_on` | `blocked_ref` | derived remedy |
 |---|---|---|
 | `approval` | `{inbox_id, tool, policy}` | `iash inbox approve <inbox_id>` |
 | `lock` | `{key, holder}` | `iash state unlock <key>` |
-| `peer` | `{peer}` | (informativo: waits en cadena) |
-| `budget` | `{}` | `iash run unpause <run> --budget <mayor>` |
-| `timer` | `{timer_id}` | (informativo) |
-| `tool` | `{tool}` | (informativo) |
+| `peer` | `{peer}` | (informational: chained wait) |
+| `budget` | `{}` | `iash run unpause <run> --budget <higher>` |
+| `timer` | `{timer_id}` | (informational) |
+| `tool` | `{tool}` | (informational) |
 | `workspace` | `{path}` | `iash run show <run> --workspace` |
 
-Cuando aparezca a reason nueva of block, trae its reference and `why` the shows
-without cambios of code. Si someone emite a block without reference, `why` lo
-delata explícitamente en vez of show a línea vacía:
+When a new blocking reason appears, it brings its reference and `why` shows it
+with no code changes. If somebody emits a block with no reference, `why` reports
+it explicitly instead of showing an empty line:
 
-> blocked without reference structured: is a violación of the schema, everything
-> waiting:* must traer blocked_ref
+> blocked without a structured reference: this is a schema violation, every
+> waiting:* must bring blocked_ref (see spec/events.md)
 
-## Herramientas and model
+## Tools and model
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `tool.call` | `tool`, `args?` |
 | `tool.call_completed` | `tool`, `result?` |
 | `tool.call_denied` | `tool`, `policy` |
 | `llm.response` | `cost_usd`, `tokens_in?`, `tokens_out?`, `model?` |
 
-`tool.call_denied` with `policy: "ask"` **not is a error**: is a question. Crea
-a item of inbox and leaves `blocked_ref` for that the remedy sea automático.
+`tool.call_denied` with `policy: "ask"` is **not an error**: it is a question. It
+creates an inbox item and leaves `blocked_ref` so the remedy is automatic.
 
-## Recursos
+## Resources
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `lock.acquired` / `lock.released` | `key` |
 | `resource.conflict` | `path`, `agents?` |
 
-`resource.conflict` not fails the run. Despierta a who lo observe; if nadie
-observa, remains registrado and the quiescence lo detecta more tarde. Fallar here haría
-that a merge conflict trivial mate media hour of work.
+`resource.conflict` does not fail the run. It wakes whoever observes it; if
+nobody observes, it stays recorded and quiescence detects it later. Failing here
+would let a trivial merge conflict kill half an hour of work.
 
-## Presupuesto
+## Budget
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `budget.warning` | `tree_spent_usd`, `budget_usd`, `pct` |
 | `budget.exceeded` | `tree_spent_usd`, `budget_usd` |
 
-The two reportan the spending of the **tree**, not of the run: with spawn anidado, the spending
-of the run only is a fracción engañosa.
+Both report the spending of the **tree**, not of the run: with nested spawn, the
+spending of one run alone is a misleading fraction.
 
-`budget.warning` is emite **a vez** (marcado en `State.BudgetWarned`). A aviso
-that is repeats en each call is a aviso that the usuario aprende a ignorar.
+`budget.warning` is emitted **once** (marked in `State.BudgetWarned`). A notice
+that repeats on every call is a notice the user learns to ignore.
 
-## Humano en the bucle
+## Human in the loop
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `inbox.created` | `inbox_id`, `kind`, `question`, `agent?`, `on_timeout` |
 | `inbox.replied` | `inbox_id`, `text` |
 | `inbox.timeout` | `inbox_id` |
 
-`on_timeout` is decides **when is creates the question**, not when expires: en the
-momento of the timeout ya not there is nadie mirando.
+`on_timeout` is decided **when the question is created**, not when it expires: at
+the moment of the timeout there is nobody watching anymore.
 
-## Reloj
+## Clock
 
-| tipo | payload |
+| type | payload |
 |---|---|
 | `timer.tick` | `timer_id` |
 
-The timers is arman with offsets relativos en milisegundos, not timestamps
-absolutos. Eso is lo that permite that the clock virtual of `--sim` ejecute the same
-fold without wait media hour of truth.
+Timers are armed with relative offsets in milliseconds, not absolute timestamps.
+That is what lets the virtual clock of `--sim` run the same fold without waiting
+half an hour of real time.
 
-## Eventos of usuario
+## User events
 
-`custom.*` is reservado for events emitidos for agentes vía
-`iash event emit`. The agentes **only** can emitir en ese namespace: if
-pudieran emitir `stage.advanced`, podrían saltarse the rule of avance of its
-own blueprint.
+`custom.*` is reserved for events emitted by agents via `iash event emit`. Agents
+can **only** emit in that namespace: if they could emit `stage.advanced`, they
+could skip the advance rule of their own blueprint.

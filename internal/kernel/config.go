@@ -1,7 +1,7 @@
 package kernel
 
-// Implementation note.
-// Implementation note.
+// Config is the already-resolved blueprint: the frozen copy the run pinned at
+// startup (see State.BlueprintSHA). The reducer treats it as immutable.
 type Config struct {
 	Blueprint  string         `json:"blueprint,omitempty"`
 	Stages     []StageConfig  `json:"stages,omitempty"`
@@ -16,23 +16,23 @@ type Config struct {
 	MaxDepth      int     `json:"max_depth,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Interaction now only holds SteerTarget.
+//
+// The turn_source field from the first draft is RETIRED (ADR-0006). The idea was
+// to declare who may open turns in order to avoid races, and AI B's correction
+// is that this solves nothing: the real race is "two writers modify the same
+// state" and it is solved with CAS on `seq` (if_seq + on_busy), not with a
+// declarative policy about who is allowed to speak.
 type Interaction struct {
 	SteerTarget string `json:"steer_target,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// StageConfig is a stage of the blueprint.
+//
+// OnTimeout defaults to "escalate", not "fail". A stage timeout almost never
+// means "the work is impossible", it means "something got stuck and somebody
+// has to look at it". Failing by default trains the user to set absurdly long
+// timeouts, which is worse than having none.
 type StageConfig struct {
 	Name        string `json:"name"`
 	AdvanceWhen string `json:"advance_when,omitempty"`
@@ -42,11 +42,11 @@ type StageConfig struct {
 	OnConflict  string `json:"on_conflict,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// MemberConfig declares a participant.
+//
+// Activation defaults to "coalesce": if five reasons to wake the same agent
+// arrive, one turn is opened carrying all five. The alternative ("one event, one
+// turn") multiplies the bill by five in exchange for nothing.
 type MemberConfig struct {
 	Name       string   `json:"name"`
 	Role       string   `json:"role,omitempty"`
@@ -56,13 +56,12 @@ type MemberConfig struct {
 	Stages     []string `json:"stages,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Watcher is a declared reaction to an event pattern.
+//
+// IncludeSelf defaults to false, and that is a safety decision, not a
+// convenience one: a watcher on `agent.*` that wakes up on its own events is an
+// infinite loop billed in dollars. Self-exclusion and the depth limit are the
+// two cheap filters that run BEFORE spending a single token.
 type Watcher struct {
 	Agent       string `json:"agent"`
 	Pattern     string `json:"pattern"`
@@ -71,12 +70,12 @@ type Watcher struct {
 	IncludeSelf bool   `json:"include_self,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// ContextSpec describes what context gets assembled for a turn.
+//
+// The ORDER of the layers matters and is not alphabetical: identity -> situation
+// -> memory -> shared -> cause. It goes from most stable to most volatile so
+// that the provider's prefix cache hits on the leading layers. Inverting the
+// order works exactly the same and costs several times more.
 type ContextSpec struct {
 	Identity   string   `json:"identity,omitempty"`
 	Situation  []string `json:"situation,omitempty"`
@@ -87,10 +86,10 @@ type ContextSpec struct {
 	OnOverflow string   `json:"on_overflow,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// ResolveDefaults fills in the default values. It is a pure function over the
+// Config and runs once when the blueprint is pinned, not on every Decide: if the
+// defaults were applied at each step, changing a default in a new version of the
+// binary would change the result of an old replay.
 func (c Config) ResolveDefaults() Config {
 	out := c
 
@@ -107,9 +106,9 @@ func (c Config) ResolveDefaults() Config {
 		out.ResultFrom = "last_submit"
 	}
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// THE FATAL HOLE: if any member can write files and they share a single
+	// directory, two agents are going to overwrite each other and the KV store
+	// lock will not prevent it. The safe default is worktree, not shared.
 	if out.Workspace == "" {
 		out.Workspace = "none"
 		for _, m := range out.Members {
@@ -143,7 +142,7 @@ func (c Config) ResolveDefaults() Config {
 	return out
 }
 
-// Implementation note.
+// StageAt returns the stage at the given index, or nil if out of range.
 func (c Config) StageAt(i int) *StageConfig {
 	if i < 0 || i >= len(c.Stages) {
 		return nil
@@ -151,7 +150,7 @@ func (c Config) StageAt(i int) *StageConfig {
 	return &c.Stages[i]
 }
 
-// Implementation note.
+// MemberCfg looks up a member declaration by name.
 func (c Config) MemberCfg(name string) *MemberConfig {
 	for i := range c.Members {
 		if c.Members[i].Name == name {
