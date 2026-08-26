@@ -8,8 +8,8 @@ self-contained.
 ## Task
 
 Translate the entire `iash` repository (`github.com/michiTrader/iash`, Go 1.22)
-from Spanish to English. This is a **dedicated, mechanical migration pass**: no
-behavior changes, no refactors, no design improvements, no "while I'm here"
+from Spanish to English. This is a **dedicated, mechanical migration pass**: not
+behavior changes, not refactors, not design improvements, not "while I'm here"
 fixes. Translation only.
 
 Read `AGENTS.md` first — it states the English-only policy this pass exists to
@@ -30,12 +30,12 @@ pass when you are done.** That is the acceptance criterion.
 Scale, measured — so you can size the job rather than guess:
 
 - **777 lines currently contain accented Spanish characters** across `.go` and
-  `.md` files. That is the floor, not the total: plenty of Spanish has no
+  `.md` files. That is the floor, not the total: plenty of Spanish has not
   accents.
-- **8 references to `docs/design/10-ejecucion.md`** need updating when the file
+- **8 references to `docs/design/10-execution.md`** need updating when the file
   is renamed.
 - 45 test names, all Spanish.
-- Largest single file: `internal/kernel/decide.go`, ~700 lines, comment-dense.
+- Largest single file: `internal/kernel/decides.go`, ~700 lines, comment-dense.
 
 This is a multi-hour job. Do not attempt it in one pass — follow the ordered
 steps at the bottom and commit after each.
@@ -43,7 +43,7 @@ steps at the bottom and commit after each.
 Verify the baseline before changing anything:
 
 ```bash
-go build -o /tmp/iash ./cmd/iash
+go build -or /tmp/iash ./cmd/iash
 go test -count=1 ./...
 ```
 
@@ -67,8 +67,8 @@ still read as a warning in English, not as a flat restatement.
 Example — this is the register to match:
 
 ```go
-// SUBTILEZA CARA: solo MemberIdle. La tentación es incluir MemberSubmitted
-// ... eso rompe la detección de quiescencia de la peor manera
+// SUBTILEZA CARA: only MemberIdle. The tentación is incluir MemberSubmitted
+// ... that breaks the detección of quiescence of the peor way
 ```
 
 ```go
@@ -84,21 +84,21 @@ Terminology to keep consistent throughout:
 
 | Spanish | English |
 |---|---|
-| etapa | stage |
-| miembro | member |
-| turno | turn |
-| efecto | effect |
-| presupuesto | budget |
-| quiescencia | quiescence |
-| bloqueo / bloqueado | block / blocked |
-| trabado | stuck |
+| stage | stage |
+| member | member |
+| turn | turn |
+| effect | effect |
+| budget | budget |
+| quiescence | quiescence |
+| block / blocked | block / blocked |
+| stalled | stuck |
 | observador | watcher |
-| bandeja (de entrada) | inbox |
-| aprobación | approval |
-| ejecutor | executor |
+| bandeja (of input) | inbox |
+| approval | approval |
+| executor | executor |
 | reducer | reducer (keep) |
-| superficie | surface |
-| árbol (de runs) | tree |
+| surface | surface |
+| tree (of runs) | tree |
 
 ### 2. Identifiers
 
@@ -139,7 +139,7 @@ Every `t.Fatalf` / `t.Errorf` message. These are load-bearing: each one names
 the **consequence** and the **remedy**. Keep that structure.
 
 ```go
-t.Fatal("dos folds del mismo log dieron estados distintos: replay no sirve para nada")
+t.Fatal("two folds of the same log dieron states distintos: replay not works for nothing")
 ```
 
 ```go
@@ -154,19 +154,19 @@ forbidden by `AGENTS.md`.
 CLI usage text in `cmd/iash/main.go`, all capability descriptions in
 `internal/surface/surface.go`, the `Why` output lines in
 `internal/kernel/why.go`, and the reducer's diagnostic strings in
-`internal/kernel/decide.go`.
+`internal/kernel/decides.go`.
 
 The reducer diagnostics are the highest-value strings in the project — they are
 what a user reads when a run is stuck. Translate with care:
 
 ```
-"presupuesto agotado (%.4f de %.4f USD en el árbol). ¿subir o cancelar?"
+"budget agotado (%.4f of %.4f USD en the tree). ¿subir or cancel?"
 "budget exhausted (%.4f of %.4f USD across the tree). raise or cancel?"
 
-"; ya entregaron todos los que podían: la regla es insatisfacible con este blueprint"
+"; ya submitted all the that could: the rule is unsatisfiable with this blueprint"
 "; everyone who could have submitted already did: the rule is unsatisfiable with this blueprint"
 
-"etapa " + st.Name + " avanza con " + st.AdvanceWhen + " y no se cumple"
+"stage " + st.Name + " advances with " + st.AdvanceWhen + " and not is meets"
 "stage " + st.Name + " advances on " + st.AdvanceWhen + " and that is not met"
 ```
 
@@ -175,10 +175,10 @@ Keep format verbs (`%.4f`, `%s`, `%d`) and concatenation structure intact.
 ### 6. Documentation
 
 `README.md`, `AGENTS.md` (Spanish parts only — the policy sections are already
-English), `docs/adr/*.md` (all 7 plus its README), `docs/design/10-ejecucion.md`,
+English), `docs/adr/*.md` (all 7 plus its README), `docs/design/10-execution.md`,
 `spec/events.md`.
 
-**Rename `docs/design/10-ejecucion.md` → `docs/design/10-execution.md`** and
+**Rename `docs/design/10-execution.md` → `docs/design/10-execution.md`** and
 update every reference to it. It is cited in at least: `cmd/iash/main.go` usage
 text, `internal/arch_test.go` failure message, `README.md`, and several ADRs.
 Grep for `10-ejecucion` to catch them all.
@@ -187,13 +187,13 @@ ADR filenames are Spanish too. Rename them and update the index and all
 cross-references:
 
 ```
-0001-reducer-puro.md            → 0001-pure-reducer.md
-0002-log-es-la-verdad.md        → 0002-log-is-truth.md
-0003-clases-de-efecto.md        → 0003-effect-classes.md
-0004-quiescencia-como-evento.md → 0004-quiescence-as-event.md
-0005-un-mecanismo-de-inyeccion.md → 0005-one-injection-mechanism.md
-0006-cas-sobre-seq.md           → 0006-cas-on-seq.md
-0007-go-en-vez-de-rust.md       → 0007-go-instead-of-rust.md
+0001-pure-reducer.md            → 0001-pure-reducer.md
+0002-log-is-truth.md        → 0002-log-is-truth.md
+0003-effect-classes.md        → 0003-effect-classes.md
+0004-quiescence-as-event.md → 0004-quiescence-as-event.md
+0005-one-injection-mechanism.md → 0005-one-injection-mechanism.md
+0006-cas-on-seq.md           → 0006-cas-on-seq.md
+0007-go-instead-of-rust.md       → 0007-go-instead-of-rust.md
 ```
 
 Use `git mv` so history is preserved.
@@ -223,12 +223,12 @@ Changing any of these is a **breaking protocol change**, not a translation.
 strings**, because it is a recorded snapshot of `Why` output:
 
 ```
-"espera aprobación de la tool \"bash\" (inbox inbox-1)"
-"presupuesto: 0.4200 de 5.0000 USD gastados en el árbol"
-"aprobar bash para backend?"
+"waits approval of the tool \"bash\" (inbox inbox-1)"
+"budget: 0.4200 of 5.0000 USD spent en the tree"
+"aprobar bash for backend?"
 ```
 
-When you translate the strings in `why.go` and `decide.go`, `TestGolden` will
+When you translate the strings in `why.go` and `decides.go`, `TestGolden` will
 fail. **That failure is correct and expected.** Do not edit the JSON by hand and
 do not weaken the test. Regenerate it:
 
@@ -251,13 +251,13 @@ fix into a 4,000-line rename makes both unreviewable.
 
 The sandbox for this project has been reset three times and destroyed a full
 turn of work once. **Commit and push after each step.** A commit that exists only
-locally is as fragile as no commit.
+locally is as fragile as not commit.
 
 Work package by package so each step is independently verifiable:
 
 1. `internal/kernel/event.go`, `effect.go`, `state.go` — comments and identifiers
 2. `internal/kernel/config.go`
-3. `internal/kernel/decide.go` — the biggest file (~700 lines), comments + diagnostic strings
+3. `internal/kernel/decides.go` — the biggest file (~700 lines), comments + diagnostic strings
 4. `internal/kernel/why.go` — comments + output strings
 5. `internal/kernel/decide_test.go` — test names, messages, helper renames
 6. `internal/surface/surface.go` + `surface_test.go`
@@ -284,11 +284,11 @@ git add -A && git commit -m "i18n: translate <area> to English" && git push
       wait tree with English remediation commands
 - [ ] Zero Spanish remains. Verify:
       `grep -rniE "[áéíóúñ¿¡]" --include=*.go --include=*.md .` returns nothing,
-      then read through for accent-free Spanish (`etapa`, `presupuesto`,
-      `miembro`, `turno`, `bloqueo`, `nadie`, `esta`, `para`, `desde`, `porque`)
+      then read through for accent-free Spanish (`stage`, `budget`,
+      `member`, `turn`, `block`, `nadie`, `this`, `for`, `from`, `because`)
 - [ ] No wire-contract string changed. Confirm with
       `git diff origin/main -- internal/kernel/event.go` that event type
       constants and JSON tags are untouched
-- [ ] The golden diff contains only translated strings — no structural change
-- [ ] Every doc cross-reference resolves (no link to `10-ejecucion.md` or to an
+- [ ] The golden diff contains only translated strings — not structural change
+- [ ] Every doc cross-reference resolves (not link to `10-execution.md` or to an
       old ADR filename survives)

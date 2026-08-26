@@ -1,34 +1,34 @@
-# ADR-0003: Los efectos se clasifican en control e independientes
+# ADR-0003: The effects is clasifican en control e independent
 
 - Estado: aceptada
-- Afecta a: `internal/kernel/effect.go` (`EffectClass`), `internal/kernel/decide.go` (`orderEffects`)
-- Depende de: ADR-0001
-- Origen: revisión de IA A
+- Afecta a: `internal/kernel/effect.go` (`EffectClass`), `internal/kernel/decides.go` (`orderEffects`)
+- Depende of: ADR-0001
+- Origen: review of IA A
 
 ## Contexto
 
-ADR-0001 dice que `Decide` devuelve `[]Effect`. IA A señaló el hueco obvio que
-eso deja abierto: **el ejecutor recibe una lista, ¿la corre en orden o en
-paralelo?**
+ADR-0001 dice that `Decide` returns `[]Effect`. IA A señaló the gap obvious that
+that leaves abierto: **the executor recibe a list, ¿the runs en order or en
+parallel?**
 
-No es una pregunta de rendimiento. Las dos respuestas simples rompen cosas
+No is a question of rendimiento. The two answers simple rompen cosas
 distintas:
 
-- **Todo en paralelo** rompe la corrección. `Emit` y `SetTimer` cambian lo que el
-  resto del sistema va a ver. Si un `Emit` de `stage.advanced` corre después de
-  un `SpawnTurn`, el turno arranca leyendo una etapa que ya no es la actual.
-- **Todo en orden** rompe la razón de ser de la herramienta. Tres turnos de
-  agente que no se conocen entre sí se serializan, y entonces orquestar un
-  equipo cuesta lo mismo que correrlos de a uno a mano.
+- **Todo en parallel** breaks the fix. `Emit` and `SetTimer` cambian lo that the
+  rest of the system va a see. Si a `Emit` of `stage.advanced` runs after of
+  a `SpawnTurn`, the turn starts leyendo a stage that ya not is the current.
+- **Todo en order** breaks the reason of ser of the tool. Tres turns of
+  agente that not is conocen between yes is serializan, and then orquestar a
+  equipo cuesta lo same that correrlos of a one a mano.
 
-Un tercer camino tentador es que el ejecutor decida caso por caso con un
-`switch` sobre el tipo concreto. Eso mueve la política al ejecutor y garantiza
-que la próxima variante de `Effect` se ejecute con la política por defecto que
-le toque, sin que nadie lo haya pensado.
+A tercer camino tentador is that the executor decida case for case with a
+`switch` sobre the tipo concrete. Eso mueve the política to the executor and garantiza
+that the próxima variant of `Effect` is ejecute with the política for defecto that
+le toque, without that nadie lo haya pensado.
 
 ## Decisión
 
-La clase es una propiedad **del efecto**, declarada en el kernel:
+The clase is a propiedad **of the effect**, declared en the kernel:
 
 ```go
 type Effect interface {
@@ -37,56 +37,56 @@ type Effect interface {
 }
 ```
 
-Dos clases, y la política es una sola regla:
+Dos clases, and the política is a sola rule:
 
-| clase | variantes | cómo se ejecuta |
+| clase | variants | how is executes |
 |---|---|---|
-| `ClassControl` | `Emit`, `SetTimer`, `CancelTimer`, `Snapshot` | secuencial, en el orden exacto de la lista |
-| `ClassIndependent` | `SpawnTurn`, `CallTool`, `AskHuman` | concurrente entre sí |
+| `ClassControl` | `Emit`, `SetTimer`, `CancelTimer`, `Snapshot` | secuencial, en the order exact of the list |
+| `ClassIndependent` | `SpawnTurn`, `CallTool`, `AskHuman` | concurrente between yes |
 
-`Decide` ordena la lista antes de devolverla (`orderEffects`), así que el
-ejecutor solo necesita saber esto: **correr el prefijo de control uno por uno,
-después el resto en paralelo.** No hay ningún `switch` sobre tipos concretos en
-el ejecutor, y una variante nueva tiene que declarar su clase para compilar.
+`Decide` ordena the list before of devolverla (`orderEffects`), so that the
+executor only needs know this: **correr the prefijo of control one for one,
+after the rest en parallel.** No there is not `switch` sobre tipos concretos en
+the executor, and a variant nueva has that declarar its clase for build.
 
-### Por qué `SliceStable` y no `Slice`
+### Por what `SliceStable` and not `Slice`
 
 ```go
 sort.SliceStable(fx, func(i, j int) bool { return fx[i].Class() < fx[j].Class() })
 ```
 
-El orden relativo **entre** los `Emit` es semántico: `stage.advanced` tiene que
-salir antes que `stage.entered`, porque el segundo describe el estado que dejó
-el primero. Un sort inestable los reordena según el tamaño de la entrada y la
-implementación del pivote — o sea, se rompe de forma intermitente y no
-reproducible, que es la peor forma de romperse posible en un sistema cuyo
-argumento de venta es el replay fiel.
+The order relative **between** the `Emit` is semántico: `stage.advanced` has that
+salir before that `stage.entered`, because the second describe the state that left
+the first. A sort inestable the reordena according to the tamaño of the input and the
+implementation of the pivote — or sea, is breaks of way intermitente and not
+reproducible, that is the peor way of romperse posible en a system cuyo
+argumento of venta is the replay fiel.
 
-## Alternativa descartada
+## Alternativa discarded
 
-**Un DAG de dependencias explícitas entre efectos.** Más expresivo: permitiría
-paralelizar dos `Emit` que realmente no se tocan. Se descarta porque el costo no
-se paga con lo que se gana: hay que declarar la dependencia en cada sitio de
-emisión, y una dependencia olvidada produce exactamente el bug de carrera que
-queríamos evitar, ahora con más ceremonia. Dos clases son gruesas y son
-correctas por construcción.
+**A DAG of dependencias explícitas between effects.** Más expresivo: permitiría
+paralelizar two `Emit` that really not is tocan. Se descarta because the cost not
+is pays with lo that is gana: there is that declarar the dependencia en each sitio of
+emisión, and a dependencia olvidada produce exactly the bug of carrera that
+wanted evitar, now with more ceremonia. Dos clases are gruesas and are
+correctas for construcción.
 
 ## Consecuencias
 
-- Un `Emit` nunca corre en paralelo con otro `Emit`, aunque a veces podría. Se
-  acepta: los `Emit` son baratos, lo caro son los `SpawnTurn` y esos sí van en
-  paralelo.
-- Agregar una variante de `Effect` obliga a decidir su clase (es un método de la
-  interfaz). No hay default silencioso.
-- El ejecutor no tiene política propia sobre orden. Toda la decisión vive en el
-  kernel, donde es pura y testeable.
+- A `Emit` never runs en parallel with another `Emit`, aunque a veces podría. Se
+  acepta: the `Emit` are baratos, lo expensive are the `SpawnTurn` and esos yes van en
+  parallel.
+- Agregar a variant of `Effect` requires a decides its clase (is a método of the
+  interfaz). No there is default silencioso.
+- The executor not has política propia sobre order. Toda the decision vive en the
+  kernel, where is pure and testeable.
 
-## Cómo se verifica
+## Cómo is verifies
 
-- `TestEffectExhaustivo` recorre `EffectVariants()` y falla si una variante no
-  está registrada — ver ADR-0007.
-- Los tests de orden en `decide_test.go` verifican que los efectos de control
-  vengan antes que los independientes y que el orden relativo de los `Emit` se
+- `TestEffectExhaustivo` recorre `EffectVariants()` and fails if a variant not
+  is registrada — see ADR-0007.
+- The tests of order en `decide_test.go` verifican that the effects of control
+  vengan before that the independent and that the order relative of the `Emit` is
   preserve.
-- El golden de `testdata/scenarios/` fija la lista completa de efectos: un
-  cambio de orden accidental hace fallar la comparación.
+- The golden of `testdata/scenarios/` fixes the list complete of effects: a
+  change of order accidental makes fail the comparación.

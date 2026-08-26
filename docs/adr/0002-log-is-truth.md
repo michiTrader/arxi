@@ -1,82 +1,82 @@
-# ADR-0002: El log es la verdad; los snapshots son caché; el blueprint se congela
+# ADR-0002: The log is the truth; the snapshots are cache; the blueprint is congela
 
 - Estado: aceptada
-- Afecta a: `internal/kernel/state.go` (`BlueprintSHA`), `internal/kernel/decide.go`
-- Depende de: ADR-0001
+- Afecta a: `internal/kernel/state.go` (`BlueprintSHA`), `internal/kernel/decides.go`
+- Depende of: ADR-0001
 
 ## Contexto
 
-Con un reducer puro, el estado se puede reconstruir:
+Con a reducer pure, the state is can reconstruir:
 
 ```
 State = fold(Decide, State0, events)
 ```
 
-Eso abre una pregunta que hay que contestar de una vez y no caso por caso:
-cuando el snapshot guardado y el log no coinciden, ¿quién gana?
+Eso opens a question that there is that answer of a vez and not case for case:
+when the snapshot guardado and the log not coinciden, ¿who gana?
 
-La tentación es "gana el snapshot, es más rápido". Y es más rápido. También es
-la forma de tener un estado que nadie puede explicar: un `State` que dice
-`status: failed` sin ningún evento de falla que lo justifique, porque el
-snapshot se escribió mal una vez hace tres semanas.
+The tentación is "gana the snapshot, is more rápido". Y is more rápido. También is
+the way of tener a state that nadie can explicar: a `State` that dice
+`status: failed` without not event of fails that lo justifique, because the
+snapshot is wrote badly a vez makes three semanas.
 
 ## Decisión
 
-**Gana el log, siempre.** Los snapshots son exclusivamente una optimización de
-lectura. Se pueden borrar todos y el sistema no pierde información — pierde
-velocidad de arranque.
+**Gana the log, always.** The snapshots are exclusivamente a optimización of
+reading. Se can delete all and the system not loses información — loses
+velocidad of arranque.
 
-Dos consecuencias que tienen dientes:
+Dos consecuencias that have dientes:
 
-### El blueprint se congela al arrancar
+### The blueprint is congela to the start
 
-El run guarda un `blueprint_sha` en su estado (`State.BlueprintSHA`) y el
-reducer **nunca** lee el archivo de blueprint vivo. Lee la copia congelada en
+The run stores a `blueprint_sha` en its state (`State.BlueprintSHA`) and the
+reducer **never** lee the file of blueprint live. Lee the copy frozen en
 `runs/<id>/blueprint.snapshot.yaml`.
 
-Sin esto, reproducir un run de la semana pasada usaría la config de hoy. Si en
-el medio alguien cambió `advance_when` de `all` a `quorum:2`, el replay avanza
-donde el run original se trabó, y el diagnóstico que te da es una ficción. Un
-replay que no reproduce no sirve para nada, y lo peor es que no lo grita: te da
-una respuesta plausible y equivocada.
+Sin this, replay a run of the week pasada usaría the config of today. Si en
+the medio someone cambió `advance_when` of `all` a `quorum:2`, the replay advances
+where the run original is trabó, and the diagnóstico that te da is a ficción. A
+replay that not reproduces not works for nothing, and lo peor is that not lo grita: te da
+a answer plausible and equivocada.
 
-Esta corrección vino de la revisión de IA A.
+Esta fix vino of the review of IA A.
 
-### El reducer no asigna `seq`
+### The reducer not assigns `seq`
 
-Los eventos que el reducer devuelve vía `Emit` llevan `seq: 0`. El número de
-secuencia lo pone el escritor único del log, en el momento de escribir.
+The events that the reducer returns vía `Emit` carry `seq: 0`. The number of
+secuencia lo pone the writer single of the log, en the momento of write.
 
-El reducer no sabe en qué orden global va a caer lo que emite: entre que decide
-y que se escribe puede haber entrado otro evento de otra fuente. Pretender que
-sí lo sabe es inventar una carrera que después se manifiesta como un log con
-`seq` duplicados, que es exactamente lo que rompe el CAS de ADR-0006.
+The reducer not knows en what order global va a caer lo that emite: between that decides
+and that is writes can haber entrado another event of another source. Pretender that
+yes lo knows is inventar a carrera that after is manifiesta como a log with
+`seq` duplicados, that is exactly lo that breaks the CAS of ADR-0006.
 
-## Alternativa descartada
+## Alternativa discarded
 
-**Snapshots autoritativos con el log como auditoría.** Más rápido, y es lo que
-hace la mayoría de los sistemas de workflow. Se descarta porque convierte el
-diagnóstico en arqueología: cuando el estado y el log difieren no hay ninguna
-regla para decidir qué pasó realmente, y `iash run why` — que es la razón de ser
-de la herramienta — pasa a responder sobre datos que no se pueden justificar.
+**Snapshots autoritativos with the log como auditoría.** Más rápido, and is lo that
+makes the mayoría of the systems of workflow. Se descarta because convierte the
+diagnóstico en arqueología: when the state and the log difieren not there is not
+rule for decides what happened really, and `iash run why` — that is the reason of ser
+of the tool — happens a responder sobre datos that not is can justificar.
 
 ## Consecuencias
 
-- Arrancar un run largo desde cero cuesta un fold completo. Aceptable: el fold
-  es puro y no hace I/O por evento.
-- Cambiar el blueprint de un run vivo es imposible por diseño. Para eso está
-  `run fork --at-seq`: bifurcás con la config nueva y el run original queda
-  intacto y reproducible.
-- Un log corrupto es un problema irrecuperable, así que el log tiene que ser
-  append-only y escrito por un único escritor.
+- Arrancar a run largo from zero cuesta a fold complete. Aceptable: the fold
+  is pure and not makes I/O for event.
+- Cambiar the blueprint of a run live is imposible for diseño. Para that is
+  `run fork --at-seq`: bifurcás with the config nueva and the run original remains
+  intacto and reproducible.
+- A log corrupto is a problema irrecuperable, so that the log has that ser
+  append-only and escrito for a single writer.
 
-## Cómo se verifica
+## Cómo is verifies
 
-- El golden de `testdata/scenarios/` resetea `seq = 0` antes de comparar,
-  justamente para que el test no dependa del orden de asignación — si el reducer
-  empezara a asignar `seq`, la comparación fallaría.
-- Los tests de `decide_test.go` construyen el `Config` explícitamente y lo pasan
-  a `Decide`; no hay ninguna ruta por la que el reducer pueda alcanzar un
-  archivo.
-- `internal/arch_test.go` prohíbe `os` e `io` en el kernel, que es justo lo que
-  haría falta para leer el blueprint vivo.
+- The golden of `testdata/scenarios/` resetea `seq = 0` before of comparar,
+  justamente for that the test not dependa of the order of assignment — if the reducer
+  empezara a asignar `seq`, the comparación fallaría.
+- The tests of `decide_test.go` build the `Config` explícitamente and lo pasan
+  a `Decide`; not there is not ruta for the that the reducer pueda alcanzar a
+  file.
+- `internal/arch_test.go` prohíbe `os` e `io` en the kernel, that is justo lo that
+  haría missing for read the blueprint live.

@@ -1,187 +1,187 @@
-# 10. El modelo de ejecución
+# 10. The model of execution
 
-## 10.1 Una sola función decide
+## 10.1 A sola función decides
 
-Todo iash gira alrededor de una función:
+Todo iash gira alrededor of a función:
 
 ```go
 Decide(State, Event, Config) -> (State', []Effect)
 ```
 
-Pura. No mira el reloj, no toca la red, no escribe nada. Todo lo que quiere que
-pase en el mundo lo **describe** como un `Effect` y devuelve; otro lo ejecuta.
+Pura. No mira the clock, not toca the network, not writes nothing. Todo lo that quiere that
+happen en the world lo **describe** como a `Effect` and returns; another lo executes.
 
-Esa restricción no es estética. Es lo que hace que cuatro features sean la misma
-feature en vez de cuatro programas que hay que mantener sincronizados:
+Esa restricción not is estética. Es lo that makes that four features sean the same
+feature en vez of four programas that there is that keep sincronizados:
 
-| feature | qué es |
+| feature | what is |
 |---|---|
-| `iash run` | fold + ejecutor real |
-| `iash run --sim` | fold + ejecutor falso |
-| `iash run replay` | fold sobre un log viejo, sin ejecutor |
-| `iash run why` | leer el `State` que salió del fold |
+| `iash run` | fold + executor real |
+| `iash run --sim` | fold + executor fake |
+| `iash run replay` | fold sobre a log old, without executor |
+| `iash run why` | read the `State` that salió of the fold |
 
-En un diseño donde el reducer llama a la red, `replay` es un programa aparte que
-reimplementa la lógica del principal. Siempre está desactualizado y nadie se da
-cuenta hasta que hace falta.
+En a diseño where the reducer llama a the network, `replay` is a programa aparte that
+reimplementa the logic of the principal. Siempre is desactualizado and nadie is da
+cuenta until that makes missing.
 
-La pureza está verificada, no prometida: `internal/arch_test.go` corre `go list`
-sobre el paquete y falla si el kernel importa `time`, `net`, `os`, `math/rand` o
-cualquier cosa de esa familia. El mensaje de error explica por qué está mal y qué
-hacer en su lugar.
+The pureza is verificada, not prometida: `internal/arch_test.go` runs `go list`
+sobre the paquete and fails if the kernel importa `time`, `net`, `os`, `math/rand` or
+cualquier cosa of esa familia. The mensaje of error explica for what is badly and what
+make en its lugar.
 
-## 10.2 El log es la verdad
+## 10.2 The log is the truth
 
 ```
 State = fold(Decide, State0, events)
 ```
 
-Los snapshots son caché. Si un snapshot y el log no coinciden, **gana el log**.
+The snapshots are cache. Si a snapshot and the log not coinciden, **gana the log**.
 
-Dos consecuencias con dientes:
+Dos consecuencias with dientes:
 
-**El blueprint se congela al arrancar.** El run guarda `blueprint_sha` y el
-reducer nunca lee el archivo vivo, sino la copia en
-`runs/<id>/blueprint.snapshot.yaml`. Sin esto, reproducir un run de la semana
-pasada usaría la config de hoy y daría otro resultado — que es lo mismo que no
+**The blueprint is congela to the start.** The run stores `blueprint_sha` and the
+reducer never lee the file live, sino the copy en
+`runs/<id>/blueprint.snapshot.yaml`. Sin this, replay a run of the week
+pasada usaría the config of today and daría another resultado — that is lo same that not
 tener replay.
 
-**El reducer no asigna `seq`.** Los eventos que devuelve vía `Emit` llevan
-`seq: 0`. El número de secuencia lo pone el escritor único del log. El reducer no
-sabe en qué orden global va a caer lo que emite, y pretender que sí lo sabe es
-inventar una carrera.
+**The reducer not assigns `seq`.** The events that returns vía `Emit` carry
+`seq: 0`. The number of secuencia lo pone the writer single of the log. The reducer not
+knows en what order global va a caer lo that emite, and pretender that yes lo knows is
+inventar a carrera.
 
-## 10.3 Dos clases de efecto
+## 10.3 Dos clases of effect
 
-Si `Decide` devuelve `[]Effect`, ¿el ejecutor los corre en orden o en paralelo?
+Si `Decide` returns `[]Effect`, ¿the executor the runs en order or en parallel?
 
-Ninguna de las dos respuestas simples funciona. "Todos en paralelo" rompe:
-`Emit` y `SetTimer` cambian lo que el resto del sistema va a ver. "Todos en
-orden" serializa tres turnos de agente que no se conocen entre sí, y ahí se
-pierde la razón de ser de la herramienta.
+Ninguna of the two answers simple works. "Todos en parallel" breaks:
+`Emit` and `SetTimer` cambian lo that the rest of the system va a see. "Todos en
+order" serializa three turns of agente that not is conocen between yes, and ahí is
+loses the reason of ser of the tool.
 
-Así que cada efecto declara su clase:
+Así that each effect declara its clase:
 
-- **`ClassControl`** — cambia el estado observable del run o el reloj.
-  `Emit`, `SetTimer`, `CancelTimer`, `Snapshot`. Se ejecutan **en el orden exacto
-  de la lista**, uno después de otro.
-- **`ClassIndependent`** — solo se afecta a sí mismo. `SpawnTurn`, `CallTool`,
-  `AskHuman`. Se pueden ejecutar **en paralelo** entre ellos.
+- **`ClassControl`** — cambia the state observable of the run or the clock.
+  `Emit`, `SetTimer`, `CancelTimer`, `Snapshot`. Se ejecutan **en the order exact
+  of the list**, one after of another.
+- **`ClassIndependent`** — only is afecta a yes same. `SpawnTurn`, `CallTool`,
+  `AskHuman`. Se can ejecutar **en parallel** between ellos.
 
-`Decide` ordena la lista antes de devolverla (`orderEffects`), así que el
-ejecutor solo necesita una regla: correr el prefijo de control secuencialmente,
-después el resto concurrente.
+`Decide` ordena the list before of devolverla (`orderEffects`), so that the
+executor only needs a rule: correr the prefijo of control secuencialmente,
+after the rest concurrente.
 
-El orden usa `sort.SliceStable`, no `sort.Slice`. El orden relativo entre los
-`Emit` es semántico — `stage.advanced` tiene que ir antes de `stage.entered` — y
-un sort inestable lo rompería de forma intermitente, que es la peor forma de
+The order uses `sort.SliceStable`, not `sort.Slice`. The order relative between the
+`Emit` is semántico — `stage.advanced` has that ir before of `stage.entered` — and
+a sort inestable lo rompería of way intermitente, that is the peor way of
 romperse.
 
-## 10.4 Quiescencia: el modo de falla que nadie especifica
+## 10.4 Quiescencia: the modo of fails that nadie especifica
 
-El modo de falla más caro de un sistema multi-agente no es el crash. Es el
-silencio: el run no falla, no termina, no avanza. Deja de pasar cosas. El usuario
-se entera a la mañana siguiente de que gastó cuarenta dólares en nada.
+The modo of fails more expensive of a system multi-agente not is the crash. Es the
+silence: the run not fails, not termina, not advances. Deja of pasar cosas. The usuario
+is entera a the tomorrow siguiente of that gastó cuarenta dollars en nothing.
 
-`Decide` chequea quiescencia **al final de cada paso**. Si nadie está ocupado,
-nadie es despertable, no hay timer armado, no hay preguntas sin responder y
-ningún efecto pendiente va a generar un evento, entonces emite `run.quiescent`.
+`Decide` chequea quiescence **to the final of each paso**. Si nadie is busy,
+nadie is despertable, not there is timer armado, not there is questions without responder and
+not effect pendiente va a generar a event, then emite `run.quiescent`.
 
-Tres decisiones que importan:
+Tres decisions that importan:
 
-**Es un evento, no un estado terminal.** Convertirlo en `StatusQuiescent` fue la
-tentación obvia y habría sido el peor error del diseño. El evento despierta al
-observador y el run se recupera. Solo si **nadie** lo observa el run falla — y
-falla arrastrando el diagnóstico.
+**Es a event, not a state terminal.** Convertirlo en `StatusQuiescent` was the
+tentación obvia and habría sido the peor error of the diseño. The event wakes to the
+observador and the run is recupera. Solo if **nadie** lo observa the run fails — and
+fails arrastrando the diagnóstico.
 
-**Trae diagnóstico obligatorio.** "El run está quieto" no le sirve a nadie. El
-payload dice qué regla no se cumple:
+**Trae diagnóstico required.** "The run is still" not le works a nadie. The
+payload dice what rule not is meets:
 
 ```
-etapa solo avanza con quorum:3 y no se cumple; ya entregaron todos los que
-podían: la regla es insatisfacible con este blueprint
+stage only advances with quorum:3 and not is meets; ya submitted all the that
+could: the rule is unsatisfiable with this blueprint
 ```
 
-Ese caso — la regla pide tres entregas y solo existen dos miembros que puedan
-entregar — es el más difícil de depurar a ojo, porque todos "cumplieron" y el
-blueprint se ve correcto.
+Ese case — the rule pide three entregas and only existen two members that puedan
+submit — is the more difficult of depurar a ojo, because all "cumplieron" and the
+blueprint is ve correcto.
 
-**`submitted` no es `runnable`.** La sutileza que hizo fallar la primera
-implementación. Un miembro que ya entregó parece disponible (no piensa, no
-espera) pero no tiene nada que hacer. Contarlo como runnable hace que la
-quiescencia **nunca** se detecte, y el bug es invisible: el sistema se ve
-eternamente sano mientras está trabado para siempre.
+**`submitted` not is `runnable`.** The sutileza that hizo fail the first
+implementation. A member that ya entregó parece disponible (not thinks, not
+waits) pero not has nothing that make. Contarlo como runnable makes that the
+quiescence **never** is detecte, and the bug is invisible: the system is ve
+eternamente sano while is stalled for always.
 
-## 10.5 Un mecanismo, tres features
+## 10.5 A mechanism, three features
 
-`run.prompt`, `agent.steered` y `agent.notified` son el mismo mecanismo con
-distinta procedencia: llega texto para alguien.
+`run.prompt`, `agent.steered` and `agent.notified` are the same mechanism with
+distinta procedencia: arrives text for someone.
 
-Si el destinatario está ocupado, el texto no se pierde ni abre un turno paralelo.
-Se acumula en `PendingCauses` y se drena **todo junto** en el próximo turno.
+Si the destinatario is busy, the text not is loses ni opens a turn parallel.
+Se acumula en `PendingCauses` and is drena **everything junto** en the próximo turn.
 
-Eso ES `on_busy: queue`. Y `queue` ES follow-up. Y el drenado ES coalescing. Tres
-features del documento de requisitos, una sola máquina de veinte líneas.
+Eso ES `on_busy: queue`. Y `queue` ES follow-up. Y the drenado ES coalescing. Tres
+features of the document of requisitos, a sola máquina of veinte líneas.
 
-El ahorro es directo: si cinco eventos despiertan al mismo agente mientras está
-ocupado, se abre **un** turno con cinco causas en el contexto, no cinco turnos.
-Literalmente 5x en la factura. El campo `Coalesced` del efecto registra cuántas
-se fusionaron, para que el ahorro sea auditable y no una afirmación de marketing.
+The saving is direct: if five events despiertan to the same agente while is
+busy, is opens **a** turn with five causes en the contexto, not five turns.
+Literalmente 5x en the factura. The field `Coalesced` of the effect registra cuántas
+is fusionaron, for that the saving sea auditable and not a afirmación of marketing.
 
-## 10.6 Los dos filtros que corren antes de gastar
+## 10.6 The two filtros that corren before of gastar
 
-Un watcher sobre `agent.*` que reacciona a sus propios eventos es un bucle
-infinito con tarjeta de crédito. Dos filtros baratos corren **antes** de generar
-un solo efecto caro:
+A watcher sobre `agent.*` that reacts a their own events is a bucle
+infinito with tarjeta of crédito. Dos filtros baratos corren **before** of generar
+a only effect expensive:
 
-1. **Auto-exclusión** (`include_self: false` por defecto). Un watcher no se
-   despierta con sus propios eventos. Es un default, no una prohibición: hay
-   patrones legítimos que necesitan verse a sí mismos, y `include_self: true`
-   los habilita explícitamente.
-2. **Límite de profundidad** (`max_depth: 12`). Cada evento derivado incrementa
-   `depth`. Sin esto, un watcher que reacciona a lo que otro watcher causó no
-   tiene fondo.
+1. **Auto-exclusión** (`include_self: false` for defecto). A watcher not is
+   wakes with their own events. Es a default, not a prohibición: there is
+   patrones legítimos that necesitan verse a yes mismos, and `include_self: true`
+   the habilita explícitamente.
+2. **Límite of depth** (`max_depth: 12`). Cada event derived incrementa
+   `depth`. Sin this, a watcher that reacts a lo that another watcher causó not
+   has depth.
 
-## 10.7 El presupuesto es del árbol, no del run
+## 10.7 The budget is of the tree, not of the run
 
-`State.TreeSpentUSD` acumula el gasto del subárbol completo. Un run hijo consume
-del pool del padre.
+`State.TreeSpentUSD` acumula the spending of the subárbol complete. A run hijo consumes
+of the pool of the padre.
 
-Sin esto, N niveles de spawn multiplican el techo por N y el `--budget` del run
-raíz es decorativo. Con esto, `--budget 10` significa diez dólares, sin importar
-cuántos niveles de delegación aparezcan.
+Sin this, N niveles of spawn multiplican the techo for N and the `--budget` of the run
+raíz is decorativo. Con this, `--budget 10` means diez dollars, without importar
+cuántos niveles of delegación aparezcan.
 
-Y cuando se agota: **bloquear y preguntar, no matar**. El trabajo hecho hasta ahí
-vale dinero real que ya se gastó. El humano decide si sube el techo o corta.
+Y when is agota: **bloquear and ask, not kill**. The work done until ahí
+vale money real that ya is gastó. The human decides if sube the techo or corta.
 
-## 10.8 Los defaults son decisiones de seguridad
+## 10.8 The defaults are decisions of security
 
-| default | por qué |
+| default | for what |
 |---|---|
-| `workspace: worktree` si alguien tiene `write`/`bash` | Dos agentes escribiendo el mismo directorio se pisan, y el lock del KV store no lo impide. El lock coordina *intención*; el aislamiento real lo da el filesystem. |
-| `on_timeout: escalate` | Un timeout casi nunca significa "imposible", significa "algo se trabó, mirá". Fallar por defecto entrena al usuario a poner timeouts absurdamente largos, que es peor que no tenerlos. |
-| `activation: coalesce` | La alternativa multiplica la factura a cambio de nada. |
+| `workspace: worktree` if someone has `write`/`bash` | Dos agentes escribiendo the same directory is pisan, and the lock of the KV store not lo impide. The lock coordina *intention*; the aislamiento real lo da the filesystem. |
+| `on_timeout: escalate` | A timeout casi never means "imposible", means "something is trabó, mirá". Fallar for defecto entrena to the usuario a poner timeouts absurdamente largos, that is peor that not tenerlos. |
+| `activation: coalesce` | The alternative multiplica the factura a change of nothing. |
 | `include_self: false` | Ver §10.6. |
-| política de tool sin declarar → `deny` | Un default permisivo convierte cada olvido en un agujero silencioso. |
-| `--budget` sin default, obligatorio | Un techo invisible es una factura sorpresa. Que el usuario escriba el número es la única forma de que sepa que existe. |
+| política of tool without declarar → `deny` | A default permisivo convierte each olvido en a hole silencioso. |
+| `--budget` without default, required | A techo invisible is a factura sorpresa. Que the usuario escriba the number is the single way of that sepa that exists. |
 
-## 10.9 Qué garantiza el compilador y qué garantizan los tests
+## 10.9 Qué garantiza the compilador and what garantizan the tests
 
-Go no tiene enums exhaustivos. `Effect` es una interfaz sellada (método no
-exportado `isEffect()`), así que nadie de afuera puede agregar variantes, pero el
-compilador no obliga a que un `switch` las cubra todas.
+Go not has enums exhaustivos. `Effect` is a interfaz sellada (método not
+exportado `isEffect()`), so that nadie of outside can add variants, pero the
+compilador not requires a that a `switch` the cubra all.
 
-El reemplazo es mecánico: `allEffectVariants` registra las siete, y
-`TestEffectExhaustivo` falla si el número no coincide — con un mensaje que dice
-exactamente qué hacer:
+The reemplazo is mecánico: `allEffectVariants` registra the siete, and
+`TestEffectExhaustivo` fails if the number not coincide — with a mensaje that dice
+exactly what make:
 
 ```
-variantes registradas = 8, se esperaban 7.
-Si agregaste una variante de Effect, agregala a allEffectVariants
-y revisá TODOS los switch sobre Effect (grep 'case SpawnTurn').
+variants registradas = 8, is esperaban 7.
+Si agregaste a variant of Effect, agregala a allEffectVariants
+and review TODOS the switch sobre Effect (grep 'case SpawnTurn').
 ```
 
-Es peor que un `match` de Rust. La compensación está en la otra dirección:
-`go list` permite verificar el grafo de imports, y `TestKernelEsPuro` convierte
-"el kernel es puro" en algo que el CI comprueba en vez de algo que se recuerda.
+Es peor that a `match` of Rust. The compensación is en the another dirección:
+`go list` permite verificar the grafo of imports, and `TestKernelEsPuro` convierte
+"the kernel is pure" en something that the CI comprueba en vez of something that is recuerda.
 Ver ADR-0007.

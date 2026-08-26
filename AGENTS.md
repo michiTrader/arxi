@@ -9,14 +9,14 @@ Agent orchestration system in Go. The whole project rests on one thesis:
 Decide(State, Event, Config) -> (State', []Effect)
 ```
 
-Pure: no clock, no network, no filesystem. Everything it wants to happen in the
+Pure: not clock, not network, not filesystem. Everything it wants to happen in the
 world it **describes** as an `Effect` and returns; something else carries it out.
 That constraint is why `iash run`, `iash run --sim`, `iash run replay` and
 `iash run why` are one body of logic instead of four programs that drift apart.
 
 Before touching code, read `docs/adr/`. Seven records, each one stating what was
 decided, what alternative was rejected, and **what breaks if someone reverts it
-without reading**. `docs/design/10-ejecucion.md` has the execution model;
+without reading**. `docs/design/10-execution.md` has the execution model;
 `spec/events.md` has the event catalog and the `blocked_ref` contract.
 
 ---
@@ -55,8 +55,8 @@ Spanish, translate it **before it goes in the file**. Never write it in Spanish
 The repository currently contains Spanish content written before this policy:
 all code comments, the diagnostic strings, the CLI usage text, the ADRs, the
 design docs and the README. **A dedicated migration pass will translate all of
-it to English.** The end state is a fully English repository — there is no
-grandfathered Spanish content, and no file is exempt.
+it to English.** The end state is a fully English repository — there is not
+grandfathered Spanish content, and not file is exempt.
 
 Until that pass runs, the rule for you is simple and absolute: **every line you
 add or edit is English**, even inside a file that is otherwise Spanish. A file
@@ -72,7 +72,7 @@ happens in the dedicated pass, or when the user explicitly asks for it.
 The failure messages in this project are load-bearing. Go does not give
 exhaustive `match`, so a `switch` over `Effect` missing a variant compiles fine
 and the test suite is the only net that catches it (ADR-0007). Those test
-messages are the actual documentation of the decision they protect — they must
+messages are the current documentation of the decision they protect — they must
 name the consequence and the remedy, and they must be readable by every
 contributor and every tool that ingests them.
 
@@ -119,7 +119,7 @@ clock, the answer is an event, not an import.
 
 ---
 
-## Commit policy — MANDATORY, no exceptions
+## Commit policy — MANDATORY, not exceptions
 
 **Commit after every file you create or modify. Push after every commit.**
 
@@ -171,7 +171,7 @@ export PATH=$PATH:/usr/local/go/bin
 loading is half done.
 
 **No new dependencies without justification.** The project is standard library
-only. A CLI that ships as a single static binary with no runtime is a feature,
+only. A CLI that ships as a single static binary with not runtime is a feature,
 and every dependency is a claim against it. Justify it against that or leave it
 out.
 
@@ -194,7 +194,7 @@ activated. Weakening the test would have hidden a bug that costs real money.
 Requires Go 1.22.
 
 ```bash
-go build -o iash ./cmd/iash
+go build -or iash ./cmd/iash
 go vet ./... && gofmt -l .
 go test -count=1 ./...
 UPDATE_GOLDEN=1 go test ./internal/kernel   # regenerate golden fixtures

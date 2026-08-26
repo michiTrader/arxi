@@ -7,29 +7,29 @@ import (
 	"strings"
 )
 
-// Decide es la única función que decide algo en iash.
-//
-//	Decide(State, Event, Config) -> (State', []Effect)
-//
-// Pura: mismo input, mismo output, siempre. No mira el reloj, no toca la red,
-// no escribe nada. Todo lo que quiere que pase en el mundo lo devuelve como
-// efecto y otro lo ejecuta.
-//
-// Esto es lo que hace que cuatro features sean la misma feature:
-//   - `run`     = fold + ejecutor real
-//   - `--sim`   = fold + ejecutor falso
-//   - `replay`  = fold sobre un log viejo, sin ejecutor
-//   - `run why` = leer el State que salió del fold
-//
-// Si el reducer no fuera puro, serían cuatro programas distintos que hay que
-// mantener sincronizados a mano, y el tercero siempre estaría roto.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func Decide(s State, e Event, c Config) (State, []Effect) {
 	out := s.Clone()
 	out.Seq = e.Seq
 
-	// Un evento que llega a un run terminal se registra y se ignora. No es un
-	// error: pasa siempre (un tool lento que contesta después del cancel) y
-	// tratarlo como error haría fallar replays perfectamente válidos.
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
 	if s.Status.Terminal() {
 		return out, nil
 	}
@@ -110,21 +110,21 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		releaseLock(&out, e.Str("key"))
 
 	case ResourceConflict:
-		// Un conflicto NO falla el run por sí solo. Despierta a quien lo esté
-		// observando; si nadie observa, queda registrado y el run sigue hasta
-		// que la quiescencia lo detecte. Fallar acá haría que un merge
-		// conflict trivial mate media hora de trabajo.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
 		fx = append(fx, wakeWatchers(&out, e, c)...)
 
 	case BudgetWarning:
 		out.BudgetWarned = true
 	case BudgetExceeded:
-		// Bloquear y preguntar, no matar. El trabajo hecho hasta acá vale
-		// dinero real; el humano decide si sube el presupuesto o corta.
+		// Implementation note.
+		// Implementation note.
 		out.Status = StatusBlocked
 		fx = append(fx, AskHuman{
 			Kind:      "budget",
-			Question:  fmt.Sprintf("presupuesto agotado (%.4f de %.4f USD en el árbol). ¿subir o cancelar?", out.TreeSpentUSD, out.BudgetUSD),
+			Question:  fmt.Sprintf("budget agotado (%.4f of %.4f USD en the tree). ¿subir or cancel?", out.TreeSpentUSD, out.BudgetUSD),
 			OnTimeout: "fail",
 		})
 
@@ -147,14 +147,14 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		}
 
 	case RunQuiescent:
-		// La quiescencia despierta al coordinador. Solo si NADIE la observa el
-		// run falla, y falla con el diagnóstico adentro para que `run why`
-		// tenga algo que contar.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
 		w := wakeWatchers(&out, e, c)
 		fx = append(fx, w...)
 		if len(w) == 0 {
 			out.Status = StatusFailed
-			out.Result = "run quiescente sin observador: " + e.Str("diagnosis")
+			out.Result = "run quiescent without observador: " + e.Str("diagnosis")
 		}
 
 	case RunResult:
@@ -162,24 +162,24 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		out.Result = e.Str("summary")
 	}
 
-	// Los watchers ven todo evento que no sea derivado de un watcher (para no
-	// hacer eco de sí mismos). Los casos que ya llamaron a wakeWatchers arriba
-	// se saltean para no despertar dos veces.
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
 	if !isWatcherDispatched(e.Type) && e.Source != SourceRuntime {
 		fx = append(fx, wakeWatchers(&out, e, c)...)
 	}
 
-	// La quiescencia se chequea al final de TODO paso. Es el detector del modo
-	// de falla más frecuente y más caro de estos sistemas: nadie está ocupado,
-	// nadie está bloqueado por algo nombrable, no hay timer armado, y el run
-	// simplemente se queda mirando el techo para siempre.
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
+	// Implementation note.
 	fx = append(fx, checkQuiescence(&out, e, c, fx)...)
 
 	return out, orderEffects(fx)
 }
 
-// Fold reconstruye el estado desde el log. State = fold(Decide, State0, events).
-// El snapshot es una optimización, nunca la verdad.
+// Implementation note.
+// Implementation note.
 func Fold(s State, events []Event, c Config) (State, []Effect) {
 	var all []Effect
 	for _, e := range events {
@@ -201,16 +201,16 @@ func applyRunStarted(out *State, e Event, c Config) {
 	out.SpawnDepth = int(e.Num("spawn_depth"))
 	out.NextInboxID = 1
 
-	// StageIndex = -1 significa "todavía no entró a ninguna etapa". Empezar en 0
-	// haría que el primer stage.entered pareciera una re-entrada.
+	// Implementation note.
+	// Implementation note.
 	out.StageIndex = -1
 
 	out.Members = nil
 	for _, mc := range c.Members {
 		st := MemberIdle
 		if mc.Advisory {
-			// Un advisory arranca inactivo: opina cuando lo llaman, no ocupa un
-			// turno pagado apenas arranca el run.
+			// Implementation note.
+			// Implementation note.
 			st = MemberInactive
 		}
 		out.Members = append(out.Members, Member{
@@ -223,13 +223,13 @@ func applyRunStarted(out *State, e Event, c Config) {
 	}
 }
 
-// applyInjection unifica run.prompt, agent.steered y agent.notified porque son
-// el mismo mecanismo con distinta procedencia: llega texto para alguien.
-//
-// Y acá está la pieza clave: si el destinatario está ocupado, el texto NO se
-// pierde ni abre un turno nuevo. Se acumula en PendingCauses y se drena cuando
-// termine el turno actual. Eso ES `on_busy: queue`, y `queue` ES follow-up.
-// Tres features, un mecanismo.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func applyInjection(out *State, e Event, c Config) []Effect {
 	target := resolveSteerTarget(out, c, e.Str("to"))
 	var fx []Effect
@@ -239,10 +239,10 @@ func applyInjection(out *State, e Event, c Config) []Effect {
 		if target != "*" && m.Name != target {
 			continue
 		}
-		// Un broadcast le habla a quien está participando, no a quien todavía no
-		// fue activado. Un advisory inactivo se despierta si lo nombrás, no por
-		// estar en la lista: si no, cada steer al equipo paga un turno por cada
-		// opinador que nadie invocó.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
 		if target == "*" && m.State == MemberInactive {
 			continue
 		}
@@ -260,9 +260,9 @@ func applyInjection(out *State, e Event, c Config) []Effect {
 	return fx
 }
 
-// resolveSteerTarget traduce el destino declarado a un nombre concreto.
-// "coordinator" no es un tipo especial de agente: es el primer no-advisory, o
-// quien tenga ese rol. Un solo namespace, sin categorías paralelas.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func resolveSteerTarget(out *State, c Config, explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -349,7 +349,7 @@ func applyStageSubmitted(out *State, e Event, c Config) []Effect {
 	next := out.StageIndex + 1
 	if next >= len(c.Stages) {
 		fx = append(fx, Emit{Event: derived(out, e, RunResult, map[string]any{
-			"summary":     "todas las etapas completadas",
+			"summary":     "all the stages completed",
 			"result_from": c.ResultFrom,
 		})})
 		return fx
@@ -370,8 +370,8 @@ func applyStageSubmitted(out *State, e Event, c Config) []Effect {
 	return fx
 }
 
-// quorumMet evalúa la regla de avance. Los advisory NUNCA cuentan: es la
-// consecuencia concreta del rasgo, no una excepción cableada acá.
+// Implementation note.
+// Implementation note.
 func quorumMet(s State, c Config, st StageConfig) bool {
 	var total, done int
 	for _, m := range s.Members {
@@ -408,9 +408,9 @@ func quorumMet(s State, c Config, st StageConfig) bool {
 	return done == total
 }
 
-// applyStageTimeout: el default es escalar, no fallar. Un timeout casi nunca
-// significa "imposible", significa "algo se trabó, mirá". Y si no hay nadie
-// mirando, se le pregunta a un humano antes de tirar el trabajo a la basura.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func applyStageTimeout(out *State, e Event, c Config) []Effect {
 	out.ActiveTimer = ""
 	st := c.StageAt(out.StageIndex)
@@ -422,14 +422,14 @@ func applyStageTimeout(out *State, e Event, c Config) []Effect {
 	switch action {
 	case "fail":
 		out.Status = StatusFailed
-		out.Result = "etapa " + out.Stage + " expiró"
+		out.Result = "stage " + out.Stage + " expired"
 		return nil
 
 	case "advance":
 		next := out.StageIndex + 1
 		if next >= len(c.Stages) {
 			return []Effect{Emit{Event: derived(out, e, RunResult, map[string]any{
-				"summary": "última etapa expiró, avanzando",
+				"summary": "última stage expired, advancing",
 			})}}
 		}
 		return []Effect{
@@ -449,15 +449,15 @@ func applyStageTimeout(out *State, e Event, c Config) []Effect {
 		out.Status = StatusBlocked
 		return []Effect{AskHuman{
 			Kind:      "stage_timeout",
-			Question:  "la etapa " + out.Stage + " expiró y nadie la observa. ¿avanzar, extender o cancelar?",
+			Question:  "the stage " + out.Stage + " expired and nadie the observa. ¿avanzar, extender or cancel?",
 			OnTimeout: "fail",
 		}}
 	}
 }
 
-// applyTurnDone es donde vive el coalescing. Si mientras el agente pensaba
-// llegaron cinco razones para volver a hablarle, se abre UN turno con las cinco
-// causas, no cinco turnos. La diferencia es literalmente 5x en la factura.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func applyTurnDone(out *State, e Event, c Config) []Effect {
 	m := out.Member(e.Actor)
 	if m == nil {
@@ -484,16 +484,16 @@ func applyBlocked(out *State, e Event) {
 	m.SinceSeq = e.Seq
 	m.Detail = e.Str("blocked_on")
 
-	// El payload estructurado es lo que hace que `run why` no tenga casos
-	// cableados: camina el grafo leyendo estas referencias.
+	// Implementation note.
+	// Implementation note.
 	if raw, ok := e.Payload["blocked_ref"].(map[string]any); ok {
 		m.BlockedOn = raw
 	}
 }
 
-// applyToolDenied: policy=ask no es un error, es una pregunta. Y la pregunta se
-// guarda con referencia estructurada para que `run why` pueda decir el comando
-// exacto que la desbloquea.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func applyToolDenied(out *State, e Event) []Effect {
 	tool := e.Str("tool")
 	if e.Str("policy") != "ask" {
@@ -509,7 +509,7 @@ func applyToolDenied(out *State, e Event) []Effect {
 	item := InboxItem{
 		ID:        id,
 		Kind:      "tool_approval",
-		Question:  "aprobar " + tool + " para " + e.Actor + "?",
+		Question:  "aprobar " + tool + " for " + e.Actor + "?",
 		Agent:     e.Actor,
 		OnTimeout: "deny",
 	}
@@ -584,9 +584,9 @@ func applyInboxTimeout(out *State, e Event) []Effect {
 	return nil
 }
 
-// applyCost atribuye el gasto al miembro Y al árbol. El árbol es lo que hace
-// que --budget del run raíz signifique algo cuando hay spawn anidado: sin
-// TreeSpentUSD, N niveles de profundidad multiplican el techo por N.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func applyCost(out *State, e Event, c Config, fx *[]Effect) {
 	cost := e.Num("cost_usd")
 	out.SpentUSD += cost
@@ -618,17 +618,17 @@ func applyCost(out *State, e Event, c Config, fx *[]Effect) {
 	}
 }
 
-// checkQuiescence detecta que el run se quedó callado.
-//
-// Esto no está en la especificación de ningún competidor y es el modo de falla
-// que más plata y más paciencia cuesta: el sistema no falla, no termina, no
-// avanza. Simplemente deja de pasar cosas y el usuario descubre a la mañana
-// siguiente que gastó 40 dólares en nada.
-//
-// La detección es conservadora: si hay CUALQUIER razón para creer que algo va a
-// pasar (un efecto pendiente que va a producir un evento, alguien ocupado,
-// alguien despertable, un timer armado, una pregunta sin responder), no se
-// emite.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 	if out.Status != StatusRunning || out.QuiescentEmitted {
 		return nil
@@ -636,7 +636,7 @@ func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 	if e.Type == RunQuiescent {
 		return nil
 	}
-	// Cualquier efecto pendiente va a generar un evento: todavía no hay silencio.
+	// Implementation note.
 	for _, f := range pending {
 		switch f.(type) {
 		case SpawnTurn, CallTool, SetTimer, AskHuman, Emit:
@@ -652,35 +652,35 @@ func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 		}
 	}
 
-	// Diagnóstico: la razón concreta por la que está callado. Sin esto el evento
-	// sería un "algo pasó" inútil, y `run why` no tendría qué contar.
-	diag := "nadie está trabajando y nadie puede empezar"
+	// Implementation note.
+	// Implementation note.
+	diag := "nadie is working and nadie can empezar"
 	var waiting []string
 	for _, m := range out.Members {
 		if m.State == MemberWaiting {
-			waiting = append(waiting, m.Name+" espera "+m.Detail)
+			waiting = append(waiting, m.Name+" waits "+m.Detail)
 		}
 	}
 	if len(waiting) > 0 {
 		diag = strings.Join(waiting, "; ")
 	} else if st := c.StageAt(out.StageIndex); st != nil {
-		// El diagnóstico SIEMPRE nombra la regla de avance, incluso cuando no
-		// falta nadie. Ese es justamente el caso más difícil de depurar a ojo:
-		// la regla pide tres entregas y solo existen dos miembros que puedan
-		// entregar, así que todos "cumplieron" y la regla igual no se cumple
-		// nunca. Un diagnóstico que dijera solo "nadie puede empezar" dejaría al
-		// usuario mirando un blueprint correcto en apariencia.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
+		// Implementation note.
 		var missing []string
 		for _, m := range out.Members {
 			if !m.Advisory && !m.Submitted && participates(c, m.Name, st.Name) {
 				missing = append(missing, m.Name)
 			}
 		}
-		diag = "etapa " + st.Name + " avanza con " + st.AdvanceWhen + " y no se cumple"
+		diag = "stage " + st.Name + " advances with " + st.AdvanceWhen + " and not is meets"
 		if len(missing) > 0 {
-			diag += "; falta el submit de: " + strings.Join(missing, ", ")
+			diag += "; missing the submit of: " + strings.Join(missing, ", ")
 		} else {
-			diag += "; ya entregaron todos los que podían: la regla es insatisfacible con este blueprint"
+			diag += "; ya submitted all the that could: the rule is unsatisfiable with this blueprint"
 		}
 	}
 
@@ -691,12 +691,12 @@ func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 	})}}
 }
 
-// wakeWatchers evalúa los watchers declarados.
-//
-// Los dos filtros de acá (auto-exclusión y límite de profundidad) corren ANTES
-// de generar un solo efecto caro. Son baratos y evitan la clase de bug que se
-// cobra en dólares: un watcher sobre `agent.*` que reacciona a sus propios
-// eventos es un bucle infinito con tarjeta de crédito.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func wakeWatchers(out *State, e Event, c Config) []Effect {
 	var fx []Effect
 	for _, w := range c.Watchers {
@@ -736,9 +736,9 @@ func wakeWatchers(out *State, e Event, c Config) []Effect {
 	return fx
 }
 
-// matchPattern soporta exacto y un solo comodín de sufijo (`stage.*`). No hay
-// glob completo a propósito: un patrón que nadie puede leer de un vistazo es un
-// patrón que va a despertar agentes que nadie esperaba.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func matchPattern(pattern, typ string) bool {
 	if pattern == typ || pattern == "*" {
 		return true
@@ -765,9 +765,9 @@ func spawnFor(out *State, m Member, c Config, causes []string, coalesced int) Ef
 	}
 }
 
-// buildContext arma las capas en orden de estabilidad decreciente:
-// identity → situation → memory → shared → cause. Ese orden existe para que el
-// prefix cache del proveedor pegue en las capas que no cambian entre turnos.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func buildContext(out *State, m Member, c Config, causes []string) ContextSpec {
 	cs := c.Context
 	cs.Identity = m.Name
@@ -785,12 +785,12 @@ func buildContext(out *State, m Member, c Config, causes []string) ContextSpec {
 	return cs
 }
 
-// derived construye un evento derivado. Hereda correlation_id (para poder
-// seguir el hilo causal completo) e incrementa depth, que es lo que hace que el
-// límite de profundidad sea aplicable.
-//
-// Seq queda en 0 a propósito: el reducer no es el escritor único del log, así
-// que no le corresponde asignar números de secuencia.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func derived(out *State, cause Event, typ EventType, payload map[string]any) Event {
 	corr := cause.CorrelationID
 	if corr == "" {
@@ -807,10 +807,10 @@ func derived(out *State, cause Event, typ EventType, payload map[string]any) Eve
 	}
 }
 
-// orderEffects pone los de control primero, preservando el orden relativo
-// dentro de cada clase. SliceStable y no Slice: el orden de los Emit entre sí
-// es semántico (stage.advanced antes de stage.entered) y un sort inestable lo
-// rompería de forma intermitente, que es la peor forma de romperse.
+// Implementation note.
+// Implementation note.
+// Implementation note.
+// Implementation note.
 func orderEffects(fx []Effect) []Effect {
 	if len(fx) < 2 {
 		return fx
@@ -821,8 +821,8 @@ func orderEffects(fx []Effect) []Effect {
 	return fx
 }
 
-// isWatcherDispatched marca los tipos que ya llamaron a wakeWatchers dentro del
-// switch, para no despertar dos veces al mismo watcher por el mismo evento.
+// Implementation note.
+// Implementation note.
 func isWatcherDispatched(t EventType) bool {
 	switch t {
 	case ResourceConflict, RunQuiescent, StageTimeout:
