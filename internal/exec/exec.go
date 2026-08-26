@@ -1,0 +1,346 @@
+// Package exec runs the effects that the reducer described.
+//
+// The split of responsibility with internal/kernel is the whole point of the
+// architecture: kernel decides and returns []Effect without touching the world,
+// exec touches the world and returns events. That is what makes `run`, `--sim`
+// and `replay` three configurations of one code path instead of three
+// implementations that drift apart:
+//
+//	run     = kernel.Fold + real Executor    + real Log
+//	--sim   = kernel.Fold + Fake Executor    + real Log + VirtualClock
+//	replay  = kernel.Fold + no Executor at all
+//
+// If this package ever starts making decisions (choosing which agent to wake,
+// deciding a stage advanced), that equivalence dies: `--sim` would stop
+// predicting `run`, and the simulation would become a lie that is worse than
+// having no simulation.
+package exec
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/michiTrader/iash/internal/kernel"
+)
+
+// Log is the slice of the event log that the runner needs, declared here rather
+// than imported from the storage package.
+//
+// The direction of this dependency is deliberate: exec declares what it needs
+// and storage happens to satisfy it. The alternative (exec imports the concrete
+// store) makes it impossible to test the runner without touching a filesystem,
+// and would let storage details leak into the run loop.
+//
+// The method set matches internal/logstore's contract exactly, so the concrete
+// store satisfies this interface with no adapter. That is a coordination
+// constraint, not a coincidence: if the two drift, the compiler says so at the
+// wiring site instead of at runtime.
+type Log interface {
+	// Append writes events and returns them with Seq assigned. The reducer
+	// leaves Seq at 0 because it is not the single writer (see event.go); the
+	// runner does not assign it either, for the same reason. Only the log does.
+	Append(events []kernel.Event) ([]kernel.Event, error)
+
+	// Fold rebuilds the state up to untilSeq. The runner needs this to honour
+	// Snapshot, see the comment in runSnapshot.
+	Fold(c kernel.Config, untilSeq int64) (kernel.State, error)
+
+	// WriteSnapshot stores a materialized state. Its failure is not fatal, see
+	// runSnapshot.
+	WriteSnapshot(st kernel.State, atSeq int64) error
+}
+
+// Clock is time, injected instead of taken from the package `time`.
+//
+// SetTimer carries a relative offset in milliseconds and not an absolute
+// instant precisely so that this interface can be implemented by a virtual
+// clock: a test of a stage with a 30-minute timeout has to run in
+// microseconds, and it has to exercise the same reducer path that the real run
+// exercises. A `time.Sleep` hidden inside the runner would make that
+// impossible and would push everyone to test timeouts by not testing them.
+type Clock interface {
+	// SetTimer arms a timer that fires afterMs milliseconds from now.
+	SetTimer(id string, afterMs int64) error
+	// CancelTimer disarms a timer. Cancelling a timer that does not exist is
+	// NOT an error: the reducer legitimately cancels defensively (a stage that
+	// advanced before its timeout), and turning that into a failure would make
+	// correct reducer code look broken.
+	CancelTimer(id string) error
+}
+
+// Executor performs the effects that cost money or block on a human.
+//
+// One method per variant, rather than a single Do(Effect), and that choice is
+// the same argument as ADR-0007: with three methods, an implementation that
+// forgets one does not compile, and adding a fourth independent variant breaks
+// every implementation loudly at build time. A single Do(Effect) with a type
+// switch inside moves that check to runtime, where it shows up as an effect
+// that silently does nothing.
+//
+// Every method may return events AND an error at the same time, and that is
+// not sloppiness:
+//
+//   - A DOMAIN failure (the tool exited non-zero, the provider refused the
+//     prompt) must come back as an event, because it happened and the log is
+//     the truth. Returning only an error would erase it from history.
+//   - A returned error means the failure could not be turned into a fact:
+//     the transport broke, the context was cancelled. That is a different and
+//     worse thing, and the runner surfaces it instead of swallowing it.
+type Executor interface {
+	SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Event, error)
+	CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event, error)
+	AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event, error)
+}
+
+// ErrUnorderedEffects means the effect list arrived with a control effect after
+// an independent one.
+//
+// The runner refuses to execute such a list instead of quietly re-sorting it.
+// Re-sorting would hide a bug in the reducer, and this particular bug is the
+// expensive kind: if the list is [CallTool, Emit] and the runner split it at
+// the first independent effect, the Emit would run in the parallel group and
+// race the tool call that was supposed to observe it. The run would then finish
+// in two different ways depending on scheduling luck, which is the failure mode
+// that is hardest to ever reproduce.
+var ErrUnorderedEffects = errors.New("effects are not ordered: control after independent")
+
+// Result is what one step of the runner produced.
+type Result struct {
+	// Events are the events appended to the log, with Seq assigned, in the
+	// order they were appended.
+	Events []kernel.Event
+
+	// Errs holds every error raised by an effect. It is a slice and not a
+	// single error because a partial failure must not hide the other failures:
+	// if two of five turns broke, the operator needs both reasons, not the
+	// first one.
+	Errs []error
+
+	// SnapshotSkipped counts snapshots that could not be written. It is
+	// reported rather than raised, see runSnapshot.
+	SnapshotSkipped int
+}
+
+// Err collapses Errs into one error, or nil if there were none. Callers that
+// only want to know "did anything break" use this; callers that want to report
+// every cause read Errs.
+func (r Result) Err() error {
+	if len(r.Errs) == 0 {
+		return nil
+	}
+	return errors.Join(r.Errs...)
+}
+
+// Runner executes effect lists. It holds the Config because Snapshot needs to
+// re-fold the log, see runSnapshot.
+type Runner struct {
+	Log      Log
+	Clock    Clock
+	Executor Executor
+	Config   kernel.Config
+}
+
+// Run executes one effect list under the rule from ADR-0003: the control
+// prefix sequentially and in exact list order, then the independent tail in
+// parallel.
+//
+// The list is expected to arrive already ordered, because kernel.Decide sorts
+// it with orderEffects before returning. Run verifies that expectation instead
+// of assuming it; see ErrUnorderedEffects for what assuming it would cost.
+func (r *Runner) Run(ctx context.Context, fx []kernel.Effect) (Result, error) {
+	var res Result
+
+	split, err := controlPrefixLen(fx)
+	if err != nil {
+		return res, err
+	}
+
+	// Control effects, one at a time. Not batched, not overlapped: an Emit is
+	// classified as control precisely because the effects after it must be
+	// able to observe the event it wrote, and "observe" means "already in the
+	// log". Batching consecutive Emits would in fact be safe, but the saving is
+	// one write per step and the cost is a reader having to prove that the
+	// batching boundary is always in a safe place. Not worth it.
+	for _, e := range fx[:split] {
+		if err := r.runControl(ctx, e, &res); err != nil {
+			// A control effect that fails aborts the step, and the independent
+			// tail never runs. That is intentional: the tail was decided under
+			// the assumption that the control effects took place, so spawning
+			// turns after a failed Emit means paying a provider to act on a
+			// state that never existed.
+			return res, err
+		}
+	}
+
+	r.runIndependent(ctx, fx[split:], &res)
+	return res, nil
+}
+
+// controlPrefixLen returns the length of the leading run of control effects,
+// and fails if any control effect appears after an independent one.
+func controlPrefixLen(fx []kernel.Effect) (int, error) {
+	split := 0
+	for split < len(fx) && fx[split].Class() == kernel.ClassControl {
+		split++
+	}
+	for i := split; i < len(fx); i++ {
+		if fx[i].Class() == kernel.ClassControl {
+			return 0, fmt.Errorf("%w: effect %d of %d is control but sits after an "+
+				"independent one; kernel.Decide must return orderEffects(fx), and "+
+				"running this list as-is would put an Emit in the parallel group",
+				ErrUnorderedEffects, i, len(fx))
+		}
+	}
+	return split, nil
+}
+
+// runControl performs a single control effect.
+//
+// The default branch is the exhaustiveness guard that Go does not give us. If
+// someone adds a control variant to kernel and forgets this switch, the effect
+// would otherwise be silently dropped: the run would look healthy and simply
+// not do what the reducer decided. See TestEveryVariantIsDispatched.
+func (r *Runner) runControl(ctx context.Context, e kernel.Effect, res *Result) error {
+	switch v := e.(type) {
+	case kernel.Emit:
+		written, err := r.Log.Append([]kernel.Event{v.Event})
+		if err != nil {
+			return fmt.Errorf("append emitted %s: %w", v.Event.Type, err)
+		}
+		res.Events = append(res.Events, written...)
+		return nil
+
+	case kernel.SetTimer:
+		if err := r.Clock.SetTimer(v.ID, v.FiresAtMs); err != nil {
+			return fmt.Errorf("set timer %s: %w", v.ID, err)
+		}
+		return nil
+
+	case kernel.CancelTimer:
+		if err := r.Clock.CancelTimer(v.ID); err != nil {
+			return fmt.Errorf("cancel timer %s: %w", v.ID, err)
+		}
+		return nil
+
+	case kernel.Snapshot:
+		r.runSnapshot(v, res)
+		return nil
+
+	default:
+		return fmt.Errorf("unhandled control effect %T: it was added to "+
+			"kernel.Effect but not to exec.runControl, so the reducer's decision "+
+			"would be dropped without a trace; add a case here", e)
+	}
+}
+
+// runSnapshot writes a snapshot, and never fails the step when it cannot.
+//
+// Two decisions live here, and both come straight out of ADR-0002 (the log is
+// the truth, snapshots are a cache):
+//
+// First, the runner does NOT snapshot a state it was handed. By the time a
+// Snapshot effect runs, the control Emits before it have already changed the
+// state; writing the pre-Emit state would produce a cache that disagrees with
+// the log. And because a disagreeing cache is read in preference to the log,
+// that would be a wrong answer served fast. So the state is re-folded from the
+// log, which is by definition consistent with it.
+//
+// Second, a snapshot that cannot be written is not a failed run. The run is
+// still entirely correct, it is only slower to inspect. Aborting because a
+// cache write failed would invert ADR-0002 and make an optimization mandatory.
+func (r *Runner) runSnapshot(v kernel.Snapshot, res *Result) {
+	st, err := r.Log.Fold(r.Config, v.AtSeq)
+	if err != nil {
+		res.SnapshotSkipped++
+		return
+	}
+	if err := r.Log.WriteSnapshot(st, v.AtSeq); err != nil {
+		res.SnapshotSkipped++
+	}
+}
+
+// runIndependent executes the tail concurrently and then appends the results in
+// LIST order, not in completion order.
+//
+// This is the decision that keeps --sim worth having. Replay reads the log, so
+// whatever order landed there is the truth and replay stays faithful either
+// way. But if the append order followed whichever provider answered first, then
+// two --sim runs over identical input would produce different logs, and the
+// simulation could no longer be used to predict or to diff. Indexing the
+// results costs one slice and buys determinism.
+//
+// The other decision is that a failing effect does not discard its siblings.
+// By the time one SpawnTurn errors, the other two have already spent real money
+// and the tool call has already touched the filesystem. Dropping their events
+// would leave the log describing a world that does not exist, which is the one
+// thing the log is not allowed to do.
+func (r *Runner) runIndependent(ctx context.Context, fx []kernel.Effect, res *Result) {
+	if len(fx) == 0 {
+		return
+	}
+
+	type outcome struct {
+		events []kernel.Event
+		err    error
+	}
+	outcomes := make([]outcome, len(fx))
+
+	var wg sync.WaitGroup
+	for i, e := range fx {
+		wg.Add(1)
+		go func(i int, e kernel.Effect) {
+			defer wg.Done()
+			// A panicking provider client must not take the whole run down and,
+			// worse, must not take down the events its siblings already
+			// produced. Converting the panic into an error keeps the partial
+			// results appendable.
+			defer func() {
+				if p := recover(); p != nil {
+					outcomes[i].err = fmt.Errorf("effect %T panicked: %v", e, p)
+				}
+			}()
+			outcomes[i].events, outcomes[i].err = r.dispatch(ctx, e)
+		}(i, e)
+	}
+	wg.Wait()
+
+	for i := range outcomes {
+		// Events first, unconditionally: an effect that reports both a domain
+		// event and an error produced both, and the event is the part that
+		// belongs in history.
+		if len(outcomes[i].events) > 0 {
+			written, err := r.Log.Append(outcomes[i].events)
+			if err != nil {
+				res.Errs = append(res.Errs, fmt.Errorf("append result of %T: %w", fx[i], err))
+			} else {
+				res.Events = append(res.Events, written...)
+			}
+		}
+		if outcomes[i].err != nil {
+			res.Errs = append(res.Errs, outcomes[i].err)
+		}
+	}
+}
+
+// dispatch routes one independent effect to the Executor.
+//
+// Same reasoning as runControl's default branch: a new independent variant that
+// nobody wired here must fail loudly, because the alternative is an agent turn
+// that the reducer decided and that never happens.
+func (r *Runner) dispatch(ctx context.Context, e kernel.Effect) ([]kernel.Event, error) {
+	switch v := e.(type) {
+	case kernel.SpawnTurn:
+		return r.Executor.SpawnTurn(ctx, v)
+	case kernel.CallTool:
+		return r.Executor.CallTool(ctx, v)
+	case kernel.AskHuman:
+		return r.Executor.AskHuman(ctx, v)
+	default:
+		return nil, fmt.Errorf("unhandled independent effect %T: it was added to "+
+			"kernel.Effect but not to exec.dispatch, so the reducer's decision "+
+			"would never reach the executor; add a case here and a method to "+
+			"the Executor interface", e)
+	}
+}

@@ -190,3 +190,133 @@ It is worse than a Rust `match`. The compensation is in the other direction:
 `go list` lets us verify the import graph, and `TestKernelIsPure` turns "the
 kernel is pure" into something CI checks instead of something you remember. See
 ADR-0007.
+
+## 10.10 The runner, as built
+
+§10.3 gives the rule. `internal/exec` implements it, and implementing it forced
+four decisions the rule alone does not settle.
+
+**An unordered list is refused, not fixed.** `Decide` already sorts, so the
+runner could simply trust the order. It verifies it instead, and returns
+`ErrUnorderedEffects` if a control effect appears after an independent one.
+
+Re-sorting would be the friendlier choice and the wrong one: it would hide a bug
+in `orderEffects` whose symptom is an `Emit` running inside the parallel group.
+The run would then finish in one of two different ways depending on which
+goroutine got scheduled first, and that is the failure mode that never
+reproduces on the machine where it is being debugged.
+
+**Independent results are appended in list order, never in completion order.**
+Replay reads the log, so whatever order landed there becomes the truth and replay
+stays faithful either way. But if the append order followed whichever provider
+answered first, two `--sim` runs over identical input would produce different
+logs, and `run diff` could no longer tell a real change from scheduling noise.
+The cost of the guarantee is one slice of results indexed by position.
+
+**A failing effect does not discard its siblings.** By the time one `SpawnTurn`
+errors, the other two have already spent real money and the `CallTool` has
+already written to the filesystem. Dropping their events would leave the log
+describing a world that does not exist — the one thing the log is not allowed to
+do. So every effect's events are appended first, and its error is recorded
+afterwards, in a `Result.Errs` slice rather than a single error: with two of five
+effects broken, the operator needs both reasons, not the first one.
+
+This is also why an effect may legitimately return **events and an error at the
+same time**. The two are different facts:
+
+| Situation | Event written | Error returned |
+|---|---|---|
+| Tool ran, exited non-zero | `tool.call_completed` `ok=false` | no |
+| Provider refused the prompt | `agent.failed` | no |
+| Connection reset before the call landed | none | yes |
+| Context cancelled | none | yes |
+
+A domain failure **happened**, so it belongs in the log. A transport failure
+means nothing can be said about what happened, and the log is the one place that
+may not contain guesses.
+
+**A control failure aborts the step before anything is spent.** If an `Emit`
+cannot be written, the independent tail never runs. The tail was decided under
+the assumption that the control effects took place, so spawning turns afterwards
+means paying a provider to act on a state that never existed.
+
+### Snapshots
+
+`Snapshot` re-folds from the log rather than snapshotting a state handed to it.
+By the time it runs, the control `Emit`s before it have already moved the state,
+so writing the pre-`Emit` state would produce a cache that disagrees with the
+log — and since the cache is read *in preference to* the log, that is a wrong
+answer served fast.
+
+And a snapshot that cannot be written does not fail the run. The run is still
+entirely correct, only slower to inspect. Aborting because a cache write failed
+would invert ADR-0002 and make an optimization mandatory: a read-only disk would
+start killing runs that are otherwise fine. The skip is counted in
+`Result.SnapshotSkipped`, because *not fatal* must not mean *invisible* — a
+permanently failing cache would otherwise leave `run show` mysteriously slow
+forever with nothing to point at.
+
+## 10.11 Time is injected
+
+`SetTimer` carries a **relative offset in milliseconds**, never an absolute
+instant. That single choice is what makes timeouts testable: a stage with a
+thirty-minute timeout is exercised in microseconds by a virtual clock.
+
+The alternative is not "slower tests", it is **untested timeouts**. Nobody keeps
+a suite that takes half an hour, so those paths would be skipped, and the first
+real execution of the timeout code would be at 3am on a run that matters.
+
+Two implementations, one interface:
+
+- `VirtualClock` — used by `--sim` and by every test. Time moves only when
+  `Advance` is called, which makes the firing order of timers a fact of the test
+  instead of a race against the machine's scheduler. It starts at `t=0`, not at
+  `time.Now()`, so a simulated log is never mistakable at a glance for a real one.
+- `RealClock` — records wall-clock deadlines and is **polled**, not built on
+  `time.AfterFunc`. A callback-based real clock would need a mechanism the
+  virtual clock deliberately does not have, and the run loop in `run` and the run
+  loop in `--sim` would stop being the same code.
+
+Both are deliberately identical in what they accept and reject, because a
+blueprint that simulates cleanly must not still fail on a real run — that would
+make `--sim` an unsafe place to discover problems.
+
+Three behaviours are worth naming:
+
+- **Ties are broken by timer id.** Go randomizes map iteration on purpose, so two
+  timers armed for the same instant would otherwise fire in a different order on
+  each execution. That alone would make `--sim` produce a different log from
+  identical input.
+- **Re-arming an id overwrites it.** Re-entering a stage legitimately re-arms its
+  timeout; rejecting the second arming would leave the stage holding its previous
+  deadline and expiring early for a reason unreadable in the log.
+- **Cancelling an unknown timer succeeds, and cancelling also un-fires.** The
+  reducer cancels defensively — a stage that advanced before its timeout never
+  armed one — so erroring would force a check-then-act race at every call site.
+  And a timer cancelled in the same step in which it fired is removed from the
+  delivery queue: otherwise the run would handle a timeout for a stage that had
+  already advanced, which is exactly the double-outcome race that made
+  `CancelTimer` a *control* effect in §10.3.
+
+## 10.12 The fake executor is production code
+
+`Fake` lives in `internal/exec`, not in a `_test.go` file, and that placement is
+a decision rather than an accident: `--sim` is a user-facing feature, so if the
+fake were test-only the shipped binary could not simulate anything, and users
+would be left discovering how a blueprint behaves by paying for it.
+
+What the fake does **not** do is decide anything. It reports that a turn
+happened and lets `Decide` draw every conclusion. If the fake started concluding
+that a submit means a stage advances, `--sim` would be predicting its own
+behaviour rather than the reducer's, and would agree with `run` only by
+coincidence.
+
+Two smaller choices follow from the same reasoning:
+
+- Simulated event ids are **deterministic** (`sim-0001`, `sim-0002`), not UUIDs.
+  Ids appear in `caused_by` chains and therefore in the log; random ids would
+  make two identical `--sim` runs differ on every line, and `run diff` useless
+  exactly where it would be most useful.
+- A simulated turn **costs money by default**. A free simulation can never reach
+  a budget ceiling, so `budget.warning` and `budget.exceeded` would be dead code
+  until a real run hit them.

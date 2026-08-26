@@ -112,3 +112,69 @@ func TestSurfaceDoesNotImportTheExecutor(t *testing.T) {
 		}
 	}
 }
+
+// TestExecutorDependsOnlyOnTheKernel keeps the runner's dependency direction
+// pointing downwards.
+//
+// internal/exec deliberately DECLARES what it needs from storage (the exec.Log
+// interface) instead of importing the concrete store. If that inverted and exec
+// imported the store package, two things would break at once: the runner would
+// stop being testable without a filesystem, and storage details (file layout,
+// fsync policy, torn-write recovery) would start leaking into the run loop,
+// where nobody would think to look for them.
+//
+// The kernel is the one exception: exec must import it, because effects and
+// events are the vocabulary the two speak.
+func TestExecutorDependsOnlyOnTheKernel(t *testing.T) {
+	p := list(t, mod+"internal/exec")
+	for _, d := range p.Deps {
+		if !strings.HasPrefix(d, mod) {
+			continue
+		}
+		if d == mod+"internal/kernel" {
+			continue
+		}
+		t.Errorf("internal/exec depends on %s.\n"+
+			"  why this is wrong: the executor may only depend on the kernel, whose "+
+			"effects and events are the vocabulary they share. Everything else it "+
+			"needs is DECLARED as an interface here (see exec.Log) so the runner "+
+			"stays testable without a filesystem and storage details cannot leak "+
+			"into the run loop.\n"+
+			"  what to do: add the methods you need to an interface inside "+
+			"internal/exec and let the concrete type satisfy it at the wiring "+
+			"site in cmd/iash.", d)
+	}
+}
+
+// TestExecutorIsNotPure is the inverse of TestKernelIsPure, and it exists so
+// that nobody "cleans up" the executor by accident.
+//
+// The imports banned in the kernel are exactly the ones the executor is FOR:
+// somebody has to touch time, processes and the network, and concentrating that
+// in one package is the whole point of the split. Without this test, the purity
+// rule looks like a global style preference, and the next person could try to
+// satisfy it everywhere, quietly moving real-world work back into the reducer.
+func TestExecutorIsNotPure(t *testing.T) {
+	var allowed []string
+	for _, p := range ownClosure(t, mod+"internal/exec") {
+		if p.ImportPath != mod+"internal/exec" {
+			continue
+		}
+		for _, imp := range p.Imports {
+			if _, banned := forbidden[imp]; banned {
+				allowed = append(allowed, imp)
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		t.Errorf("internal/exec imports none of the packages that are forbidden in " +
+			"the kernel (time, os, io, net...).\n" +
+			"  why this is suspicious: those imports are what the executor EXISTS " +
+			"for. The kernel is pure so that one package can be impure; if the " +
+			"executor is pure too, then either the real-world work never got " +
+			"written, or it drifted back into the reducer and replay is now lying.\n" +
+			"  what to do: if the runner genuinely no longer touches the outside " +
+			"world, delete this test and say so in an ADR, because the layering " +
+			"argument in ADR-0003 no longer describes the code.")
+	}
+}
