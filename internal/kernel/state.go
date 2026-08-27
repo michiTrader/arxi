@@ -64,6 +64,18 @@ type Member struct {
 	Turns     int            `json:"turns"`
 	Submitted bool           `json:"submitted,omitempty"`
 
+	// TurnOpen records that this member has been activated and its turn has not
+	// finished yet, independently of the state it is currently displaying.
+	//
+	// It exists because State alone cannot answer "is a turn still running".
+	// A member that submits mid-turn moves to MemberSubmitted, which is neither
+	// Busy nor Runnable, while agent.turn_done is still on its way in the same
+	// batch of events. checkQuiescence folding that submit therefore saw nobody
+	// busy, nobody runnable and nothing armed, and diagnosed a run that was
+	// working normally as silent forever. Since a watcher on run.quiescent opens a
+	// paid turn, that false positive cost money as well as trust.
+	TurnOpen bool `json:"turn_open,omitempty"`
+
 	// PendingCauses are events that arrived while the member was busy. They are
 	// neither lost nor do they open a new turn: they accumulate and are drained
 	// together on the next turn. This IS `on_busy: queue`, and it is the same
@@ -71,18 +83,59 @@ type Member struct {
 	PendingCauses []string `json:"pending_causes,omitempty"`
 }
 
-// Runnable reports whether it is worth opening a turn for this member.
+// Runnable reports whether a turn for this member is actually going to happen.
 //
-// EXPENSIVE SUBTLETY: MemberIdle only. The temptation is to include
-// MemberSubmitted ("already answered, could answer again"), and that breaks
-// quiescence detection in the worst way: in a staged run where everyone
-// submitted but the advance rule is not met, the system looks eternally healthy
-// (there are "runnable" members) when in fact it is stuck forever. That is
-// exactly the case run.quiescent exists to catch.
-func (m Member) Runnable() bool { return m.State == MemberIdle }
+// EXPENSIVE SUBTLETY: MemberSubmitted is excluded. The temptation is to include
+// it ("already answered, could answer again"), and that breaks quiescence
+// detection in the worst way: in a staged run where everyone submitted but the
+// advance rule is not met, the system looks eternally healthy (there are
+// "runnable" members) when in fact it is stuck forever. That is exactly the case
+// run.quiescent exists to catch.
+//
+// THE SAME SUBTLETY, FROM THE OTHER SIDE: being idle is not enough either. The
+// reducer never opens a turn merely because somebody is idle; every turn is
+// opened by a CAUSE (a stage was entered, a watcher matched, a human injected a
+// prompt, a queued cause drained). So an idle member with no pending cause is not
+// waiting to work, it has finished working, and reporting it as runnable makes
+// checkQuiescence conclude that something is still going to happen when nothing
+// is.
+//
+// That hid the exact failure ADR-0004 is about, in a case no earlier test could
+// reach: a member whose turn ends WITHOUT submitting returns to idle, so a stage
+// whose rule needs everybody sat silent forever and no diagnosis was emitted at
+// all. The run loop could only report it as "idle", which is indistinguishable
+// from a run legitimately waiting on a human.
+//
+// PendingCauses is the honest test of "a turn is coming", because that is the
+// only thing the reducer drains into a new turn on its own (see applyTurnDone).
+func (m Member) Runnable() bool {
+	return m.State == MemberIdle && len(m.PendingCauses) > 0
+}
 
 // Busy reports whether the member is spending money right now.
-func (m Member) Busy() bool { return m.State == MemberThinking || m.State == MemberTool }
+//
+// TurnOpen is part of the answer and not a redundant check. A member that
+// submits during its turn displays MemberSubmitted, which is deliberately
+// neither Busy nor Runnable, yet its turn is still running and its agent.turn_done
+// is still to come. Without TurnOpen, quiescence fired in the middle of a
+// perfectly healthy turn.
+//
+// MemberWaiting overrides it, and that exclusion is the point of the whole
+// mechanism rather than an exception to it. A member blocked on a human has an
+// open turn and is spending nothing: the question could sit in the inbox for a
+// day. Counting it as busy would suppress precisely the diagnosis the user needs
+// ("waiting for approval of inbox-1") and make `run why` contradict itself,
+// reporting the member as blocked and then as working two lines later.
+//
+// MemberFailed is excluded for the same reason: a turn that died never emits
+// agent.turn_done, so its TurnOpen is never cleared, and a failed member would
+// look eternally busy and mask every subsequent silence.
+func (m Member) Busy() bool {
+	if m.State == MemberWaiting || m.State == MemberFailed {
+		return false
+	}
+	return m.TurnOpen || m.State == MemberThinking || m.State == MemberTool
+}
 
 // InboxItem is a pending question for a human.
 type InboxItem struct {

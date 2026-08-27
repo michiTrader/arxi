@@ -773,6 +773,13 @@ func quietCfg(watch bool) Config {
 }
 
 // untilQuiescent drives the run to the point where nobody has anything to do.
+//
+// The turns are CLOSED with agent.turn_done, and that is not ceremony. A turn is
+// open from activation until it finishes, and a member with an open turn is busy
+// by definition: its remaining events are still to come. Quiescence means the
+// silence AFTER the work, so a sequence that left both turns open would be
+// asserting that the reducer diagnoses a stuck run in the middle of two healthy
+// ones -- the false positive ADR-0004 warns costs the most trust.
 func untilQuiescent(t *testing.T, c Config) (State, []Effect) {
 	t.Helper()
 	s := started(c)
@@ -780,7 +787,9 @@ func untilQuiescent(t *testing.T, c Config) (State, []Effect) {
 	s, _ = Decide(s, ev(AgentActivated, "a", nil), c)
 	s, _ = Decide(s, ev(AgentActivated, "b", nil), c)
 	s, _ = Decide(s, ev(StageSubmitted, "a", nil), c)
-	return Decide(s, ev(StageSubmitted, "b", nil), c)
+	s, _ = Decide(s, ev(AgentTurnDone, "a", nil), c)
+	s, _ = Decide(s, ev(StageSubmitted, "b", nil), c)
+	return Decide(s, ev(AgentTurnDone, "b", nil), c)
 }
 
 // Protects the detector of the most expensive failure mode of these systems: the
@@ -864,13 +873,49 @@ func TestSubmittedIsNotRunnable(t *testing.T) {
 	if (Member{State: MemberSubmitted}).Runnable() {
 		t.Fatal("submitted counts as runnable: quiescence would never be detected")
 	}
-	if !(Member{State: MemberIdle}).Runnable() {
-		t.Error("idle does not count as runnable")
+	// Idle WITH a queued cause is runnable: applyTurnDone drains PendingCauses
+	// into a new turn, so a turn really is coming.
+	if !(Member{State: MemberIdle, PendingCauses: []string{"ev-1"}}).Runnable() {
+		t.Error("idle with a queued cause does not count as runnable, so quiescence " +
+			"would fire while a turn is still about to open")
 	}
+
+	// Idle with NOTHING queued is the other half of the same subtlety, and it hid
+	// the bug for longer. The reducer never opens a turn just because somebody is
+	// idle: every turn comes from a cause. A member whose turn ended without
+	// submitting sits idle forever, and calling that "runnable" made
+	// checkQuiescence believe work was still coming, so a stage whose rule needed
+	// everybody went silent with no diagnosis at all.
+	if (Member{State: MemberIdle}).Runnable() {
+		t.Error("idle with no queued cause counts as runnable: nothing will ever " +
+			"open a turn for it, so quiescence is never detected and the run hangs " +
+			"silently forever")
+	}
+
 	for _, st := range []MemberState{MemberThinking, MemberTool, MemberWaiting, MemberInactive, MemberFailed} {
 		if (Member{State: st}).Runnable() {
 			t.Errorf("%q counts as runnable", st)
 		}
+	}
+}
+
+// A turn is open from activation until it finishes, and a member with an open
+// turn is busy however it presents itself in between.
+//
+// This protects the false positive that cost both money and trust: a member that
+// submits mid-turn displays MemberSubmitted, which is deliberately neither Busy
+// nor Runnable, while its agent.turn_done is still on its way in the same batch.
+// Folding that submit therefore found nobody busy, nobody runnable and nothing
+// armed, and diagnosed a perfectly healthy run as silent forever. A watcher on
+// run.quiescent then opened a paid turn to handle a problem that did not exist.
+func TestAnOpenTurnCountsAsBusy(t *testing.T) {
+	if !(Member{State: MemberSubmitted, TurnOpen: true}).Busy() {
+		t.Error("a member that submitted mid-turn is not busy, so quiescence fires " +
+			"in the middle of a healthy turn and a watcher pays for the false alarm")
+	}
+	if (Member{State: MemberSubmitted}).Busy() {
+		t.Error("a member whose turn has finished still counts as busy, so a run " +
+			"that really is stuck is never diagnosed")
 	}
 }
 

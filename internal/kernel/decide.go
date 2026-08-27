@@ -279,6 +279,10 @@ func applyActivated(out *State, e Event) []Effect {
 	m.Turns++
 	out.Turns++
 
+	// The turn is open from here until agent.turn_done, whatever states the member
+	// passes through in between. See Member.TurnOpen.
+	m.TurnOpen = true
+
 	if out.MaxTurns <= 0 || out.Turns < out.MaxTurns {
 		return nil
 	}
@@ -645,6 +649,10 @@ func applyTurnDone(out *State, e Event, c Config) []Effect {
 	}
 	m.Detail = ""
 	m.SinceSeq = e.Seq
+
+	// The turn is over. This is the only place that clears it, so the flag tracks
+	// exactly the interval between activation and completion.
+	m.TurnOpen = false
 
 	if len(m.PendingCauses) == 0 {
 		return nil

@@ -226,3 +226,141 @@ func TestLoopTerminatesInProportionToTheWork(t *testing.T) {
 			"  the log was: %v", out.Steps, types(log))
 	}
 }
+
+// -------------------------------------------------------------- quiescence
+
+// TestLoopStopsOnQuiescenceWithoutObserver is the failure mode the whole design
+// exists to catch, driven end to end.
+//
+// The stage advances with `all` and one member never submits, so the rule can
+// never hold. Nobody is busy, nothing is armed, and the run would sit silent
+// forever. ADR-0004 says the answer is to notify rather than to die, and with no
+// watcher declared the run fails carrying the diagnosis.
+func TestLoopStopsOnQuiescenceWithoutObserver(t *testing.T) {
+	c := teamCfg()
+	c.Watchers = nil // nobody observes
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "all"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	// frontend never submits, so `all` is unreachable. This is the realistic
+	// shape of a stuck run: the turns happen and cost money, and the stage still
+	// does not advance.
+	fake.SubmitAgents = map[string]bool{"backend": true}
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !hasType(log, kernel.RunQuiescent) {
+		t.Fatalf("an unmet advance rule with nobody working produced no run.quiescent.\n"+
+			"  consequence: the run goes silent with no diagnosis, which is the most "+
+			"expensive failure mode in the system: the user discovers it the next "+
+			"morning with the money already spent.\n  the log was: %v", types(log))
+	}
+	if out.State.Status != kernel.StatusFailed {
+		t.Errorf("status = %q, expected failed: quiescence with nobody observing has "+
+			"to end the run rather than wait forever", out.State.Status)
+	}
+	if out.State.Result == "" {
+		t.Error("the run failed with an empty Result; the diagnosis is what `run why` " +
+			"reads, and without it the user is told only that something went wrong")
+	}
+}
+
+// The diagnosis has to name the rule and who is missing. "The run is idle" is
+// true and useless: the user is left staring at an apparently correct blueprint.
+func TestLoopQuiescenceDiagnosisNamesTheRuleAndTheMissing(t *testing.T) {
+	c := teamCfg()
+	c.Watchers = nil
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "all"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.SubmitAgents = map[string]bool{"backend": true}
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	evs, _ := log.Read(1, 0)
+	var diag string
+	for _, e := range evs {
+		if e.Type == kernel.RunQuiescent {
+			diag = e.Str("diagnosis")
+		}
+	}
+	if diag == "" {
+		t.Fatalf("run.quiescent carried no diagnosis; the log was: %v", types(log))
+	}
+	for _, want := range []string{"build", "all", "frontend"} {
+		if !contains(diag, want) {
+			t.Errorf("the diagnosis %q does not mention %q.\n"+
+				"  consequence: the user is told the run is idle and not which rule is "+
+				"unmet nor who is missing, which is the hardest case to debug by eye "+
+				"because the blueprint looks correct.", diag, want)
+		}
+	}
+}
+
+// With an observer, the same silence must NOT kill the run. This is the half of
+// ADR-0004 that is easy to get wrong: notifying and dying look equally "handled"
+// from the outside, and only one of them lets a coordinator recover.
+func TestLoopQuiescenceWithObserverWakesItInsteadOfDying(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "all"}}
+	c.Watchers = []kernel.Watcher{
+		{Agent: "security", Pattern: "run.quiescent", Action: "notify"},
+	}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.SubmitAgents = map[string]bool{"backend": true}
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !hasType(log, kernel.RunQuiescent) {
+		t.Fatalf("no run.quiescent was emitted; the log was: %v", types(log))
+	}
+	if !spawnedFor(fake, "security") {
+		t.Errorf("the observer was never woken; the fake saw: %v.\n"+
+			"  consequence: quiescence becomes fatal even when somebody declared they "+
+			"would handle it, so a recoverable run has to be forked to continue and "+
+			"loses the log continuity the user needs to understand what happened.",
+			fake.Kinds())
+	}
+	if out.State.Status == kernel.StatusFailed {
+		t.Errorf("the run failed despite an observer being declared; ADR-0004 makes "+
+			"quiescence fatal only when NOBODY observes it (result: %q)", out.State.Result)
+	}
+}
+
+// Quiescence is emitted at most once. Without QuiescentEmitted the detector
+// re-fires on every subsequent step, and a watcher on run.quiescent then opens a
+// paid turn each time: an infinite loop with a credit card attached.
+func TestLoopQuiescenceIsEmittedOnce(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "all"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.SubmitAgents = map[string]bool{"backend": true}
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := countType(log, kernel.RunQuiescent); got != 1 {
+		t.Errorf("run.quiescent appeared %d times, expected exactly 1.\n"+
+			"  consequence: a watcher on run.quiescent opens a paid turn for each "+
+			"one, so a stuck run bills repeatedly for noticing it is stuck.\n"+
+			"  the log was: %v", got, types(log))
+	}
+}

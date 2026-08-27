@@ -20,7 +20,8 @@
         },
         "since_seq": 5,
         "spent_usd": 0,
-        "turns": 1
+        "turns": 1,
+        "turn_open": true
       },
       {
         "name": "designer",
