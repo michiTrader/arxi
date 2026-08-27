@@ -111,7 +111,7 @@ type whyLeaf struct {
 // walkCause is the remediation table. It is indexed by Detail (the blocked_on of
 // the event) and reads the structured reference to build the exact command.
 //
-// Note that there is not a single `if runID == ...` nor any special case per
+// Note that there is not a single `if runID == ...`, nor any special case per
 // blueprint: the remedy comes out of the data the event was obliged to bring.
 func walkCause(m Member) []whyLeaf {
 	ref := m.BlockedOn

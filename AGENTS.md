@@ -9,7 +9,7 @@ Agent orchestration system in Go. The whole project rests on one thesis:
 Decide(State, Event, Config) -> (State', []Effect)
 ```
 
-Pure: not clock, not network, not filesystem. Everything it wants to happen in the
+Pure: no clock, no network, no filesystem. Everything it wants to happen in the
 world it **describes** as an `Effect` and returns; something else carries it out.
 That constraint is why `iash run`, `iash run --sim`, `iash run replay` and
 `iash run why` are one body of logic instead of four programs that drift apart.
@@ -52,20 +52,37 @@ Spanish, translate it **before it goes in the file**. Never write it in Spanish
 
 ### Migration status
 
-The repository currently contains Spanish content written before this policy:
-all code comments, the diagnostic strings, the CLI usage text, the ADRs, the
-design docs and the README. **A dedicated migration pass will translate all of
-it to English.** The end state is a fully English repository — there is not
-grandfathered Spanish content, and not file is exempt.
+**The migration is done.** The repository was originally written in Spanish; a
+dedicated pass translated all of it — code comments, diagnostic strings, CLI
+usage text, test names and failure messages, ADRs, design docs and the README.
+There is no grandfathered Spanish content and no file is exempt.
 
-Until that pass runs, the rule for you is simple and absolute: **every line you
-add or edit is English**, even inside a file that is otherwise Spanish. A file
-ending up temporarily mixed is expected and acceptable. A new Spanish line is
-not.
+So the rule is no longer transitional, it is simply the steady state: **every
+line you add or edit is English**. If you find Spanish anywhere, it is a
+regression — report it and fix it in a focused commit.
 
-Do not translate unrelated Spanish content as a side effect of some other task —
-that turns a small reviewable change into an unreviewable one. Translation
-happens in the dedicated pass, or when the user explicitly asks for it.
+One warning drawn from how that pass went wrong the first time around, because
+it is the failure mode to watch for. Translation must be **read and rewritten**,
+not substituted word by word. A mechanical pass produced two classes of damage
+that compiled cleanly and kept every test green, so nothing caught it:
+
+- **Comments replaced by a placeholder.** 540 argued comments were collapsed
+  into `// Implementation note.` — the entire body of reasoning about why each
+  decision is right and what breaks otherwise was deleted. Those comments are
+  the primary defense against someone later "simplifying" a load-bearing
+  decision. Losing them is worse than leaving them in Spanish.
+- **Word-for-word substitution.** `no` became `not` and `es` became `is`
+  regardless of context, yielding text like "with not runtime" and "nadie is
+  working and nadie can empezar". Even flag names were corrupted:
+  `go build -o` turned into `go build -or`.
+
+If you are ever asked to translate anything here again: read the paragraph,
+understand the argument, and write the English that makes the same argument with
+the same force. Never map token to token, and never drop content you have not
+replaced with an equivalent.
+
+Do not translate unrelated content as a side effect of some other task — that
+turns a small reviewable change into an unreviewable one.
 
 ### Why this matters beyond style
 
@@ -171,7 +188,7 @@ export PATH=$PATH:/usr/local/go/bin
 loading is half done.
 
 **No new dependencies without justification.** The project is standard library
-only. A CLI that ships as a single static binary with not runtime is a feature,
+only. A CLI that ships as a single static binary with no runtime is a feature,
 and every dependency is a claim against it. Justify it against that or leave it
 out.
 
