@@ -38,7 +38,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 
 	switch e.Type {
 	case RunStarted:
-		applyRunStarted(&out, e, c)
+		fx = append(fx, applyRunStarted(&out, e, c)...)
 
 	case RunPrompt, AgentSteered, AgentNotified:
 		fx = append(fx, applyInjection(&out, e, c)...)
@@ -63,12 +63,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		fx = append(fx, applyStageTimeout(&out, e, c)...)
 
 	case AgentActivated:
-		if m := out.Member(e.Actor); m != nil {
-			m.State = MemberThinking
-			m.SinceSeq = e.Seq
-			m.Turns++
-			out.Turns++
-		}
+		fx = append(fx, applyActivated(&out, e)...)
 	case AgentTurnDone:
 		fx = append(fx, applyTurnDone(&out, e, c)...)
 	case AgentBlocked:
@@ -142,9 +137,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		fx = append(fx, applyInboxTimeout(&out, e)...)
 
 	case TimerTick:
-		if out.ActiveTimer == e.Str("timer_id") {
-			out.ActiveTimer = ""
-		}
+		fx = append(fx, applyTimerTick(&out, e)...)
 
 	case RunQuiescent:
 		// Quiescence wakes the coordinator. Only if NOBODY observes it does the
@@ -190,7 +183,27 @@ func Fold(s State, events []Event, c Config) (State, []Effect) {
 	return s, all
 }
 
-func applyRunStarted(out *State, e Event, c Config) {
+// applyRunStarted initializes the run and, when the blueprint is staged, enters
+// the first stage.
+//
+// ENTERING STAGE 0 IS THE REDUCER'S JOB, and that is the whole reason this
+// function returns effects at all. A staged run whose first stage is never
+// entered starts with every member idle and nothing armed, so the very next step
+// finds nobody busy, no timer and no pending effect: checkQuiescence fires and
+// the run dies of silence before anybody was asked to work. The symptom looks
+// like "the blueprint is wrong" and the blueprint is fine.
+//
+// The alternative was to let the caller append stage.entered after run.started.
+// That is worse in a way that outlasts this commit: `run`, `--sim` and a resumed
+// run are three call sites, and replay is a fourth that appends nothing at all.
+// The moment one of them forgets, folding the SAME log yields a different state
+// depending on who wrote it, and ADR-0002 stops holding. Deriving it means the
+// log carries the decision and every reader reaches the same conclusion.
+//
+// An unstaged blueprint (the single agent of §20.1) gets no stage.entered: there
+// is no stage to enter. That run is driven by the run.prompt that follows, which
+// is what opens the reviewer's first turn.
+func applyRunStarted(out *State, e Event, c Config) []Effect {
 	out.RunID = e.Str("run_id")
 	out.Actor = e.Str("actor")
 	out.Status = StatusRunning
@@ -221,6 +234,59 @@ func applyRunStarted(out *State, e Event, c Config) {
 			SinceSeq: e.Seq,
 		})
 	}
+
+	if len(c.Stages) == 0 {
+		return nil
+	}
+	return []Effect{Emit{Event: derived(out, e, StageEntered, map[string]any{
+		"stage": c.Stages[0].Name,
+		"index": 0,
+	})}}
+}
+
+// applyActivated counts a turn and enforces the turn ceiling.
+//
+// MaxTurns was being read out of run.started and stored in the State, and then
+// compared against nothing: `--max-turns 5` was a number the user typed, the
+// surface documented, and the reducer ignored. A ceiling that silently does not
+// hold is worse than no ceiling, because the user stops watching the run in the
+// belief that something else is watching it.
+//
+// The ceiling matters for a failure the budget cannot catch. A watcher loop whose
+// turns are individually cheap can spin for hours without ever crossing a dollar
+// limit; --max-turns is the bound on ITERATIONS, and it is the only bound that
+// catches a run that is looping rather than spending.
+//
+// Enforcement is here rather than in spawnFor for a reason worth keeping: a turn
+// that was decided but never executed must not consume the allowance. Counting at
+// activation means the count in the log always equals the turns that actually
+// happened, so folding an old log reaches the ceiling at exactly the same event
+// it reached it on the live run.
+//
+// The run FAILS rather than asking a human. That is the opposite of what the
+// budget does on BudgetExceeded, and the asymmetry is deliberate: exceeding a
+// budget means valuable work is at risk and a human may reasonably choose to pay
+// more, whereas hitting the turn ceiling is the signature of a loop, and asking a
+// human whether to keep looping only moves the loop into their inbox. The event
+// names the ceiling so `run why` can say which limit stopped the run.
+func applyActivated(out *State, e Event) []Effect {
+	m := out.Member(e.Actor)
+	if m == nil {
+		return nil
+	}
+	m.State = MemberThinking
+	m.SinceSeq = e.Seq
+	m.Turns++
+	out.Turns++
+
+	if out.MaxTurns <= 0 || out.Turns < out.MaxTurns {
+		return nil
+	}
+	return []Effect{Emit{Event: derived(out, e, RunExpired, map[string]any{
+		"reason":    "max_turns",
+		"turns":     out.Turns,
+		"max_turns": out.MaxTurns,
+	})}}
 }
 
 // applyInjection unifies run.prompt, agent.steered and agent.notified because
@@ -407,6 +473,66 @@ func quorumMet(s State, c Config, st StageConfig) bool {
 		return done == total
 	}
 	return done == total
+}
+
+// applyTimerTick translates a fired timer into the domain event it stands for.
+//
+// A tick is a fact about the CLOCK ("the deadline named stage:review passed"),
+// not about the run. Turning it into stage.timeout is what makes every branch of
+// applyStageTimeout reachable at all. Before this, a tick only cleared
+// ActiveTimer: a stage that ran out of time silently lost its deadline and went
+// on waiting, and because clearing ActiveTimer also removed the last reason
+// checkQuiescence had to stay quiet, the run was then reported as mysteriously
+// silent instead of as timed out. The `escalate` default, the `advance` branch
+// and the AskHuman fallback were all dead code, reachable only by hand-writing a
+// stage.timeout event that nothing produced.
+//
+// The translation belongs to the reducer because the mapping from timer id to
+// meaning is a DECISION. A run loop that emitted stage.timeout itself would have
+// to parse the id, and then `run`, `--sim` and a resumed run would each need that
+// same parsing, with replay unable to agree because it appends nothing.
+//
+// Only the ACTIVE timer produces an event. A tick naming any other timer is
+// stale by construction: the stage advanced and CancelTimer raced the firing.
+// Honouring it would expire a stage that had already finished, which is exactly
+// the double outcome CancelTimer is classified as control to prevent.
+//
+// The `stage:` prefix is required rather than assumed. An unprefixed id means
+// some other subsystem armed that timer, and inventing a stage timeout for it
+// would fabricate an event about a stage that was never involved.
+func applyTimerTick(out *State, e Event) []Effect {
+	id := e.Str("timer_id")
+	if id == "" || out.ActiveTimer != id {
+		return nil
+	}
+	out.ActiveTimer = ""
+
+	name, ok := afterPrefix(id, "stage:")
+	if !ok {
+		return nil
+	}
+	return []Effect{Emit{Event: derived(out, e, StageTimeout, map[string]any{
+		"stage":    name,
+		"index":    out.StageIndex,
+		"timer_id": id,
+	})}}
+}
+
+// afterPrefix returns the remainder after prefix, and whether there was one.
+//
+// It reports the two failures separately on purpose: "no prefix" means a timer
+// belonging to somebody else, while "prefix but empty remainder" means a stage
+// with no name. Collapsing them into a single empty string would let the second
+// case emit a timeout for stage "", which no stage can ever match.
+func afterPrefix(s, prefix string) (string, bool) {
+	if !strings.HasPrefix(s, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(s, prefix)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
 }
 
 // applyStageTimeout: the default is to escalate, not to fail. A timeout almost
