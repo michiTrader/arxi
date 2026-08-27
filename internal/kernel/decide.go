@@ -360,6 +360,11 @@ func applyStageEntered(out *State, e Event, c Config) []Effect {
 	out.Stage = name
 	out.StageIndex = idx
 
+	// The new stage has not resolved yet, whatever the previous one did. Clearing
+	// here rather than where the flag is set is what scopes it to a single stage:
+	// entering a stage is the only moment a fresh advance rule starts applying.
+	out.StageResolved = false
+
 	var fx []Effect
 	if st := c.StageAt(idx); st != nil && st.TimeoutMs > 0 {
 		id := "stage:" + name
@@ -406,6 +411,25 @@ func applyStageSubmitted(out *State, e Event, c Config) []Effect {
 	if st == nil || !quorumMet(*out, c, *st) {
 		return nil
 	}
+
+	// A stage resolves ONCE, however many members go on submitting to it.
+	//
+	// Without this an `any` stage advanced on every submit it received: the first
+	// submit met the rule and emitted the advance, and so did the second and the
+	// third, because each is folded as its own step and each found the rule still
+	// met. On a final stage that meant three identical run.result events, so the
+	// log claimed the run finished three times and `run why` had three competing
+	// answers for one outcome. On a middle stage it is worse: each surplus submit
+	// emits another stage.advanced, skipping a stage every time.
+	//
+	// The flag is cleared by applyStageEntered, so it scopes to one stage and
+	// cannot suppress the next one. Same shape as QuiescentEmitted, for the same
+	// reason: the condition stays true after the response, so the response has to
+	// remember it already happened.
+	if out.StageResolved {
+		return nil
+	}
+	out.StageResolved = true
 
 	var fx []Effect
 	if out.ActiveTimer != "" {
@@ -540,6 +564,14 @@ func afterPrefix(s, prefix string) (string, bool) {
 // nobody is looking, a human is asked before throwing the work in the trash.
 func applyStageTimeout(out *State, e Event, c Config) []Effect {
 	out.ActiveTimer = ""
+
+	// A stage that already resolved cannot time out: it is not the current stage
+	// any more, and acting on a deadline belonging to a stage that has ended
+	// advances the run a second time and skips the stage in between.
+	if out.StageResolved {
+		return nil
+	}
+
 	st := c.StageAt(out.StageIndex)
 	action := "escalate"
 	if st != nil && st.OnTimeout != "" {
@@ -553,6 +585,12 @@ func applyStageTimeout(out *State, e Event, c Config) []Effect {
 		return nil
 
 	case "advance":
+		// Only the branches that actually END the stage mark it resolved.
+		// `escalate` deliberately does not: it asks somebody to intervene and
+		// leaves the stage open, so the members still working can go on to satisfy
+		// the rule normally. Marking it there would make the escalation itself
+		// block the recovery it was asking for.
+		out.StageResolved = true
 		next := out.StageIndex + 1
 		if next >= len(c.Stages) {
 			return []Effect{Emit{Event: derived(out, e, RunResult, map[string]any{
@@ -785,6 +823,27 @@ func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 		}
 	}
 	if out.ActiveTimer != "" || anyBusy(*out) || anyRunnable(*out) {
+		return nil
+	}
+
+	// A stage that has already resolved is not silence: its stage.advanced and
+	// stage.entered were emitted and are on their way, and entering the next
+	// stage wakes everybody who participates in it.
+	//
+	// This closes a false positive that only appears once events are appended in
+	// batches, which is what a real turn does. The lifecycle of a turn lands as
+	// several events, so the submit that satisfies the rule is folded before the
+	// turn_done that follows it in the same batch, while the advance it emitted is
+	// appended after. Folding that turn_done therefore saw a stage where everyone
+	// submitted, nothing armed and nobody runnable, and concluded the run was
+	// stuck forever -- with the diagnosis "the rule is unsatisfiable with this
+	// blueprint" about a stage that had in fact just completed.
+	//
+	// ADR-0004 is explicit that this is the expensive direction to get wrong: a
+	// false positive destroys trust in the signal, and an ignored signal is worse
+	// than no signal because it is ignored exactly when it is true. It also cost
+	// money here, since the watcher woken by it opened a turn nobody asked for.
+	if out.StageResolved {
 		return nil
 	}
 	for _, it := range out.Inbox {

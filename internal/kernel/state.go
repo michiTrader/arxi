@@ -149,6 +149,13 @@ type State struct {
 	BudgetWarned     bool `json:"budget_warned,omitempty"`
 	QuiescentEmitted bool `json:"quiescent_emitted,omitempty"`
 
+	// StageResolved records that the current stage already met its advance rule
+	// and acted on it. Same purpose as the two flags above and for the same
+	// reason: the advance rule STAYS met once satisfied, so without a memory of
+	// having responded, every further submit to the stage advances it again. It is
+	// cleared on stage entry, so it scopes to one stage.
+	StageResolved bool `json:"stage_resolved,omitempty"`
+
 	NextInboxID int `json:"next_inbox_id"`
 }
 
