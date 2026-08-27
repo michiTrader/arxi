@@ -485,8 +485,8 @@ func applyBlocked(out *State, e Event) {
 	m.SinceSeq = e.Seq
 	m.Detail = e.Str("blocked_on")
 
-	// El payload estructurado es lo que hace que `run why` no tenga casos
-	// cableados: camina el grafo leyendo estas referencias.
+	// The structured payload is what keeps `run why` free of hard-coded cases:
+	// it walks the graph reading these references.
 	if raw, ok := e.Payload["blocked_ref"].(map[string]any); ok {
 		m.BlockedOn = raw
 	}
