@@ -1,109 +1,112 @@
-# ADR-0007: Go en vez of Rust, with tests that cubren lo that the compilador not da
+# ADR-0007: Go instead of Rust, with tests covering what the compiler does not give
 
-- Estado: aceptada
-- Afecta a: everything the project; en particular `internal/kernel/effect.go` and `internal/arch_test.go`
+- Status: accepted
+- Affects: the whole project; in particular `internal/kernel/effect.go` and `internal/arch_test.go`
 
-## Contexto
+## Context
 
-The diseño of iash is a reducer pure sobre a enum of events that returns a
-enum of effects (ADR-0001). Descrito so, is a diseño that pide Rust a gritos:
+The design of iash is a pure reducer over an enum of events returning an enum of
+effects (ADR-0001). Described that way, it is a design that screams for Rust:
 
-- `enum Effect` with `match` exhaustivo verificado for the compilador
-- inmutabilidad for defecto, without `Clone()` a mano and without aliasing accidental
-- `Result<T, E>` en vez of convenciones sobre valores zero
+- `enum Effect` with exhaustive `match` verified by the compiler
+- immutability by default, with no hand-written `Clone()` and no accidental
+  aliasing
+- `Result<T, E>` instead of conventions about zero values
 
-Elegir Go is aceptar lose esas three cosas. Hay that ser honesto sobre what is
-loses and what is pone en its lugar, or the decision is convierte en a preferencia
-disfrazada of argumento.
+Choosing Go means accepting the loss of those three things. We have to be honest
+about what is lost and what is put in its place, or the decision turns into a
+preference disguised as an argument.
 
-## Decisión
+## Decision
 
-Go. Y for each garantía that is loses, a mechanism concrete that the reemplaza.
+Go. And for every guarantee that is lost, a concrete mechanism that replaces it.
 
-### Lo that is loses: `match` exhaustivo
+### What is lost: exhaustive `match`
 
-En Rust, add a variant a `enum Effect` **not compila** until that is
-actualiza each `match`. En Go, a `switch` sobre a interfaz is cae silenciosamente
-to the `default` — that is exactly the bug that not is nota: a effect new that the
-executor descarta without decir nothing.
+In Rust, adding a variant to `enum Effect` **does not compile** until every
+`match` is updated. In Go, a `switch` over an interface falls silently through to
+the `default` — which is exactly the bug you do not notice: a new effect the
+executor discards without saying anything.
 
-**The reemplazo** are three cosas juntas:
+**The replacement** is three things together:
 
-1. **Interfaz sellada.** `Effect` has a método not exportado, `isEffect()`.
-   Ningún paquete outside of `kernel` can implementarla. The conjunto of variants
-   is cerrado, igual that a enum.
-2. **Registro explícito.** `allEffectVariants` list the 7 variants.
-   `EffectVariants()` returns a copy — not the slice direct — for that a test
-   not pueda corromper the registry of another.
-3. **Test of exhaustividad.** `TestEffectExhaustivo` verifies the conteo against
-   a constante, detecta duplicados, and exige that each variant declare a clase
-   válida. The mensaje of fails dice what make:
+1. **Sealed interface.** `Effect` has an unexported method, `isEffect()`. No
+   package outside `kernel` can implement it. The set of variants is closed, just
+   like an enum.
+2. **Explicit registry.** `allEffectVariants` lists the 7 variants.
+   `EffectVariants()` returns a copy — not the slice itself — so one test cannot
+   corrupt the registry for another.
+3. **Exhaustiveness test.** `TestEffectExhaustive` checks the count against a
+   constant, detects duplicates, and requires every variant to declare a valid
+   class. The failure message says what to do:
 
-   > *"Si agregaste a variant of Effect, agregala a allEffectVariants and review
-   > TODOS the switch sobre Effect (grep 'case SpawnTurn')."*
+   > *"If you added an Effect variant, add it to allEffectVariants and review ALL
+   > the switches over Effect (grep 'case SpawnTurn')."*
 
-Es more débil that Rust: fails en `go test`, not en `go build`. Y is more fuerte that
-nothing, that is lo that tendría a `switch` without registry.
+It is weaker than Rust: it fails at `go test`, not at `go build`. And it is
+stronger than nothing, which is what a `switch` with no registry would have.
 
-### Lo that is loses: inmutabilidad
+### What is lost: immutability
 
-`State` has mapas and slices, and en Go that means aliasing for defecto: a
-`State` "copiado" comparte their mapas with the original, so that the reducer podría
-mutar the input without darse cuenta and break the fold.
+`State` has maps and slices, and in Go that means aliasing by default: a "copied"
+`State` shares its maps with the original, so the reducer could mutate its input
+without noticing and break the fold.
 
-**The reemplazo** is `Clone()` with copy profunda of `Members`, `BlockedOn`,
-`PendingCauses`, `Locks` e `Inbox`, more a test that makes two folds of the same log
-and compara: if the reducer mutó its input, the second fold da distinto and the test
-dice *"two folds of the same log dieron states distintos: replay not works for
-nothing"*. También verifies that `Fold` not haya modificado the state of input.
+**The replacement** is `Clone()` with a deep copy of `Members`, `BlockedOn`,
+`PendingCauses`, `Locks` and `Inbox`, plus a test that folds the same log twice
+and compares: if the reducer mutated its input, the second fold comes out
+different and the test says *"two folds of the same log gave different states:
+replay is worthless"*. It also verifies that `Fold` did not modify the input
+state.
 
-## Lo that Go da and Rust not
+## What Go gives and Rust does not
 
-Y here is the parte that justifica the elección en vez of only disculparla.
+And here is the part that justifies the choice rather than merely apologizing for
+it.
 
-**The grafo of imports is inspeccionable from a test.** `go list -json` returns
-the imports and the dependencias of cualquier paquete, so that `internal/arch_test.go`
-verifies that the kernel not importe `time`, `net`, `net/http`, `os`, `os/exec`,
-`math/rand`, `crypto/rand`, `database/sql`, `io` ni `bufio`. Si someone adds
-`time.Now()` to the reducer, the test fails and explica that that breaks the replay and the
-clock virtual of `--sim`.
+**The import graph is inspectable from a test.** `go list -json` returns the
+imports and dependencies of any package, so `internal/arch_test.go` verifies that
+the kernel does not import `time`, `net`, `net/http`, `os`, `os/exec`,
+`math/rand`, `crypto/rand`, `database/sql`, `io` or `bufio`. If somebody adds
+`time.Now()` to the reducer, the test fails and explains that this breaks replay
+and the virtual clock of `--sim`.
 
-Rust not da this for defecto. The pureza en Rust is a convención sobre the estilo
-of the code, and the pureza here is the propiedad of the that depends everything the diseño: if
-the kernel is pure, `run`, `--sim`, `replay` and `why` are the same maquinaria; if
-leaves of serlo, are four programas and none is entera.
+Rust does not give this by default. Purity in Rust is a convention about code
+style, and purity here is the property the whole design depends on: if the kernel
+is pure, `run`, `--sim`, `replay` and `why` are the same machinery; if it stops
+being pure, they are four programs and none of them is complete.
 
-A detalle of implementation relevante: `ownClosure` only walks the dependencias
-internas of the project. The first version usaba the clausura complete of `-deps` and
-marcaba `os` como violación because the kernel importaba `fmt`. A test of
-arquitectura that da falsos positivos is desactiva a the week, so that the
-precisión here not is cosmética.
+One relevant implementation detail: `ownClosure` only walks the project-internal
+dependencies. The first version used the full `-deps` closure and flagged `os` as
+a violation because the kernel imported `fmt`. An architecture test that produces
+false positives gets disabled within a week, so the precision here is not
+cosmetic.
 
-Además, en lo práctico: a CLI of Go is a binario estático without runtime that
-instalar, and the tiempos of compilación permiten the ciclo test-arreglo-test that
-this diseño uses como método principal of verification.
+Also, practically: a Go CLI is a static binary with no runtime to install, and
+compile times allow the test-fix-test cycle this design uses as its main
+verification method.
 
-## Alternativa discarded
+## Discarded alternative
 
-**Rust.** Mejores garantías en the tipo. Se descarta because the garantías that Rust
-adds are reemplazables for tests with mensajes of fails explícitos, while that
-the garantía that Go permite — the verification of the grafo of imports, or sea the
-pureza, that is the supuesto central of the diseño — habría quedado without verificar. Es
-a intercambio, and is makes en the sentido en that the project lo needs.
+**Rust.** Better guarantees in the type system. Discarded because the guarantees
+Rust adds are replaceable by tests with explicit failure messages, whereas the
+guarantee Go enables — verifying the import graph, that is, purity, which is the
+central assumption of the design — would have gone unverified. It is a trade, and
+it is made in the direction the project needs.
 
-## Consecuencias
+## Consequences
 
-- A `switch` sobre `Effect` that is olvida of a variant compila. The network that lo
-  atrapa is `go test`, so that **the project not can mergear without correr the
-  tests**; not is a recomendación, is parte of the diseño.
-- The mensajes of fails of the tests are documentation of decisions and there is that
-  escribirlos with ese cuidado. A `t.Fatal("mismatch")` not meets the contract of
+- A `switch` over `Effect` that forgets a variant still compiles. The net that
+  catches it is `go test`, so **the project cannot merge without running the
+  tests**; that is not a recommendation, it is part of the design.
+- The failure messages of the tests are documentation of decisions and have to be
+  written with that care. A `t.Fatal("mismatch")` does not meet the contract of
   this ADR.
-- `Clone()` there is that mantenerlo when is adds a field of reference a `State`.
-  The test of doble fold is lo that lo detecta.
+- `Clone()` has to be maintained whenever a reference field is added to `State`.
+  The double-fold test is what detects it.
 
-## Cómo is verifies
+## How it is verified
 
-- `TestEffectExhaustivo` (conteo, duplicados, clase declared).
-- The test of doble fold e inmutabilidad of the input.
-- `internal/arch_test.go` for pureza of the kernel and capas.
+- `TestEffectExhaustive` (count, duplicates, declared class).
+- The double-fold and input-immutability test.
+- `internal/arch_test.go` for kernel purity and layering.

@@ -1,13 +1,12 @@
 package kernel
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// RunStatus is the status of the whole run.
+//
+// Note that "quiescent" is NOT here. A system having gone silent is not a
+// terminal state, it is an event (run.quiescent) that wakes the coordinator with
+// a diagnosis. Making it a terminal state was the obvious temptation and would
+// be the worst possible design error: the most common failure mode of these
+// systems is going mute, and the right answer is to intervene, not to die.
 type RunStatus string
 
 const (
@@ -21,10 +20,10 @@ const (
 	StatusExpired   RunStatus = "expired"
 )
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Terminal reports whether the run no longer accepts events that change its
+// state. An event arriving late to a terminal run is not an error: it is
+// recorded and ignored. It happens all the time (a slow tool answering after a
+// cancel) and treating it as an error would fail perfectly valid replays.
 func (s RunStatus) Terminal() bool {
 	switch s {
 	case StatusSucceeded, StatusFailed, StatusCancelled, StatusExpired:
@@ -33,7 +32,7 @@ func (s RunStatus) Terminal() bool {
 	return false
 }
 
-// Implementation note.
+// MemberState is the state of one member inside the run.
 type MemberState string
 
 const (
@@ -46,13 +45,13 @@ const (
 	MemberFailed    MemberState = "failed"
 )
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Member is a participant in the run.
+//
+// Advisory is a generic trait of the role, not a feature flag. It replaces the
+// --counts-toward-advance of the first draft: instead of a boolean that only
+// means anything to stages, an advisory member is "someone who weighs in but
+// does not decide", and each blueprint reads that property as appropriate (does
+// not count toward quorum, does not block advancement, may keep talking).
 type Member struct {
 	Name      string         `json:"name"`
 	Role      string         `json:"role,omitempty"`
@@ -65,27 +64,27 @@ type Member struct {
 	Turns     int            `json:"turns"`
 	Submitted bool           `json:"submitted,omitempty"`
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// PendingCauses are events that arrived while the member was busy. They are
+	// neither lost nor do they open a new turn: they accumulate and are drained
+	// together on the next turn. This IS `on_busy: queue`, and it is the same
+	// machinery that implements follow-up.
 	PendingCauses []string `json:"pending_causes,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Runnable reports whether it is worth opening a turn for this member.
+//
+// EXPENSIVE SUBTLETY: MemberIdle only. The temptation is to include
+// MemberSubmitted ("already answered, could answer again"), and that breaks
+// quiescence detection in the worst way: in a staged run where everyone
+// submitted but the advance rule is not met, the system looks eternally healthy
+// (there are "runnable" members) when in fact it is stuck forever. That is
+// exactly the case run.quiescent exists to catch.
 func (m Member) Runnable() bool { return m.State == MemberIdle }
 
-// Implementation note.
+// Busy reports whether the member is spending money right now.
 func (m Member) Busy() bool { return m.State == MemberThinking || m.State == MemberTool }
 
-// Implementation note.
+// InboxItem is a pending question for a human.
 type InboxItem struct {
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
@@ -95,30 +94,29 @@ type InboxItem struct {
 	Replied   bool   `json:"replied,omitempty"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Lock is a cooperative lock over a key. It is cooperative and not
+// filesystem-level on purpose: it coordinates intent between agents. Real
+// filesystem isolation comes from the workspace (see Config.Workspace), because
+// a lock in the KV store does not stop two processes from writing the same file.
 type Lock struct {
 	Key    string `json:"key"`
 	Holder string `json:"holder"`
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// State is the complete state of the run, derived from the log. It is never the
+// source of truth: State = fold(Decide, State0, events). If the snapshot and the
+// log disagree, the log wins.
 type State struct {
 	RunID  string    `json:"run_id"`
 	Actor  string    `json:"actor"`
 	Status RunStatus `json:"status"`
 	Seq    int64     `json:"seq"`
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// BlueprintSHA pins the resolved copy of the blueprint this run uses. It
+	// closes IA A's second gap: the reducer never reads the live file, it reads
+	// the frozen copy at runs/<id>/blueprint.snapshot.yaml. Without this, a
+	// replay of last week would use today's config and produce a different
+	// result, which is the same as having no replay at all.
 	BlueprintSHA string `json:"blueprint_sha,omitempty"`
 
 	Stage      string `json:"stage,omitempty"`
@@ -131,9 +129,9 @@ type State struct {
 	Turns     int     `json:"turns"`
 	MaxTurns  int     `json:"max_turns,omitempty"`
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// TreeSpentUSD is the spend of the whole subtree. The budget is a sub-pool:
+	// a child consumes from its parent. Without this, N levels of spawn multiply
+	// the cost by N and the root run's --budget is decorative.
 	TreeSpentUSD float64 `json:"tree_spent_usd"`
 	ParentRunID  string  `json:"parent_run_id,omitempty"`
 	SpawnDepth   int     `json:"spawn_depth"`
@@ -144,16 +142,17 @@ type State struct {
 	ActiveTimer string `json:"active_timer,omitempty"`
 	Result      string `json:"result,omitempty"`
 
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// BudgetWarned and QuiescentEmitted keep warnings from repeating. They live
+	// in the state and not in the executor because the fold has to be
+	// reproducible: if the warning depended on process memory, a replay would
+	// emit different warnings.
 	BudgetWarned     bool `json:"budget_warned,omitempty"`
 	QuiescentEmitted bool `json:"quiescent_emitted,omitempty"`
 
 	NextInboxID int `json:"next_inbox_id"`
 }
 
-// Implementation note.
+// Member looks up a member by name and returns a pointer so it can be modified.
 func (s *State) Member(name string) *Member {
 	for i := range s.Members {
 		if s.Members[i].Name == name {
@@ -163,9 +162,10 @@ func (s *State) Member(name string) *Member {
 	return nil
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Clone makes a deep copy. Decide clones before touching anything: the signature
+// says (State, Event) -> State, and if it mutated its input the fold would stop
+// being reproducible and the "does not mutate input" tests would exist for
+// nothing.
 func (s State) Clone() State {
 	out := s
 	if s.Members != nil {

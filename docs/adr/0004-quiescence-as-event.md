@@ -1,98 +1,99 @@
-# ADR-0004: The quiescence is a event with diagnóstico, not a state terminal
+# ADR-0004: Quiescence is an event with a diagnosis, not a terminal state
 
-- Estado: aceptada
-- Afecta a: `internal/kernel/decides.go` (`checkQuiescence`), `internal/kernel/state.go` (`RunStatus`)
+- Status: accepted
+- Affects: `internal/kernel/decide.go` (`checkQuiescence`), `internal/kernel/state.go` (`RunStatus`)
 
-## Contexto
+## Context
 
-The modos of fails of a orquestador of agentes that everything the world especifica are
-the that gritan: a agente fails, is agota the budget, expires a timeout. Son
-fáciles of detectar because something happens.
+The failure modes of an agent orchestrator that everybody specifies are the ones
+that scream: an agent fails, the budget runs out, a timeout expires. They are
+easy to detect because something happens.
 
-The modo of fails that nadie especifica is the that **not** grita: the run not fails, not
-termina, not advances. Simplemente leaves of pasar cosas. Nadie is thinking, nadie
-can empezar, not there is timer armado, not there is question pendiente. The system is
-silent.
+The failure mode nobody specifies is the one that does **not** scream: the run
+does not fail, does not finish, does not advance. Things simply stop happening.
+Nobody is thinking, nobody can start, there is no timer armed, there is no
+pending question. The system is silent.
 
-Es the more expensive of the two. A run that fails is descubre en the momento; a run
-silent is descubre a the tomorrow siguiente, after of haber gastado the
-budget en the turns that yes corrieron and of haber consumido the día of work
-of the persona that lo esperaba.
+That is the more expensive of the two. A run that fails is discovered
+immediately; a silent run is discovered the next morning, after having spent the
+budget on the turns that did run and having consumed the working day of the
+person who was waiting for it.
 
-## Decisión
+## Decision
 
-The reducer detecta the silence and lo emite como a **event**, `run.quiescent`,
-with a field `diagnosis` required.
+The reducer detects the silence and emits it as an **event**, `run.quiescent`,
+with a required `diagnosis` field.
 
-**No is a state terminal.** `RunStatus` deliberadamente not has a valor
-`quiescent`; `Terminal()` cubre `succeeded`, `failed`, `cancelled` and `expired`, and
-nothing more.
+**It is not a terminal state.** `RunStatus` deliberately has no `quiescent`
+value; `Terminal()` covers `succeeded`, `failed`, `cancelled` and `expired`, and
+nothing else.
 
-The reason is that the quiescence is *recuperable for definición*: a `run prompt`
-the breaks, a `inbox approve` the breaks, change a política of tool the
-breaks. Si outside a state terminal, the usuario tendría that make `fork` for
-continue a run that only necesitaba a empujón, and perdería the continuidad of the log
-justo en the momento en that more the needs for entender what happened.
+The reason is that quiescence is *recoverable by definition*: a `run prompt`
+breaks it, an `inbox approve` breaks it, changing a tool policy breaks it. If it
+were a terminal state, the user would have to `fork` to continue a run that only
+needed a nudge, and would lose log continuity exactly when they need it most to
+understand what happened.
 
-### The detección is conservadora
+### The detection is conservative
 
-No is emite if there is **cualquier** reason for creer that something va a pasar:
+It is not emitted if there is **any** reason to believe something is going to
+happen:
 
-- some effect pendiente that vaya a producir a event (`SpawnTurn`, `CallTool`,
+- any pending effect that will produce an event (`SpawnTurn`, `CallTool`,
   `SetTimer`, `AskHuman`, `Emit`)
-- someone busy (`anyBusy`) or someone despertable (`anyRunnable`)
-- a timer armado (`ActiveTimer`)
-- a ítem of inbox without responder
+- somebody busy (`anyBusy`) or somebody wakeable (`anyRunnable`)
+- an armed timer (`ActiveTimer`)
+- an unanswered inbox item
 
-The sesgo is intencional. A fake positivo — decirle "estás stalled" a a run that
-iba a continue — destruye the confianza en the señal, and a señal en the that not is
-confía is peor that not tenerla because is ignora justo when is verdadera.
-`QuiescentEmitted` además garantiza that is emita a sola vez.
+The bias is intentional. A false positive — telling a run "you are stuck" when it
+was going to continue — destroys trust in the signal, and a signal you do not
+trust is worse than no signal, because it gets ignored exactly when it is true.
+`QuiescentEmitted` additionally guarantees it is emitted only once.
 
-### The diagnóstico always nombra the rule of avance
+### The diagnosis always names the advance rule
 
-Esto salió of a test that failed and had reason. The first version decía "nadie
-is working and nadie can empezar", that is cierto e inútil.
+This came out of a test that failed and was right. The first version said
+"nobody is working and nobody can start", which is true and useless.
 
-The case difficult is this: the stage advances with `quorum:3` and only there is two members
-that puedan submit. The two submitted. Nadie missing. The rule not is meets and not
-is va a meet never. A diagnóstico that only dijera "nadie can empezar" leaves
-to the usuario mirando a blueprint that a simple vista is well.
+The hard case is this: the stage advances with `quorum:3` and there are only two
+members who can submit. Both submitted. Nobody is missing. The rule is not met
+and never will be. A diagnosis that only said "nobody can start" leaves the user
+staring at a blueprint that looks fine at a glance.
 
-Así that the diagnóstico nombra the rule, and distingue the two cases:
+So the diagnosis names the rule, and distinguishes the two cases:
 
 ```
-stage review advances with quorum:3 and not is meets; missing the submit of: backend
-stage review advances with quorum:3 and not is meets; ya submitted all the that
-could: the rule is unsatisfiable with this blueprint
+stage review advances with quorum:3 and it is not met; missing the submit of: backend
+stage review advances with quorum:3 and it is not met; everyone who could has
+already submitted: the rule is unsatisfiable with this blueprint
 ```
 
-The segunda línea is a diagnóstico that apunta to the blueprint, not to the run. Es the
-diferencia between "esperá a rato more" and "this never va a terminar, arreglá the
+The second line is a diagnosis pointing at the blueprint, not at the run. That is
+the difference between "wait a bit longer" and "this will never finish, fix the
 config".
 
-## Alternativa discarded
+## Discarded alternative
 
-**A timeout global of inactividad en the executor.** Más simple: if not happened nothing
-en N minutes, avisar. Se descarta for two reasons. Primero, requiere the clock, and
-the clock not exists inside of the reducer (ADR-0001), so that the detección quedaría
-outside of the replay: not podrías replay the diagnóstico. Segundo, a timeout not
-knows **for what** is silent; te da the alarma without the cause, and the cause is everything
-the valor.
+**A global inactivity timeout in the executor.** Simpler: if nothing happened in
+N minutes, raise a warning. Discarded for two reasons. First, it requires the
+clock, and the clock does not exist inside the reducer (ADR-0001), so detection
+would live outside replay: you could not replay the diagnosis. Second, a timeout
+does not know **why** it is silent; it gives you the alarm without the cause, and
+the cause is the entire value.
 
-## Consecuencias
+## Consequences
 
-- The detección is sincrónica with the event that produjo the silence, so that
-  `replay` reproduces the `run.quiescent` en the same punto of the log. The
-  diagnóstico is reproducible, not a observación of a corrida.
-- The run continues live and aceptando inyecciones after of the quiescence.
-- A blueprint with a rule unsatisfiable is denuncia como tal en lugar of
-  presentarse como a run lento.
+- Detection is synchronous with the event that produced the silence, so `replay`
+  reproduces the `run.quiescent` at the same point in the log. The diagnosis is
+  reproducible, not an observation of one particular run.
+- The run stays alive and keeps accepting injections after quiescence.
+- A blueprint with an unsatisfiable rule is reported as such instead of
+  presenting itself as a slow run.
 
-## Cómo is verifies
+## How it is verified
 
-`decide_test.go` has the case difficult construido a propósito: `quietCfg` builds
-a `quorum:3` with only two members elegibles, all entregan, and the test exige
-that the diagnóstico contenga the rule of avance and the palabra `unsatisfiable`.
-Otros tests verifican that not is emita while haya a effect pendiente, a
-timer armado or a inbox without responder.
+`decide_test.go` has the hard case built on purpose: `quietCfg` builds a
+`quorum:3` with only two eligible members, all of them submit, and the test
+requires the diagnosis to contain the advance rule and the word `unsatisfiable`.
+Other tests verify it is not emitted while there is a pending effect, an armed
+timer or an unanswered inbox.

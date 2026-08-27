@@ -1,5 +1,16 @@
 # Prompt: Spanish → English migration pass
 
+> **Status: completed.** This pass has been carried out; the repository is
+> English-only. The document is kept as the record of what was asked for and
+> what the acceptance criteria were, because the ADRs reference decisions that
+> were re-examined during the migration.
+>
+> The Spanish fragments below are **deliberate**: they are the "before" side of
+> the before/after examples. They are the one place in the repo where Spanish is
+> not a violation of `AGENTS.md`, because quoting the original is the whole point
+> of a translation example. Do not "fix" them — replacing them with English
+> would leave two identical snippets and destroy the instruction.
+
 Copy everything below the line into the other AI. It is written to be
 self-contained.
 
@@ -35,7 +46,7 @@ Scale, measured — so you can size the job rather than guess:
 - **8 references to `docs/design/10-execution.md`** need updating when the file
   is renamed.
 - 45 test names, all Spanish.
-- Largest single file: `internal/kernel/decides.go`, ~700 lines, comment-dense.
+- Largest single file: `internal/kernel/decide.go`, ~700 lines, comment-dense.
 
 This is a multi-hour job. Do not attempt it in one pass — follow the ordered
 steps at the bottom and commit after each.
@@ -43,7 +54,7 @@ steps at the bottom and commit after each.
 Verify the baseline before changing anything:
 
 ```bash
-go build -or /tmp/iash ./cmd/iash
+go build -o /tmp/iash ./cmd/iash
 go test -count=1 ./...
 ```
 
@@ -154,7 +165,7 @@ forbidden by `AGENTS.md`.
 CLI usage text in `cmd/iash/main.go`, all capability descriptions in
 `internal/surface/surface.go`, the `Why` output lines in
 `internal/kernel/why.go`, and the reducer's diagnostic strings in
-`internal/kernel/decides.go`.
+`internal/kernel/decide.go`.
 
 The reducer diagnostics are the highest-value strings in the project — they are
 what a user reads when a run is stuck. Translate with care:
@@ -181,7 +192,7 @@ English), `docs/adr/*.md` (all 7 plus its README), `docs/design/10-execution.md`
 **Rename `docs/design/10-execution.md` → `docs/design/10-execution.md`** and
 update every reference to it. It is cited in at least: `cmd/iash/main.go` usage
 text, `internal/arch_test.go` failure message, `README.md`, and several ADRs.
-Grep for `10-ejecucion` to catch them all.
+Grep for `10-ejecucion` to catch them all (the file is now `10-execution.md`).
 
 ADR filenames are Spanish too. Rename them and update the index and all
 cross-references:
@@ -228,7 +239,7 @@ strings**, because it is a recorded snapshot of `Why` output:
 "aprobar bash for backend?"
 ```
 
-When you translate the strings in `why.go` and `decides.go`, `TestGolden` will
+When you translate the strings in `why.go` and `decide.go`, `TestGolden` will
 fail. **That failure is correct and expected.** Do not edit the JSON by hand and
 do not weaken the test. Regenerate it:
 
@@ -257,7 +268,7 @@ Work package by package so each step is independently verifiable:
 
 1. `internal/kernel/event.go`, `effect.go`, `state.go` — comments and identifiers
 2. `internal/kernel/config.go`
-3. `internal/kernel/decides.go` — the biggest file (~700 lines), comments + diagnostic strings
+3. `internal/kernel/decide.go` — the biggest file (~700 lines), comments + diagnostic strings
 4. `internal/kernel/why.go` — comments + output strings
 5. `internal/kernel/decide_test.go` — test names, messages, helper renames
 6. `internal/surface/surface.go` + `surface_test.go`

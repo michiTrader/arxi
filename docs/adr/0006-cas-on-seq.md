@@ -1,84 +1,83 @@
-# ADR-0006: The concurrencia is resolves with CAS sobre `seq`; `turn_source` is retira
+# ADR-0006: Concurrency is resolved with CAS on `seq`; `turn_source` is retired
 
-- Estado: aceptada
-- Afecta a: `internal/kernel/config.go` (`Interaction`), `internal/surface/surface.go` (`--if-seq`)
-- Depende of: ADR-0002
-- Origen: review of IA B
+- Status: accepted
+- Affects: `internal/kernel/config.go` (`Interaction`), `internal/surface/surface.go` (`--if-seq`)
+- Depends on: ADR-0002
+- Origin: review by AI B
 
-## Contexto
+## Context
 
-The primer borrador of the blueprint had a field `turn_source`: a declaración of
-who had permiso for open turns en a run (the coordinador, cualquier
-member, only the human). The intention was prevenir carreras: if only a source
-can open turns, not there is two escritores compitiendo.
+The first draft of the blueprint had a `turn_source` field: a declaration of who
+was allowed to open turns in a run (the coordinator, any member, only the human).
+The intent was to prevent races: if only one source can open turns, there are not
+two writers competing.
 
-IA B señaló that that not resolves the problema, and had reason.
+AI B pointed out that this does not solve the problem, and was right.
 
-`turn_source` responde **who can hablar**. The carrera real is another question:
-**two escritores modifican the state that the another leyó**. Son independent. Con
-`turn_source: coordinator`, two operadores humans that ambos hablan a través of the
-coordinador siguen produciendo the carrera complete: the two leen `seq 40`, the two
-mandan a fix, and the segunda is applies sobre a state that ya not is the that
-its autor vio.
+`turn_source` answers **who can speak**. The real race is a different question:
+**two writers modify the state the other one read**. They are independent. With
+`turn_source: coordinator`, two human operators who both speak through the
+coordinator still produce the full race: both read `seq 40`, both send a
+correction, and the second is applied on top of a state that is no longer the one
+its author saw.
 
-Peor: `turn_source` da the *sensación* of haber resuelto the concurrencia. Es a
-restricción visible en the blueprint, is siente como a garantía, and not lo is.
+Worse: `turn_source` gives the *feeling* of having solved concurrency. It is a
+visible constraint in the blueprint, it feels like a guarantee, and it is not one.
 
-## Decisión
+## Decision
 
-`turn_source` is **retira**. `Interaction` remains with a only field, `SteerTarget`,
-that is lo that really hacía missing: a who le arrives a mensaje when not is
-especifica destinatario.
+`turn_source` is **retired**. `Interaction` keeps a single field, `SteerTarget`,
+which is what was actually needed: who a message reaches when no addressee is
+specified.
 
-The concurrencia is resolves with **compare-and-swap sobre `seq`**:
+Concurrency is resolved with **compare-and-swap on `seq`**:
 
 ```
 iash run prompt <run> "..." --if-seq 40
 ```
 
-Se applies solamente if the run is exactly en `seq 40`. Si en the medio entró
-another event, the operación is rechaza and the cliente vuelve a read and decides what
-make with the información nueva.
+It applies only if the run is at exactly `seq 40`. If another event arrived in
+the meantime, the operation is rejected and the client reads again and decides
+what to do with the new information.
 
-Se combina with `--on-busy` (`reject` | `queue` | `steer`), that is a decision
-distinta and ortogonal: `if-seq` protects against write sobre a state old,
-`on-busy` decides what make when the destinatario is busy (ADR-0005).
+It combines with `--on-busy` (`reject` | `queue` | `steer`), which is a different
+and orthogonal decision: `if-seq` protects against writing over a stale state,
+`on-busy` decides what to do when the addressee is busy (ADR-0005).
 
-### Por what `seq` and not the turn
+### Why `seq` and not the turn
 
-`seq` **identifica a version of the state**. Es a entero monótono that the writer
-single of the log assigns (ADR-0002), and `State = fold(...until seq N)` is a función
-of él. Eso is exactly lo that a CAS needs: a token of version.
+`seq` **identifies a version of the state**. It is a monotonic integer assigned
+by the single log writer (ADR-0002), and `State = fold(...up to seq N)` is a
+function of it. That is exactly what a CAS needs: a version token.
 
-A turn not is a version of the state. A turn abarca muchos events and for lo
-tanto muchos states; two operaciones that citan the same turn can estar seeing
-states completamente distintos. A CAS sobre the turn sería a CAS that a veces
-happens when should fail, that is lo peor that can make a CAS.
+A turn is not a version of the state. A turn spans many events and therefore many
+states; two operations quoting the same turn may be looking at completely
+different states. A CAS on the turn would be a CAS that sometimes passes when it
+should fail, which is the worst thing a CAS can do.
 
-## Alternativa discarded
+## Discarded alternative
 
-**Lockear the run while is writes.** Correcto, and descartado for the modo of
-uso: a run live can estar hours waiting a approval humana. A lock
-sobre esa ventana convierte cualquier interacción concurrente en a waits
-indefinida, and a lock that there is that poder break a mano vuelve a traer the carrera
-for the puerta of atrás. The CAS is optimista, that is lo apropiado when the
-conflicto is raro and the cost of reintentar is read of new.
+**Lock the run while it is being written.** Correct, and discarded because of the
+usage mode: a live run can spend hours waiting for a human approval. A lock over
+that window turns any concurrent interaction into an indefinite wait, and a lock
+that has to be breakable by hand brings the race back through the side door. The
+CAS is optimistic, which is the right choice when the conflict is rare and the
+cost of retrying is reading again.
 
-## Consecuencias
+## Consequences
 
-- `--if-seq` is opcional. Sin él the operación is "last write wins", that is well
-  for a human en a terminal and is badly for a script. The surface lo
-  declara en `run prompt` and `run steer` for that a cliente programático pueda
-  ser correcto.
-- A cliente that reciba a rechazo for `if-seq` has that releer. Eso is a
-  feature: le arrives the state new before of insistir.
-- No there is not declaración en the blueprint sobre who can open turns. The
-  control of who can make what is autorización, and va en the capa of
-  autorización, not en the model of execution.
-- Menos surface of config, and the that remains not promete nothing that not cumpla.
+- `--if-seq` is optional. Without it the operation is "last write wins", which is
+  fine for a human at a terminal and wrong for a script. The surface declares it
+  on `run prompt` and `run steer` so a programmatic client can be correct.
+- A client that gets an `if-seq` rejection has to re-read. That is a feature: the
+  new state reaches it before it insists.
+- There is no declaration in the blueprint about who can open turns. Controlling
+  who can do what is authorization, and it belongs in the authorization layer,
+  not in the execution model.
+- Less config surface, and what remains promises nothing it does not deliver.
 
-## Cómo is verifies
+## How it is verified
 
-`surface_test.go` verifies that `run prompt` and `run steer` declaren `if-seq` and
-`on-busy`. The comment en `config.go` sobre `Interaction` documenta the retiro
-en the punto where someone estaría tentado of reintroducir the field.
+`surface_test.go` verifies that `run prompt` and `run steer` declare `if-seq` and
+`on-busy`. The comment in `config.go` about `Interaction` documents the removal at
+the exact spot where somebody would be tempted to reintroduce the field.

@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-// Implementation note.
+// ------------------------------------------------------------------ helpers
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// seq is the sequence counter for the tests. Every test that compares a golden
+// has to reset it (see TestGolden): otherwise the result depends on which other
+// tests ran before, which is the worst class of fragile test.
 var seq int64
 
 func nextSeq() int64 { seq++; return seq }
@@ -28,8 +28,8 @@ func ev(t EventType, actor string, payload map[string]any) Event {
 	}
 }
 
-// Implementation note.
-// Implementation note.
+// started starts a run and returns the already-initialized state. It takes the
+// Config because the members of the state are derived from the frozen blueprint.
 func started(c Config) State {
 	n := nextSeq()
 	e := Event{
@@ -45,10 +45,10 @@ func started(c Config) State {
 	return s
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// bp is the test blueprint: four members (one advisory), two stages with
+// different advance rules, three watchers. It is deliberately the interesting
+// case and not the minimal one, because coordination bugs do not show up with a
+// single agent and a single stage.
 func bp() Config {
 	return Config{
 		Blueprint: "test",
@@ -90,14 +90,14 @@ func firstEffect[T Effect](fx []Effect) (T, bool) {
 	return zero, false
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// drive does what the executor does: if the reducer returned Emit, those events
+// are written to the log and go through Decide again.
+//
+// This helper exists because the first version of several tests was WRONG: they
+// asserted "the stage advanced" by looking at the State that Decide returned,
+// and the stage does not advance in that step - an event is emitted that
+// advances the stage in the following step. Without this helper, the tests
+// verify something different from what happens in production.
 func drive(s State, e Event, c Config) (State, []Effect) {
 	s, fx := Decide(s, e, c)
 	all := append([]Effect(nil), fx...)
@@ -113,7 +113,7 @@ func drive(s State, e Event, c Config) (State, []Effect) {
 	return s, all
 }
 
-// Implementation note.
+// ------------------------------------------------------------------ startup
 
 func TestRunStartedInitializesMembers(t *testing.T) {
 	c := bp()
@@ -126,33 +126,34 @@ func TestRunStartedInitializesMembers(t *testing.T) {
 		t.Fatalf("members = %d", len(s.Members))
 	}
 	if s.StageIndex != -1 {
-		t.Errorf("StageIndex = %d, is esperaba -1 (still not entró a not stage)", s.StageIndex)
+		t.Errorf("StageIndex = %d, expected -1 (has not entered any stage yet)", s.StageIndex)
 	}
 	if m := s.Member("mediator"); m.State != MemberInactive {
-		t.Errorf("advisory arrancó en %q, is esperaba inactive", m.State)
+		t.Errorf("advisory started in %q, expected inactive", m.State)
 	}
 	if m := s.Member("backend"); m.State != MemberIdle {
-		t.Errorf("not-advisory arrancó en %q", m.State)
+		t.Errorf("non-advisory started in %q", m.State)
 	}
 	if s.BlueprintSHA != "abc123" {
-		t.Errorf("the run not fixed the blueprint: %q", s.BlueprintSHA)
+		t.Errorf("the run did not pin the blueprint: %q", s.BlueprintSHA)
 	}
 }
 
-// Implementation note.
-// Implementation note.
+// Protects the default that avoids the most expensive hole: two agents with
+// `write` over the same directory overwrite each other and the KV store lock
+// does not prevent it.
 func TestWorkspaceWorktreeByDefault(t *testing.T) {
 	c := bp()
 	if c.Workspace != "worktree" {
-		t.Fatalf("workspace = %q; with members that have write/bash the default safe is worktree", c.Workspace)
+		t.Fatalf("workspace = %q; with members that have write/bash the safe default is worktree", c.Workspace)
 	}
 	without := Config{Members: []MemberConfig{{Name: "a"}, {Name: "b"}}}.ResolveDefaults()
 	if without.Workspace != "none" {
-		t.Errorf("without write/bash the workspace should ser none, was %q", without.Workspace)
+		t.Errorf("without write/bash the workspace should be none, was %q", without.Workspace)
 	}
 }
 
-// Implementation note.
+// ------------------------------------------------------------------- stages
 
 func TestStageEnteredActivatesOnlyNonAdvisory(t *testing.T) {
 	c := bp()
@@ -160,35 +161,35 @@ func TestStageEnteredActivatesOnlyNonAdvisory(t *testing.T) {
 	s, fx := Decide(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
 
 	if got := countEffects[SpawnTurn](fx); got != 3 {
-		t.Fatalf("turns abiertos = %d, is esperaban 3 (the 4 members less the advisory)", got)
+		t.Fatalf("turns opened = %d, expected 3 (the 4 members minus the advisory)", got)
 	}
 	for _, f := range fx {
 		if sp, ok := f.(SpawnTurn); ok && sp.Agent == "mediator" {
-			t.Error("is opened a turn pago for the advisory")
+			t.Error("a paid turn was opened for the advisory")
 		}
 	}
 	if countEffects[SetTimer](fx) != 1 {
-		t.Error("the stage has timeout pero not is armó the timer")
+		t.Error("the stage has a timeout but the timer was not armed")
 	}
 	if s.Stage != "execute" {
 		t.Errorf("stage = %q", s.Stage)
 	}
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestControlEffectsBeforeIndependentEffects(t *testing.T) {
+// Resolves AI A's gap: the executor needs to know what to run in order and what
+// in parallel. If a SpawnTurn slipped in before the SetTimer, the turn could
+// finish before the timer that watches it even exists.
+func TestEffectOrderControlBeforeIndependent(t *testing.T) {
 	c := bp()
 	s := started(c)
 	_, fx := Decide(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
 
-	visto := false
+	seenIndependent := false
 	for _, f := range fx {
 		if f.Class() == ClassIndependent {
-			visto = true
-		} else if visto {
-			t.Fatalf("a effect of control apareció after of one independent: %T", f)
+			seenIndependent = true
+		} else if seenIndependent {
+			t.Fatalf("a control effect appeared after an independent one: %T", f)
 		}
 	}
 }
@@ -204,17 +205,18 @@ func TestQuorumAllAdvancesAndCancelsTimer(t *testing.T) {
 	}
 
 	if countEffects[CancelTimer](fx) != 1 {
-		t.Error("the stage advanced pero the timer siguió armado: the run podría 'expirar' after of terminar")
+		t.Error("the stage advanced but the timer stayed armed: the run could 'expire' after finishing")
 	}
 	if s.ActiveTimer != "" {
-		t.Errorf("ActiveTimer = %q after of avanzar", s.ActiveTimer)
+		t.Errorf("ActiveTimer = %q after advancing", s.ActiveTimer)
 	}
 	if countEffects[Emit](fx) < 2 {
-		t.Errorf("is esperaban stage.advanced and stage.entered, hubo %d emits", countEffects[Emit](fx))
+		t.Errorf("expected stage.advanced and stage.entered, there were %d emits", countEffects[Emit](fx))
 	}
 }
 
-// Implementation note.
+// Protects the concrete consequence of the advisory trait: it does not count
+// toward the quorum.
 func TestAdvisoryDoesNotCountTowardQuorum(t *testing.T) {
 	c := bp()
 	s := started(c)
@@ -222,33 +224,33 @@ func TestAdvisoryDoesNotCountTowardQuorum(t *testing.T) {
 
 	s, _ = drive(s, ev(StageSubmitted, "mediator", nil), c)
 	if s.Stage != "execute" {
-		t.Fatal("the submit of a advisory hizo avanzar the stage")
+		t.Fatal("an advisory submit made the stage advance")
 	}
 	for _, who := range []string{"backend", "designer", "frontend"} {
 		s, _ = drive(s, ev(StageSubmitted, who, nil), c)
 	}
 	if s.Stage != "integrate" {
-		t.Errorf("stage = %q; with the 3 not-advisory ya should estar en integrate", s.Stage)
+		t.Errorf("stage = %q; with the 3 non-advisory it should already be in integrate", s.Stage)
 	}
 }
 
-// Implementation note.
-// Implementation note.
-func TestStageTimeoutEscalatesWithoutFailing(t *testing.T) {
+// Protects the default that avoids training the user to set absurd timeouts: a
+// stage timeout escalates, it does not kill the run.
+func TestStageTimeoutEscalatesDoesNotFail(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = Decide(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
 
 	s2, fx := Decide(s, ev(StageTimeout, "", map[string]any{"stage": "execute"}), c)
 	if s2.Status == StatusFailed {
-		t.Fatal("a timeout of stage mató the run; the default has that ser escalate")
+		t.Fatal("a stage timeout killed the run; the default has to be to escalate")
 	}
 	if countEffects[SpawnTurn](fx) != 1 {
-		t.Errorf("is esperaba wake to the mediator, effects: %#v", fx)
+		t.Errorf("expected to wake the mediator, effects: %#v", fx)
 	}
 }
 
-func TestStageTimeoutWithoutWatcherAsksHuman(t *testing.T) {
+func TestStageTimeoutWithoutObserverAsksTheHuman(t *testing.T) {
 	c := bp()
 	c.Watchers = nil
 	s := started(c)
@@ -256,19 +258,19 @@ func TestStageTimeoutWithoutWatcherAsksHuman(t *testing.T) {
 
 	s, fx := Decide(s, ev(StageTimeout, "", map[string]any{"stage": "execute"}), c)
 	if countEffects[AskHuman](fx) != 1 {
-		t.Fatal("without observador there is that ask, not throw the work a the basura")
+		t.Fatal("without an observer we have to ask, not throw the work in the trash")
 	}
 	if s.Status != StatusBlocked {
-		t.Errorf("status = %q, is esperaba blocked", s.Status)
+		t.Errorf("status = %q, expected blocked", s.Status)
 	}
 }
 
-// Implementation note.
+// -------------------------------------------------------- turns and causes
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestCoalescingUnTurnoConVariasCausas(t *testing.T) {
+// Protects the most direct saving of the design: five reasons to talk to the
+// same agent are ONE turn with five causes, not five turns. The difference is
+// literally 5x on the bill.
+func TestCoalescingOneTurnWithSeveralCauses(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = Decide(s, ev(AgentActivated, "backend", nil), c)
@@ -276,92 +278,92 @@ func TestCoalescingUnTurnoConVariasCausas(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		next, fx := Decide(s, ev(RunPrompt, "", map[string]any{"to": "backend"}), c)
 		if countEffects[SpawnTurn](fx) != 0 {
-			t.Fatal("is opened a turn for a agente busy")
+			t.Fatal("a turn was opened for a busy agent")
 		}
 		s = next
 	}
 	n := len(s.Member("backend").PendingCauses)
 	if n != 3 {
-		t.Fatalf("causes encoladas = %d, is esperaban 3: the causes perdidas are work of the usuario tirado a the basura", n)
+		t.Fatalf("queued causes = %d, expected 3: lost causes are the user's work thrown in the trash", n)
 	}
 
 	s, fx := Decide(s, ev(AgentTurnDone, "backend", nil), c)
 	if got := countEffects[SpawnTurn](fx); got != 1 {
-		t.Fatalf("turns = %d, is esperaba 1 turn with the %d causes fusionadas", got, n)
+		t.Fatalf("turns = %d, expected 1 turn with the %d causes merged", got, n)
 	}
 	sp, _ := firstEffect[SpawnTurn](fx)
 	if len(sp.CauseEvents) != n {
-		t.Errorf("causes en the turn = %d, is esperaban %d", len(sp.CauseEvents), n)
+		t.Errorf("causes in the turn = %d, expected %d", len(sp.CauseEvents), n)
 	}
 	if sp.Coalesced != n {
-		t.Errorf("Coalesced = %d; the number has that ser auditable", sp.Coalesced)
+		t.Errorf("Coalesced = %d; the number has to be auditable", sp.Coalesced)
 	}
 	if len(s.Member("backend").PendingCauses) != 0 {
-		t.Error("the causes not is drenaron: is van a reprocesar for always")
+		t.Error("the causes were not drained: they are going to be reprocessed forever")
 	}
 }
 
-// Implementation note.
-// Implementation note.
-func TestSteerBusyAgentQueuesWithoutOpeningTurn(t *testing.T) {
+// Protects that `on_busy: queue` really queues and does not open a parallel turn
+// that competes with the one already running.
+func TestSteerBusyAgentQueuesDoesNotOpenTurn(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = Decide(s, ev(AgentActivated, "backend", nil), c)
 
 	s, fx := Decide(s, ev(AgentSteered, "", map[string]any{"to": "backend"}), c)
 	if countEffects[SpawnTurn](fx) != 0 {
-		t.Fatal("on_busy: queue means encolar, not open a turn parallel")
+		t.Fatal("on_busy: queue means queue, not open a parallel turn")
 	}
 	if len(s.Member("backend").PendingCauses) != 1 {
-		t.Fatal("the steer is perdió")
+		t.Fatal("the steer was lost")
 	}
 }
 
-func TestSteerABlueprintConBroadcast(t *testing.T) {
+func TestSteerToBlueprintWithBroadcast(t *testing.T) {
 	c := bp()
 	c.Inter.SteerTarget = "broadcast"
 	s := started(c)
-	_, fx := Decide(s, ev(AgentSteered, "", map[string]any{"text": "cambien of rumbo"}), c)
+	_, fx := Decide(s, ev(AgentSteered, "", map[string]any{"text": "change course"}), c)
 
-	// Implementation note.
-	// Implementation note.
+	// The advisory is inactive: a broadcast does not pay for a turn for every
+	// commentator nobody invoked.
 	if got := countEffects[SpawnTurn](fx); got != 3 {
-		t.Fatalf("broadcast opened %d turns, is esperaban 3", got)
+		t.Fatalf("broadcast opened %d turns, expected 3", got)
 	}
 }
 
-// Implementation note.
-// Implementation note.
-func TestCoordinatorResolvesByRoleNotType(t *testing.T) {
+// Protects that "coordinator" is not a special kind of agent but a role. A
+// single namespace, with no parallel categories.
+func TestCoordinatorResolvesByRoleNotByType(t *testing.T) {
 	c := bp()
 	s := started(c)
-	_, fx := Decide(s, ev(RunPrompt, "", map[string]any{"text": "hola"}), c)
+	_, fx := Decide(s, ev(RunPrompt, "", map[string]any{"text": "hello"}), c)
 
 	sp, ok := firstEffect[SpawnTurn](fx)
 	if !ok {
-		t.Fatal("a prompt without destinatario not despertó a nadie")
+		t.Fatal("a prompt with no recipient did not wake anybody")
 	}
 	if sp.Agent != "backend" {
-		t.Errorf("the steer was a %q; backend has role=coordinator", sp.Agent)
+		t.Errorf("the steer went to %q; backend has role=coordinator", sp.Agent)
 	}
 
-	// Implementation note.
-	// Implementation note.
+	// With nobody holding that role, it falls back to the first non-advisory:
+	// the system keeps working instead of demanding ceremonial configuration.
 	c2 := bp()
 	c2.Members[0].Role = ""
 	s2 := started(c2)
-	_, fx2 := Decide(s2, ev(RunPrompt, "", map[string]any{"text": "hola"}), c2)
+	_, fx2 := Decide(s2, ev(RunPrompt, "", map[string]any{"text": "hello"}), c2)
 	sp2, _ := firstEffect[SpawnTurn](fx2)
 	if sp2.Agent != "backend" {
-		t.Errorf("without rol declared the fallback should ser the primer not-advisory, was %q", sp2.Agent)
+		t.Errorf("with no declared role the fallback should be the first non-advisory, was %q", sp2.Agent)
 	}
 }
 
-// Implementation note.
+// ----------------------------------------------------------------- watchers
 
-// Implementation note.
-// Implementation note.
-func TestWatcherAutoExclusion(t *testing.T) {
+// Protects against the bug that gets billed in dollars: a watcher that reacts to
+// its own events is an infinite loop with a credit card.
+func TestWatcherSelfExclusion(t *testing.T) {
 	c := bp()
 	c.Watchers = []Watcher{{Agent: "backend", Pattern: "lock.*", Action: "notify"}}
 	s := started(c)
@@ -369,21 +371,21 @@ func TestWatcherAutoExclusion(t *testing.T) {
 	_, fx := Decide(s, ev(LockAcquired, "backend", map[string]any{"key": "k"}), c)
 	for _, f := range fx {
 		if sp, ok := f.(SpawnTurn); ok && sp.Agent == "backend" {
-			t.Fatal("the watcher is despertó with its own event: bucle infinito")
+			t.Fatal("the watcher woke up on its own event: infinite loop")
 		}
 	}
 
-	// Implementation note.
-	// Implementation note.
+	// With include_self it does wake up: the exclusion is a default, not a
+	// prohibition. There are legitimate patterns that need to see themselves.
 	c.Watchers[0].IncludeSelf = true
 	_, fx = Decide(s, ev(LockAcquired, "backend", map[string]any{"key": "k"}), c)
 	if countEffects[SpawnTurn](fx) == 0 {
-		t.Error("include_self=true not despertó to the watcher")
+		t.Error("include_self=true did not wake the watcher")
 	}
 }
 
-// Implementation note.
-// Implementation note.
+// Protects the other cheap filter: without a depth limit, a watcher that reacts
+// to what another watcher caused has no bottom.
 func TestCausalDepthLimit(t *testing.T) {
 	c := bp()
 	c.MaxDepth = 3
@@ -391,31 +393,31 @@ func TestCausalDepthLimit(t *testing.T) {
 	s := started(c)
 
 	e := ev(LockAcquired, "backend", map[string]any{"key": "k"})
-	e.Depth = 3 // ya en the límite
+	e.Depth = 3 // already at the limit
 	_, fx := Decide(s, e, c)
 	if countEffects[SpawnTurn](fx) != 0 {
-		t.Fatal("is despertó a watcher pasado the límite of depth: the cascada not has depth")
+		t.Fatal("a watcher was woken past the depth limit: the cascade has no bottom")
 	}
 }
 
-// Implementation note.
-func TestResourceConflictDoesNotFailRun(t *testing.T) {
+// Protects that a trivial merge conflict does not kill half an hour of work.
+func TestResourceConflictDoesNotFailTheRun(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, fx := Decide(s, ev(ResourceConflict, "backend", map[string]any{"path": "src/main.go"}), c)
 
 	if s.Status == StatusFailed {
-		t.Fatal("a conflicto of recurso mató the run")
+		t.Fatal("a resource conflict killed the run")
 	}
 	if countEffects[SpawnTurn](fx) != 1 {
-		t.Errorf("the conflicto not despertó to the observador: %#v", fx)
+		t.Errorf("the conflict did not wake the observer: %#v", fx)
 	}
 }
 
-// Implementation note.
+// ------------------------------------------------------------ human in the loop
 
-// Implementation note.
-// Implementation note.
+// Protects that policy=ask is a question and not an error, and that the question
+// leaves the structured reference that makes the automatic remedy possible.
 func TestDeniedToolCreatesInboxWithStructuredReference(t *testing.T) {
 	c := bp()
 	s := started(c)
@@ -424,77 +426,77 @@ func TestDeniedToolCreatesInboxWithStructuredReference(t *testing.T) {
 	}), c)
 
 	if countEffects[AskHuman](fx) != 1 {
-		t.Fatal("policy=ask not is a error, is a question")
+		t.Fatal("policy=ask is not an error, it is a question")
 	}
 	m := s.Member("backend")
 	if m.State != MemberWaiting || m.Detail != "approval" {
 		t.Fatalf("member = %q/%q", m.State, m.Detail)
 	}
 	if m.BlockedOn == nil || m.BlockedOn["inbox_id"] == nil || m.BlockedOn["tool"] != "bash" {
-		t.Fatalf("blocked_ref incompleto: %#v", m.BlockedOn)
+		t.Fatalf("incomplete blocked_ref: %#v", m.BlockedOn)
 	}
 	if len(s.Inbox) != 1 {
 		t.Errorf("inbox = %d items", len(s.Inbox))
 	}
 }
 
-func TestAnsweredInboxUnblocksAndOpensTurn(t *testing.T) {
+func TestInboxRepliedUnblocksAndOpensTurn(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = Decide(s, ev(ToolCallDenied, "backend", map[string]any{"tool": "bash", "policy": "ask"}), c)
 
 	id := s.Inbox[0].ID
-	s, fx := Decide(s, ev(InboxReplied, "", map[string]any{"inbox_id": id, "text": "dale"}), c)
+	s, fx := Decide(s, ev(InboxReplied, "", map[string]any{"inbox_id": id, "text": "go ahead"}), c)
 
 	m := s.Member("backend")
 	if m.State != MemberIdle {
-		t.Errorf("the member remained en %q after of the answer", m.State)
+		t.Errorf("the member stayed in %q after the reply", m.State)
 	}
 	if m.BlockedOn != nil {
-		t.Error("blocked_on not is limpió: `run why` seguiría reportando a block resuelto")
+		t.Error("blocked_on was not cleared: `run why` would keep reporting a resolved block")
 	}
 	if countEffects[SpawnTurn](fx) != 1 {
-		t.Error("responder not reanudó the work")
+		t.Error("replying did not resume the work")
 	}
 	if !s.Inbox[0].Replied {
-		t.Error("the item remained marcado como pendiente")
+		t.Error("the item stayed marked as pending")
 	}
 }
 
-// Implementation note.
+// -------------------------------------------------------------------- budget
 
-// Implementation note.
-func TestBudgetWarnsAndExhaustsTree(t *testing.T) {
+// Protects the ceiling that makes --budget mean something with nested spawn.
+func TestBudgetWarnsAndExhaustsOverTheTree(t *testing.T) {
 	c := bp()
-	s := started(c) // budget 5.0, umbral 0.8 => avisa en 4.0
+	s := started(c) // budget 5.0, threshold 0.8 => warns at 4.0
 	s, fx := Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 4.2}), c)
 
 	em, ok := firstEffect[Emit](fx)
 	if !ok || em.Event.Type != BudgetWarning {
-		t.Fatalf("4.2 of 5.0 with umbral 0.8 had that avisar; effects: %#v", fx)
+		t.Fatalf("4.2 of 5.0 with threshold 0.8 had to warn; effects: %#v", fx)
 	}
 
-	// Implementation note.
-	// Implementation note.
+	// The warning does not repeat: if it warned on every call, the user would
+	// learn to ignore it and the warning would stop being useful.
 	s, fx = Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 0.1}), c)
 	for _, f := range fx {
 		if e2, ok := f.(Emit); ok && e2.Event.Type == BudgetWarning {
-			t.Error("the aviso of budget is repitió")
+			t.Error("the budget warning repeated")
 		}
 	}
 
 	s, fx = Decide(s, ev(LLMResponse, "designer", map[string]any{"cost_usd": 1.0}), c)
 	em2, ok := firstEffect[Emit](fx)
 	if !ok || em2.Event.Type != BudgetExceeded {
-		t.Fatalf("spending %.2f sobre budget 5.0 and not is agotó", s.TreeSpentUSD)
+		t.Fatalf("spend %.2f over budget 5.0 and it was not exhausted", s.TreeSpentUSD)
 	}
 	if em2.Event.Payload["tree_spent_usd"] == nil {
-		t.Error("budget.exceeded without tree_spent_usd: the spending of the subárbol is the that importa")
+		t.Error("budget.exceeded without tree_spent_usd: the subtree spend is the one that matters")
 	}
 }
 
-// Implementation note.
-func TestExhaustedBudgetBlocksAndAsks(t *testing.T) {
+// Protects that exhausting the budget does not throw away work already paid for.
+func TestBudgetExhaustedBlocksAndAsks(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, fx := Decide(s, ev(BudgetExceeded, "", map[string]any{
@@ -502,92 +504,93 @@ func TestExhaustedBudgetBlocksAndAsks(t *testing.T) {
 	}), c)
 
 	if s.Status != StatusBlocked {
-		t.Fatalf("status = %q; agotar the budget bloquea, not kills", s.Status)
+		t.Fatalf("status = %q; exhausting the budget blocks, it does not kill", s.Status)
 	}
 	ah, ok := firstEffect[AskHuman](fx)
 	if !ok {
-		t.Fatal("not is le preguntó a nadie if quiere subir the techo")
+		t.Fatal("nobody was asked whether they want to raise the ceiling")
 	}
 	if ah.OnTimeout == "" {
-		t.Error("the question not declara what make if nadie answers")
+		t.Error("the question does not declare what to do if nobody answers")
 	}
 }
 
-func TestSpendingAttributedByMember(t *testing.T) {
+func TestSpendAttributedPerMember(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 0.5}), c)
 	s, _ = Decide(s, ev(LLMResponse, "designer", map[string]any{"cost_usd": 0.25}), c)
 
 	if got := s.Member("backend").SpentUSD; got != 0.5 {
-		t.Errorf("backend gastó %v, quiero 0.5", got)
+		t.Errorf("backend spent %v, want 0.5", got)
 	}
 	if got := s.Member("designer").SpentUSD; got != 0.25 {
-		t.Errorf("designer gastó %v, quiero 0.25", got)
+		t.Errorf("designer spent %v, want 0.25", got)
 	}
 	if s.SpentUSD != 0.75 || s.TreeSpentUSD != 0.75 {
-		t.Errorf("run=%v tree=%v, quiero 0.75 en the two", s.SpentUSD, s.TreeSpentUSD)
+		t.Errorf("run=%v tree=%v, want 0.75 in both", s.SpentUSD, s.TreeSpentUSD)
 	}
 }
 
-// Implementation note.
+// ---------------------------------------------------------------- quiescence
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// quietCfg is a blueprint built to get stuck: the rule asks for three
+// submissions and there are only two members that can submit. It is the real
+// scenario (an advance rule impossible to satisfy) where the run does not fail,
+// does not finish and simply goes quiet.
 func quietCfg(watch bool) Config {
 	c := Config{
-		Stages:  []StageConfig{{Name: "only", AdvanceWhen: "quorum:3"}},
-		Members: []MemberConfig{{Name: "a"}, {Name: "b"}, {Name: "vigia", Advisory: true}},
+		Stages:  []StageConfig{{Name: "solo", AdvanceWhen: "quorum:3"}},
+		Members: []MemberConfig{{Name: "a"}, {Name: "b"}, {Name: "lookout", Advisory: true}},
 	}
 	if watch {
-		c.Watchers = []Watcher{{Agent: "vigia", Pattern: "run.quiescent", Action: "activate"}}
+		c.Watchers = []Watcher{{Agent: "lookout", Pattern: "run.quiescent", Action: "activate"}}
 	}
 	return c.ResolveDefaults()
 }
 
-// Implementation note.
+// untilQuiescent drives the run to the point where nobody has anything to do.
 func untilQuiescent(t *testing.T, c Config) (State, []Effect) {
 	t.Helper()
 	s := started(c)
-	s, _ = Decide(s, ev(StageEntered, "", map[string]any{"stage": "only", "index": 0}), c)
+	s, _ = Decide(s, ev(StageEntered, "", map[string]any{"stage": "solo", "index": 0}), c)
 	s, _ = Decide(s, ev(AgentActivated, "a", nil), c)
 	s, _ = Decide(s, ev(AgentActivated, "b", nil), c)
 	s, _ = Decide(s, ev(StageSubmitted, "a", nil), c)
 	return Decide(s, ev(StageSubmitted, "b", nil), c)
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestQuiescenceDetectedWithDiagnosis(t *testing.T) {
+// Protects the detector of the most expensive failure mode of these systems: the
+// system does not fail, does not finish, things stop happening, and the user
+// finds out the next morning. An EVENT with a diagnosis is emitted, not a
+// terminal state.
+func TestQuiescenceIsDetectedWithDiagnosis(t *testing.T) {
 	c := quietCfg(true)
 	s, fx := untilQuiescent(t, c)
 
 	em, ok := firstEffect[Emit](fx)
 	if !ok || em.Event.Type != RunQuiescent {
-		t.Fatalf("not is emitió run.quiescent; effects: %#v", fx)
+		t.Fatalf("run.quiescent was not emitted; effects: %#v", fx)
 	}
 	diag, _ := em.Event.Payload["diagnosis"].(string)
 	if diag == "" {
-		t.Fatal("run.quiescent without diagnóstico: 'the run is still' not le works a nadie")
+		t.Fatal("run.quiescent with no diagnosis: 'the run is quiet' is useless to anybody")
 	}
 	if !strings.Contains(diag, "quorum:3") {
-		t.Errorf("the diagnóstico not nombra the rule that not is meets: %q", diag)
+		t.Errorf("the diagnosis does not name the rule that is not met: %q", diag)
 	}
 	if s.Status != StatusRunning {
-		t.Errorf("status = %q: quiescent NO is a state terminal", s.Status)
+		t.Errorf("status = %q: quiescent is NOT a terminal state", s.Status)
 	}
 	if !s.QuiescentEmitted {
-		t.Error("QuiescentEmitted not remained marcado: is repetiría en each event")
+		t.Error("QuiescentEmitted was not marked: it would repeat on every event")
 	}
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestQuiescenceWakesWatcherWithoutFailing(t *testing.T) {
+// Protects: quiescence wakes the coordinator and the run does NOT fail. It is
+// the difference between a system that recovers and one that only tells you that
+// you lost.
+func TestQuiescenceWakesTheObserverDoesNotFail(t *testing.T) {
 	c := quietCfg(true)
 	s, fx := untilQuiescent(t, c)
 
@@ -599,23 +602,23 @@ func TestQuiescenceWakesWatcherWithoutFailing(t *testing.T) {
 
 	sp, ok := firstEffect[SpawnTurn](fx2)
 	if !ok {
-		t.Fatalf("the run is remained silent and nadie was despertado; effects: %#v", fx2)
+		t.Fatalf("the run went quiet and nobody was woken; effects: %#v", fx2)
 	}
-	if sp.Agent != "vigia" {
-		t.Errorf("despertó a %q en vez of the observador", sp.Agent)
+	if sp.Agent != "lookout" {
+		t.Errorf("woke %q instead of the observer", sp.Agent)
 	}
 	if s.Status == StatusFailed {
-		t.Error("the quiescence mató the run en vez of pedir intervención")
+		t.Error("quiescence killed the run instead of asking for intervention")
 	}
 }
 
-func TestQuiescenceFailsWithoutWatcher(t *testing.T) {
+func TestQuiescenceWithoutObserverDoesFail(t *testing.T) {
 	c := quietCfg(false)
 	s, fx := untilQuiescent(t, c)
 
 	em, ok := firstEffect[Emit](fx)
 	if !ok {
-		t.Fatal("not is emitió run.quiescent")
+		t.Fatal("run.quiescent was not emitted")
 	}
 	em.Event.Seq = nextSeq()
 	em.Event.ID = "eq"
@@ -623,36 +626,36 @@ func TestQuiescenceFailsWithoutWatcher(t *testing.T) {
 	s, _ = Decide(s, em.Event, c)
 
 	if s.Status != StatusFailed {
-		t.Fatalf("status = %q, quiero failed", s.Status)
+		t.Fatalf("status = %q, want failed", s.Status)
 	}
 	if !strings.Contains(s.Result, "quorum:3") {
-		t.Errorf("the resultado not arrastra the diagnóstico: %q", s.Result)
+		t.Errorf("the result does not carry the diagnosis: %q", s.Result)
 	}
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestSubmittedNoEsRunnable(t *testing.T) {
+// Protects the subtlety that made the first implementation fail: a member in
+// state `submitted` is NOT runnable. It looks available (not thinking, not
+// waiting) but it already submitted and has nothing to do. Counting it as
+// runnable makes quiescence never get detected and the bug is invisible.
+func TestSubmittedIsNotRunnable(t *testing.T) {
 	if (Member{State: MemberSubmitted}).Runnable() {
-		t.Fatal("submitted cuenta como runnable: the quiescence never is detectaría")
+		t.Fatal("submitted counts as runnable: quiescence would never be detected")
 	}
 	if !(Member{State: MemberIdle}).Runnable() {
-		t.Error("idle not cuenta como runnable")
+		t.Error("idle does not count as runnable")
 	}
 	for _, st := range []MemberState{MemberThinking, MemberTool, MemberWaiting, MemberInactive, MemberFailed} {
 		if (Member{State: st}).Runnable() {
-			t.Errorf("%q cuenta como runnable", st)
+			t.Errorf("%q counts as runnable", st)
 		}
 	}
 }
 
-// Implementation note.
+// ------------------------------------------------------------------ run why
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
+// Protects that `run why` does not only explain but gives the exact command. The
+// difference between "it is blocked" and "run `iash inbox approve inbox-1`" is
+// the entire usefulness of the command.
 func TestRunWhyExplainsAndRemediates(t *testing.T) {
 	c := bp()
 	s := started(c)
@@ -665,13 +668,13 @@ func TestRunWhyExplainsAndRemediates(t *testing.T) {
 		txt.WriteString(l.Text + "\n")
 	}
 	if !strings.Contains(txt.String(), "backend") || !strings.Contains(txt.String(), "bash") {
-		t.Fatalf("why not nombra to the blocked ni the cause:\n%s", txt.String())
+		t.Fatalf("why does not name the blocked member nor the cause:\n%s", txt.String())
 	}
 	if len(w.Fix) == 0 {
-		t.Fatal("why explicó the problema pero not dio the command that lo arregla")
+		t.Fatal("why explained the problem but did not give the command that fixes it")
 	}
 	if !strings.Contains(strings.Join(w.Fix, "\n"), "iash inbox approve") {
-		t.Errorf("the remedy not is ejecutable: %v", w.Fix)
+		t.Errorf("the remedy is not executable: %v", w.Fix)
 	}
 }
 
@@ -685,52 +688,52 @@ func TestRunWhyExplainsQuiescence(t *testing.T) {
 		txt.WriteString(l.Text + "\n")
 	}
 	if !strings.Contains(txt.String(), "quorum:3") {
-		t.Errorf("why not nombra the rule of avance that not is meets:\n%s", txt.String())
+		t.Errorf("why does not name the advance rule that is not met:\n%s", txt.String())
 	}
 	if len(w.Fix) == 0 {
-		t.Error("why not sugiere how destrabar a run quiescent")
+		t.Error("why does not suggest how to unblock a quiescent run")
 	}
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestRunWhyReportsBlockWithoutReference(t *testing.T) {
+// Protects the schema contract: if a block does not bring blocked_ref, `run why`
+// says so explicitly instead of showing an empty line and leaving the user
+// thinking the system knows nothing.
+func TestRunWhyExposesBlockWithoutReference(t *testing.T) {
 	c := bp()
 	s := started(c)
-	s, _ = Decide(s, ev(AgentBlocked, "backend", map[string]any{"blocked_on": "motivo_raro"}), c)
+	s, _ = Decide(s, ev(AgentBlocked, "backend", map[string]any{"blocked_on": "weird_reason"}), c)
 
 	w := Explain(s, c)
 	var txt strings.Builder
 	for _, l := range w.Lines {
 		txt.WriteString(l.Text + "\n")
 	}
-	if !strings.Contains(txt.String(), "violación of the schema") {
-		t.Errorf("why not delató the block without reference structured:\n%s", txt.String())
+	if !strings.Contains(txt.String(), "schema violation") {
+		t.Errorf("why did not expose the block without a structured reference:\n%s", txt.String())
 	}
 }
 
-// Implementation note.
+// -------------------------------------------------------------- invariants
 
-// Implementation note.
-// Implementation note.
-func TestRunTerminalIgnoraEventosTardios(t *testing.T) {
+// Protects that a slow tool answering after the cancel is not an error: if it
+// were, perfectly valid replays would fail.
+func TestTerminalRunIgnoresLateEvents(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = Decide(s, ev(RunCancelled, "", nil), c)
 
 	s2, fx := Decide(s, ev(ToolCallCompleted, "backend", map[string]any{"tool": "bash"}), c)
 	if len(fx) != 0 {
-		t.Fatalf("a run cancelado produjo effects: %#v", fx)
+		t.Fatalf("a cancelled run produced effects: %#v", fx)
 	}
 	if s2.Status != StatusCancelled {
-		t.Errorf("status cambió a %q after of terminal", s2.Status)
+		t.Errorf("status changed to %q after terminal", s2.Status)
 	}
 }
 
-// Implementation note.
-// Implementation note.
-func TestFoldEsDeterministaYNoMutaLaEntrada(t *testing.T) {
+// Protects the property that replay, --sim and eval depend on: the same log
+// gives the same state, and the fold does not touch its input.
+func TestFoldIsDeterministicAndDoesNotMutateInput(t *testing.T) {
 	c := bp()
 	events := []Event{
 		ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}),
@@ -748,44 +751,44 @@ func TestFoldEsDeterministaYNoMutaLaEntrada(t *testing.T) {
 	ja, _ := json.Marshal(a)
 	jb, _ := json.Marshal(b)
 	if string(ja) != string(jb) {
-		t.Fatal("two folds of the same log dieron states distintos: replay not works for nothing")
+		t.Fatal("two folds of the same log gave different states: replay is worthless")
 	}
 	afterJSON, _ := json.Marshal(base)
 	if string(baseJSON) != string(afterJSON) {
-		t.Fatal("Fold mutó the state of input")
+		t.Fatal("Fold mutated the input state")
 	}
 }
 
-// Implementation note.
-// Implementation note.
-// Implementation note.
-func TestEffectExhaustivo(t *testing.T) {
+// This test is the replacement for the exhaustive `match` that Rust gives for
+// free (see ADR-0007). If somebody adds an Effect variant and does not register
+// it, this fails and tells them exactly what to do.
+func TestEffectExhaustive(t *testing.T) {
 	got := len(EffectVariants())
 	const want = 7
 	if got != want {
-		t.Fatalf("variants registradas = %d, is esperaban %d.\n"+
-			"Si agregaste a variant of Effect, agregala a allEffectVariants "+
-			"and review TODOS the switch sobre Effect (grep 'case SpawnTurn').", got, want)
+		t.Fatalf("registered variants = %d, expected %d.\n"+
+			"If you added an Effect variant, add it to allEffectVariants "+
+			"and review ALL the switches over Effect (grep 'case SpawnTurn').", got, want)
 	}
 	seen := map[string]bool{}
 	for _, v := range EffectVariants() {
 		name := fmt.Sprintf("%T", v)
 		if seen[name] {
-			t.Errorf("variant duplicada en the registry: %s", name)
+			t.Errorf("duplicate variant in the registry: %s", name)
 		}
 		seen[name] = true
 		if v.Class() != ClassControl && v.Class() != ClassIndependent {
-			t.Errorf("%s not declara clase válida", name)
+			t.Errorf("%s does not declare a valid class", name)
 		}
 	}
 }
 
-// Implementation note.
+// ------------------------------------------------------------------- golden
 
 func TestGolden(t *testing.T) {
-	// Implementation note.
-	// Implementation note.
-	// Implementation note.
+	// seq is reset so that the golden does not depend on the order the other
+	// tests ran in. Without this, `go test -run TestGolden` gives one result and
+	// `go test` gives another, which is the worst class of fragile test.
 	seq = 0
 
 	c := bp()
@@ -815,17 +818,17 @@ func TestGolden(t *testing.T) {
 		if err := os.WriteFile(path, out, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("golden regenerado: " + path)
+		t.Log("golden regenerated: " + path)
 		return
 	}
 
 	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Skip("golden ausente; correr with UPDATE_GOLDEN=1 for generarlo")
+		t.Skip("golden missing; run with UPDATE_GOLDEN=1 to generate it")
 	}
 	if string(want) != string(out) {
-		t.Errorf("the fold cambió.\n"+
-			"Si the change is intencional: UPDATE_GOLDEN=1 go test ./internal/kernel/\n"+
-			"and review the diff with cuidado.\n--- quiero ---\n%s\n--- obtuve ---\n%s", want, out)
+		t.Errorf("the fold changed.\n"+
+			"If the change is intentional: UPDATE_GOLDEN=1 go test ./internal/kernel/\n"+
+			"and review the diff carefully.\n--- want ---\n%s\n--- got ---\n%s", want, out)
 	}
 }

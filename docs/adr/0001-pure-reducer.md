@@ -1,84 +1,83 @@
-# ADR-0001: The reducer is pure and describe effects en vez of ejecutarlos
+# ADR-0001: The reducer is pure and describes effects instead of running them
 
-- Estado: aceptada
-- Afecta a: `internal/kernel/decides.go`, `internal/kernel/effect.go`, `internal/arch_test.go`
+- Status: accepted
+- Affects: `internal/kernel/decide.go`, `internal/kernel/effect.go`, `internal/arch_test.go`
 
-## Contexto
+## Context
 
-A orquestador of agentes has that make four cosas that parecen distintas:
-correr a equipo of truth, simularlo without gastar plata, replay a run old
-for entender what happened, and explicar for what a run is stalled now same.
+An agent orchestrator has to do four things that look different: run a real
+team, simulate it without spending money, replay an old run to understand what
+happened, and explain why a run is stuck right now.
 
-The way obvia of escribirlo is a loop that decides and actúa en the same lugar:
-mira the state, llama to the model, writes the file, actualiza the state. Es the
-way more corta of llegar a the first demo.
+The obvious way to write it is a loop that decides and acts in the same place:
+look at the state, call the model, write the file, update the state. It is the
+shortest path to the first demo.
 
-The problema aparece after. `--sim` needs the same loop without the calls
-real, so that is adds a flag and a `if` en each punto of contacto with the
-world. `replay` needs the same loop without *not* effect, so that is adds
-another flag and another `if`. Cada punto of contacto new there is that acordarse of
-condicionarlo en three lugares. The that is olvida of one produce a `replay` that
-sends mails.
+The problem shows up later. `--sim` needs the same loop without the real calls,
+so you add a flag and an `if` at every point of contact with the world. `replay`
+needs the same loop with *no* effects at all, so you add another flag and
+another `if`. Every new point of contact has to be remembered in three places.
+Whoever forgets one produces a `replay` that sends email.
 
-## Decisión
+## Decision
 
-The núcleo is a single función:
+The core is a single function:
 
 ```go
 Decide(State, Event, Config) -> (State', []Effect)
 ```
 
-Pura: not consulta the clock, not opens sockets, not lee ni writes files, not uses
-aleatoriedad. Todo lo that quiere that happen en the world lo **describe** como a
-valor of tipo `Effect` and lo returns. Quien the llama decides what makes with esa
-list.
+Pure: it does not consult the clock, does not open sockets, does not read or
+write files, does not use randomness. Everything it wants to happen in the world
+it **describes** as a value of type `Effect` and returns. The caller decides what
+to do with that list.
 
-The four features dejan of ser four programas:
+The four features stop being four programs:
 
-| feature | what is |
+| feature | what it is |
 |---|---|
-| `iash run` | fold + executor real |
-| `iash run --sim` | fold + executor fake |
-| `iash run replay` | fold, without executor |
-| `iash run why` | read the `State` that salió of the fold |
+| `iash run` | fold + real executor |
+| `iash run --sim` | fold + fake executor |
+| `iash run replay` | fold, with no executor |
+| `iash run why` | read the `State` that came out of the fold |
 
-The logic of decision exists **a vez**. No there is not way of that `replay`
-is desincronice of `run`, because not there is two implementaciones that puedan
-divergir.
+The decision logic exists **once**. There is no way for `replay` to drift away
+from `run`, because there are not two implementations that could diverge.
 
-## Alternativa discarded
+## Discarded alternative
 
-**A reducer that can call to the world, with inyección of dependencias.** Pasar
-a `Clock` and a `HTTPClient` como interfaces and mockearlos en test. Es the
-solución habitual and is peor for two reasons concretas:
+**A reducer allowed to call the world, with dependency injection.** Pass a
+`Clock` and an `HTTPClient` as interfaces and mock them in tests. That is the
+usual solution and it is worse, for two concrete reasons:
 
-1. The pureza leaves of ser verificable. Con inyección, "is pure" depends of that
-   nadie llame `time.Now()` direct. Eso not lo chequea nothing; is descubre when
-   a replay da distinto.
-2. The order of the effects remains escondido en the flujo of control. Cuando the
-   effects are datos devueltos, the order is a list that is can inspeccionar,
-   test and comparar against a golden. Cuando are calls, the order is "lo
-   that happened" and there is that read everything the reducer for saberlo.
+1. Purity stops being verifiable. With injection, "it is pure" depends on nobody
+   calling `time.Now()` directly. Nothing checks that; you discover it when a
+   replay comes out different.
+2. The order of effects stays hidden inside control flow. When effects are
+   returned data, the order is a list you can inspect, test and compare against
+   a golden. When they are calls, the order is "whatever happened" and you have
+   to read the whole reducer to know it.
 
-## Consecuencias
+## Consequences
 
-- The reducer not can tomar decisions that dependan of the time real. The
-  timeouts entran como events (`timer.fired`), not como comparaciones against the
-  clock. Esto is lo that makes posible the clock virtual of `--sim`.
-- The reducer not assigns `seq` a the events that emite (see ADR-0002).
-- Hay a executor that yes is impuro and that there is that test aparte. Es more code
-  total, pero the code impuro remains concentrado en a lugar chico en vez of
-  repartido for toda the logic.
-- A effect that nadie implementa en the executor not breaks the reducer: is decides and
-  is descarta. Eso permite declarar the surface before of implementarla.
+- The reducer cannot make decisions that depend on real time. Timeouts arrive as
+  events (`timer.fired`), not as comparisons against the clock. That is what
+  makes the virtual clock of `--sim` possible.
+- The reducer does not assign `seq` to the events it emits (see ADR-0002).
+- There is an executor that *is* impure and has to be tested separately. It is
+  more code in total, but the impure code stays concentrated in one small place
+  instead of spread through all the logic.
+- An effect that nobody implements in the executor does not break the reducer: it
+  is decided and discarded. That is what lets us declare the surface before
+  implementing it.
 
-## Cómo is verifies
+## How it is verified
 
-`internal/arch_test.go` runs `go list -json` sobre the paquete `kernel` and fails
-if aparece `time`, `net`, `net/http`, `os`, `os/exec`, `math/rand`,
-`crypto/rand`, `database/sql`, `io` or `bufio` en its clausura of imports own.
-The mensaje of error nombra the consequence: *"time.Now() inside of the reducer
-breaks replay and the clock virtual of --sim"*.
+`internal/arch_test.go` runs `go list -json` over the `kernel` package and fails
+if `time`, `net`, `net/http`, `os`, `os/exec`, `math/rand`, `crypto/rand`,
+`database/sql`, `io` or `bufio` appear in its own import closure. The error
+message names the consequence: *"time.Now() inside the reducer breaks replay and
+the virtual clock of --sim"*.
 
-Es a garantía sobre the grafo of imports, not sobre the disciplina of the próximo
+It is a guarantee about the import graph, not about the discipline of the next
 commit.
