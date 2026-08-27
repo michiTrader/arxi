@@ -590,7 +590,21 @@ func applyTurnDone(out *State, e Event, c Config) []Effect {
 	if m == nil {
 		return nil
 	}
-	m.State = MemberIdle
+	// A finished turn returns the member to idle UNLESS it already submitted for
+	// this stage, and that exception is load-bearing rather than tidy.
+	//
+	// A real agent submits by calling a tool DURING its turn, so stage.submitted
+	// arrives before agent.turn_done. Overwriting the state here would leave a
+	// member with Submitted=true and State=idle, and Runnable() reports idle
+	// members as runnable. That combination is the precise failure the comment on
+	// Runnable warns about: in a staged run where everyone has submitted but the
+	// advance rule cannot be met, the run looks eternally healthy because there
+	// are "runnable" members, so checkQuiescence stays silent and the run sits
+	// stuck forever with no diagnosis. Submitted is cleared on stage entry, so
+	// this cannot leak into the next stage.
+	if !m.Submitted {
+		m.State = MemberIdle
+	}
 	m.Detail = ""
 	m.SinceSeq = e.Seq
 

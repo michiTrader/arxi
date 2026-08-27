@@ -159,16 +159,23 @@ func TestSimulatedTurnDrivesTheFullLifecycle(t *testing.T) {
 	for _, e := range res.Events {
 		got = append(got, e.Type)
 	}
+	// The full lifecycle a real provider produces, in the order it produces it.
+	// The submit sits before turn_done because a real agent submits by calling a
+	// tool while its turn is still open.
 	want := []kernel.EventType{
-		kernel.AgentActivated, kernel.LLMResponse, kernel.AgentTurnDone,
+		kernel.AgentActivated, kernel.LLMResponse,
+		kernel.StageSubmitted, kernel.AgentTurnDone,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("a simulated turn produced %v, want %v.\n"+
 			"  consequence: without agent.activated the member never becomes busy, so "+
 			"in --sim State.Turns never advances (--max-turns is unreachable), "+
 			"coalescing never engages (every queued cause opens its own paid turn), "+
-			"and a mid-turn steer does not queue.\n"+
-			"  remedy: Fake.SpawnTurn emits agent.activated before llm.response.",
+			"and a mid-turn steer does not queue. Without stage.submitted no staged "+
+			"blueprint can ever advance, so --sim reports every correct staged "+
+			"blueprint as silently stuck.\n"+
+			"  remedy: Fake.SpawnTurn emits agent.activated, then llm.response, then "+
+			"the submit, then agent.turn_done.",
 			got, want)
 	}
 	for i := range want {
@@ -527,15 +534,15 @@ func TestFailingEffectDoesNotDiscardSiblings(t *testing.T) {
 			"one.", len(res.Errs))
 	}
 
-	// The turn produced agent.activated + llm.response + agent.turn_done, the
-	// working tool one tool.call_completed. The broken one produced nothing, by
-	// design.
-	if len(res.Events) != 4 {
+	// The turn produced the full lifecycle (activated, llm.response, submit,
+	// turn_done) and the working tool one tool.call_completed. The broken one
+	// produced nothing, by design.
+	if len(res.Events) != 5 {
 		var got []string
 		for _, e := range res.Events {
 			got = append(got, string(e.Type))
 		}
-		t.Fatalf("got %d events (%v), want 4: the successful siblings' events must "+
+		t.Fatalf("got %d events (%v), want 5: the successful siblings' events must "+
 			"survive a sibling's failure. They already spent money and touched the "+
 			"filesystem, so discarding them leaves the log describing a world "+
 			"that does not exist. Remedy: in runIndependent, append events "+
@@ -746,9 +753,9 @@ func TestRunnerIsRaceFree(t *testing.T) {
 	if err := res.Err(); err != nil {
 		t.Fatalf("unexpected effect errors: %v", err)
 	}
-	// 16 turns * 3 events (activated, llm.response, turn_done) + 16 tool calls
-	// * 1 event.
-	if want := 64; len(res.Events) != want {
+	// 16 turns * 4 events (activated, llm.response, submit, turn_done) + 16 tool
+	// calls * 1 event.
+	if want := 80; len(res.Events) != want {
 		t.Fatalf("got %d events, want %d", len(res.Events), want)
 	}
 }

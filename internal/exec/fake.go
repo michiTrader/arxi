@@ -57,6 +57,29 @@ type Fake struct {
 	// impossible to test what a run does while waiting.
 	HumanReplies map[string]string
 
+	// Submits decides whether a simulated turn ends by submitting to its stage.
+	// True in NewFake, and that default is what makes --sim able to reach the end
+	// of a staged blueprint at all.
+	//
+	// A real agent submits by calling a tool during its turn, so the event exists
+	// in a real run and the reducer advances stages on nothing else. A fake that
+	// never emitted it left every staged blueprint stuck in stage one: the turns
+	// happened, the quorum was never met, and --sim reported a perfectly good
+	// blueprint as silent. That is worse than not simulating, because it teaches
+	// the user to distrust a correct answer.
+	//
+	// It is a knob rather than a constant because the run that does NOT submit is
+	// what quiescence detection has to catch, and that path needs simulating too.
+	// Emitting the event is not a decision: whether a submit advances the stage
+	// remains entirely the reducer's call, which is what keeps --sim predicting
+	// `run` rather than predicting itself.
+	Submits bool
+
+	// SubmitAgents restricts which members submit, when non-empty. A stage whose
+	// rule needs everybody and where one member never submits is the realistic
+	// shape of a stuck run, and reproducing it is how the diagnosis gets tested.
+	SubmitAgents map[string]bool
+
 	// counters tracks occurrences per (scope, kind) rather than one global
 	// number. See the comment on id for why the difference matters.
 	counters map[string]int
@@ -79,6 +102,8 @@ func NewFake() *Fake {
 		FailTools:    map[string]string{},
 		BreakTools:   map[string]error{},
 		HumanReplies: map[string]string{},
+		Submits:      true,
+		SubmitAgents: map[string]bool{},
 	}
 }
 
@@ -155,7 +180,7 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 		Detail: fmt.Sprintf("coalesced=%d", e.Coalesced),
 	})
 
-	return []kernel.Event{
+	events := []kernel.Event{
 		{
 			ID:      f.id(e.Agent, "act"),
 			Type:    kernel.AgentActivated,
@@ -178,14 +203,69 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 				"simulated": true,
 			},
 		},
-		{
-			ID:      f.id(e.Agent, "turn"),
-			Type:    kernel.AgentTurnDone,
-			Source:  kernel.SourceAgent,
-			Actor:   e.Agent,
-			Payload: map[string]any{"agent": e.Agent, "simulated": true},
-		},
-	}, nil
+	}
+
+	// The submit goes BEFORE turn_done, because that is the order a real run
+	// produces: an agent submits by calling a tool while its turn is open, and the
+	// turn ends afterwards. Emitting it after would make the reducer see a member
+	// that finished thinking and only then submitted, which is a sequence a
+	// provider never generates, so --sim would be exercising a path `run` cannot
+	// reach.
+	if f.submits(e.Agent) {
+		events = append(events, kernel.Event{
+			ID:     f.id(e.Agent, "submit"),
+			Type:   kernel.StageSubmitted,
+			Source: kernel.SourceAgent,
+			Actor:  e.Agent,
+			Payload: map[string]any{
+				"agent": e.Agent, "stage": stageOf(e.Context), "simulated": true,
+			},
+		})
+	}
+
+	return append(events, kernel.Event{
+		ID:      f.id(e.Agent, "turn"),
+		Type:    kernel.AgentTurnDone,
+		Source:  kernel.SourceAgent,
+		Actor:   e.Agent,
+		Payload: map[string]any{"agent": e.Agent, "simulated": true},
+	}), nil
+}
+
+// submits reports whether this agent's simulated turn ends in a submit. Called
+// with f.mu already held.
+func (f *Fake) submits(agent string) bool {
+	if !f.Submits {
+		return false
+	}
+	if len(f.SubmitAgents) == 0 {
+		return true
+	}
+	return f.SubmitAgents[agent]
+}
+
+// stageOf recovers the stage name from the context the reducer built.
+//
+// It reads what buildContext wrote ("stage:<name>" in Situation) rather than
+// taking a stage from the Fake's own memory. The executor must not hold an
+// opinion about which stage the run is in: the reducer decides that, and a fake
+// that tracked it separately would drift and then submit to the wrong stage.
+func stageOf(cs kernel.ContextSpec) string {
+	for _, s := range cs.Situation {
+		if name, ok := afterPrefix(s, "stage:"); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// afterPrefix returns the remainder after prefix, and whether it was present and
+// non-empty.
+func afterPrefix(s, prefix string) (string, bool) {
+	if len(s) <= len(prefix) || s[:len(prefix)] != prefix {
+		return "", false
+	}
+	return s[len(prefix):], true
 }
 
 // CallTool simulates a tool call.
