@@ -656,3 +656,216 @@ func TestRunnerIsRaceFree(t *testing.T) {
 		t.Fatalf("got %d events, want %d", len(res.Events), want)
 	}
 }
+
+// TestEmittedEventsGetAnIdBecauseCausalityDependsOnIt closes a gap that was
+// found by the author of internal/logstore while implementing against the same
+// ADRs, and confirmed here by reading kernel.derived().
+//
+// kernel.derived() sets CausedBy and CorrelationID but leaves ID and Ts empty,
+// which is correct for the reducer: it has no clock and no randomness, on
+// purpose. event.go documents who owns Seq (the log) and names no owner for ID
+// or Ts, so neither half filled them and the events reached the log anonymous.
+//
+// The consequence is not a blank field. `run why` answers "why did this happen"
+// by walking caused_by backwards, and caused_by holds event IDs. An event with
+// no id cannot be the target of a link, so the chain terminates at the first
+// derived event: the question the tool exists to answer becomes unanswerable
+// for every event the reducer itself produced.
+func TestEmittedEventsGetAnIdBecauseCausalityDependsOnIt(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	// An event as the reducer hands it over: typed and caused, but anonymous.
+	fx := []kernel.Effect{kernel.Emit{Event: kernel.Event{
+		Type:     kernel.StageEntered,
+		CausedBy: []string{"root-1"},
+	}}}
+
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(log.events) != 1 {
+		t.Fatalf("expected 1 event in the log, got %d", len(log.events))
+	}
+
+	got := log.events[0]
+	if got.ID == "" {
+		t.Fatalf("event %s reached the log with an empty ID.\n"+
+			"Consequence: caused_by holds event IDs, so nothing can ever reference "+
+			"this event and `run why` cannot walk a chain through it. Every event "+
+			"the reducer derives is affected, which is most of the log.\n"+
+			"Remedy: Runner.stamp must assign an ID to any event arriving without "+
+			"one, and both Append call sites must route through it.", got.Type)
+	}
+	if got.Ts == "" {
+		t.Fatalf("event %s reached the log with an empty Ts.\n"+
+			"Consequence: the log cannot be read chronologically and no duration "+
+			"can be computed from it, so a run's cost over time is unreportable.\n"+
+			"Remedy: Runner.stamp must set Ts from the injected Now when the event "+
+			"arrives without one.", got.Type)
+	}
+}
+
+// TestAnUnstampedEventPoisonsItsDescendants is the reason the gap above is
+// severe rather than cosmetic, and it is the part that a "field is empty" check
+// does not express.
+//
+// kernel.derived() builds a child as CausedBy: []string{cause.ID} and inherits
+// CorrelationID from the cause. So an unstamped parent does not merely lack an
+// id: it hands "" down as the identity of the cause, and the child inherits a
+// blank correlation too. The damage therefore spreads along the causal graph
+// instead of staying on one event, and it spreads silently, because a chain of
+// events all claiming to be caused by "" is structurally valid JSON that folds
+// without complaint.
+//
+// The test asserts the fix is upstream of derivation: the parent must already
+// have an id by the time anything is derived from it.
+func TestAnUnstampedEventPoisonsItsDescendants(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	parent := kernel.Event{Type: kernel.StageEntered, Scope: "run:r1"}
+	if _, err := r.Run(context.Background(), []kernel.Effect{kernel.Emit{Event: parent}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	stamped := log.events[0]
+
+	// Derive from the event AS THE LOG HOLDS IT, which is how a real step works:
+	// the reducer folds the log and derives from what it read there.
+	child := kernel.Event{
+		Type:          kernel.StageAdvanced,
+		CausedBy:      []string{stamped.ID},
+		CorrelationID: stamped.ID,
+	}
+	if _, err := r.Run(context.Background(), []kernel.Effect{kernel.Emit{Event: child}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := log.events[1]
+	if len(got.CausedBy) != 1 || got.CausedBy[0] == "" {
+		t.Fatalf("derived event %s has caused_by %v.\n"+
+			"Consequence: an empty cause id means the causal graph collapses to a "+
+			"single anonymous node that every event claims as its parent. The log "+
+			"stays valid and folds cleanly, so nothing reports the damage, and "+
+			"`run why` returns a chain that is plausible and wrong.\n"+
+			"Remedy: stamp events on the way IN to the log, so anything derived "+
+			"from them later reads a real id.", got.Type, got.CausedBy)
+	}
+	if got.CausedBy[0] != stamped.ID {
+		t.Fatalf("derived event points at %q but its parent is %q: the chain does "+
+			"not lead back to the event that caused it, so `run why` walks to the "+
+			"wrong ancestor", got.CausedBy[0], stamped.ID)
+	}
+}
+
+// TestExecutorSuppliedIdsAreNotOverwritten protects the other direction of the
+// same fix.
+//
+// The Fake derives its ids from the effect's content, and a real provider
+// returns ids that identify the call on the provider's side. Both are more
+// specific than anything the runner could mint, and the provider's is the only
+// handle support has when reconciling a bill. Stamping unconditionally would
+// discard exactly the identifier worth keeping.
+func TestExecutorSuppliedIdsAreNotOverwritten(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	fx := []kernel.Effect{kernel.SpawnTurn{Agent: "writer"}}
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(log.events) == 0 {
+		t.Fatal("the turn produced no events")
+	}
+	for _, e := range log.events {
+		if !contains(e.ID, "sim-writer") {
+			t.Fatalf("event %s has id %q, want the Fake's own id preserved.\n"+
+				"Consequence: overwriting an executor-supplied id throws away the "+
+				"identifier that ties the event to the provider call it records, "+
+				"which is what a cost dispute is reconciled against.\n"+
+				"Remedy: stamp only when ID is empty.", e.Type, e.ID)
+		}
+	}
+}
+
+// TestMintedIdsAreUniqueAcrossAStep guards the boring failure that would make
+// the fix worse than the bug: ids that exist but repeat.
+//
+// A duplicate id is harder to detect than a missing one, because every
+// consumer accepts it. caused_by would then resolve to two different events and
+// `run why` would report a causal graph containing a fork that never happened.
+func TestMintedIdsAreUniqueAcrossAStep(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	var fx []kernel.Effect
+	for i := 0; i < 5; i++ {
+		fx = append(fx, kernel.Emit{Event: kernel.Event{Type: kernel.StageEntered}})
+	}
+	// Two steps, because the counter must survive across Run calls: a run is
+	// many steps and ids must not restart at each one.
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	seen := map[string]int{}
+	for _, e := range log.events {
+		seen[e.ID]++
+		if seen[e.ID] > 1 {
+			t.Fatalf("id %q was assigned to %d events.\n"+
+				"Consequence: caused_by resolves to more than one event, so the "+
+				"causal graph gains branches that never existed. A duplicate id is "+
+				"worse than a missing one because every reader accepts it.\n"+
+				"Remedy: the id counter must be monotonic for the life of the "+
+				"runner, not per step.", e.ID, seen[e.ID])
+		}
+	}
+	if len(seen) != 10 {
+		t.Fatalf("got %d distinct ids over 10 events, want 10", len(seen))
+	}
+}
+
+// TestSeedIDsPreventsCollisionsOnResume covers the case where the run did not
+// start from an empty log.
+//
+// On resume the runner is new but the log is not. A counter starting at zero
+// re-issues ids the earlier half already wrote, so caused_by stops identifying
+// one event and starts identifying two — and the collision is between the two
+// halves of the same run, which is where causal questions are actually asked.
+func TestSeedIDsPreventsCollisionsOnResume(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	fx := []kernel.Effect{kernel.Emit{Event: kernel.Event{Type: kernel.StageEntered}}}
+	for i := 0; i < 3; i++ {
+		if _, err := r.Run(context.Background(), fx); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	}
+	before := map[string]bool{}
+	for _, e := range log.events {
+		before[e.ID] = true
+	}
+	tip := log.events[len(log.events)-1].Seq
+
+	// A fresh runner over the same log: this is resume.
+	resumed := &Runner{Log: log, Clock: NewVirtualClock(), Executor: NewFake(),
+		Now: func() string { return "2026-01-01T00:00:01Z" }}
+	resumed.SeedIDs(tip)
+
+	if _, err := resumed.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run after resume: %v", err)
+	}
+	got := log.events[len(log.events)-1]
+	if before[got.ID] {
+		t.Fatalf("the resumed runner re-issued id %q, which the log already holds.\n"+
+			"Consequence: two distinct events share an id inside one run, so any "+
+			"caused_by pointing at it is ambiguous exactly where causality is "+
+			"most often questioned — across a crash and a resume.\n"+
+			"Remedy: call SeedIDs with the log tip before the first step of a "+
+			"resumed run.", got.ID)
+	}
+}

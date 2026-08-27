@@ -140,6 +140,73 @@ type Runner struct {
 	Clock    Clock
 	Executor Executor
 	Config   kernel.Config
+
+	// Now supplies the timestamp stamped onto events that arrive without one.
+	//
+	// Injected rather than read from the package `time` for the same reason
+	// Clock is injected, and with a sharper consequence: a wall-clock timestamp
+	// inside a --sim run makes two simulations of identical input differ on
+	// every line, which is precisely what `run diff` cannot tolerate. The sim
+	// wiring passes a virtual-clock-backed function; nil falls back to leaving
+	// Ts empty rather than reaching for wall time behind the caller's back.
+	Now func() string
+
+	// idSeq mints ids for events that arrive without one. See stamp.
+	idSeq int64
+}
+
+// SeedIDs tells the runner how far the log already goes, so the ids it mints
+// cannot collide with ids already written.
+//
+// This matters on resume. Without it the counter restarts at zero and the
+// second half of a resumed run re-issues the ids the first half already used,
+// so caused_by stops identifying one event and starts identifying two. The
+// causal graph `run why` walks would then contain forks that never happened.
+//
+// Seeding from the log tip is sufficient, not merely heuristic: every minted id
+// is attached to an event that is then appended and consumes exactly one
+// sequence number, so the count of ids ever minted is at most the tip. Starting
+// above the tip therefore starts above every id in the log.
+func (r *Runner) SeedIDs(fromSeq int64) {
+	if fromSeq > r.idSeq {
+		r.idSeq = fromSeq
+	}
+}
+
+// stamp fills in the identity fields that the reducer deliberately leaves
+// empty, and it is the missing half of a contract that was documented only
+// partially.
+//
+// event.go names the owner of Seq (the log, not the reducer) but names no owner
+// for ID and Ts, and kernel.derived() sets neither. The reducer is right not to:
+// it has no clock and no randomness, by design. But nobody downstream was
+// filling them either, and the result was not a cosmetic blank field. derived()
+// writes CausedBy: []string{cause.ID}, so an unstamped derived event becomes the
+// cause of the next one with an empty id, and CorrelationID inherits the same
+// blank. Every causal chain collapsed to "" at its first derived event — and
+// walking that chain backwards is the entire reason `run why` exists.
+//
+// A non-empty ID or Ts is never overwritten. Events arriving from the Executor
+// already carry ids that mean something (the Fake derives them from the effect,
+// a real provider from its own response), and replacing those would throw away
+// the more specific identifier for a generic one.
+//
+// Stamping happens only on the runner's own goroutine: control effects are
+// sequential by ADR-0003, and the results of independent effects are appended
+// in the sequential tail of runIndependent, never inside the worker goroutines.
+// That is what makes the unguarded counter safe, and it is also why it is
+// deterministic: the mint order follows list order, not completion order.
+func (r *Runner) stamp(events []kernel.Event) []kernel.Event {
+	for i := range events {
+		if events[i].ID == "" {
+			r.idSeq++
+			events[i].ID = fmt.Sprintf("ev-%06d", r.idSeq)
+		}
+		if events[i].Ts == "" && r.Now != nil {
+			events[i].Ts = r.Now()
+		}
+	}
+	return events
 }
 
 // Run executes one effect list under the rule from ADR-0003: the control
@@ -205,7 +272,7 @@ func controlPrefixLen(fx []kernel.Effect) (int, error) {
 func (r *Runner) runControl(ctx context.Context, e kernel.Effect, res *Result) error {
 	switch v := e.(type) {
 	case kernel.Emit:
-		written, err := r.Log.Append([]kernel.Event{v.Event})
+		written, err := r.Log.Append(r.stamp([]kernel.Event{v.Event}))
 		if err != nil {
 			return fmt.Errorf("append emitted %s: %w", v.Event.Type, err)
 		}
@@ -311,7 +378,7 @@ func (r *Runner) runIndependent(ctx context.Context, fx []kernel.Effect, res *Re
 		// event and an error produced both, and the event is the part that
 		// belongs in history.
 		if len(outcomes[i].events) > 0 {
-			written, err := r.Log.Append(outcomes[i].events)
+			written, err := r.Log.Append(r.stamp(outcomes[i].events))
 			if err != nil {
 				res.Errs = append(res.Errs, fmt.Errorf("append result of %T: %w", fx[i], err))
 			} else {
