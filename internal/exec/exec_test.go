@@ -77,6 +77,37 @@ func (m *memLog) WriteSnapshot(st kernel.State, atSeq int64) error {
 	return nil
 }
 
+// Read and Head are what the run loop needs on top of the runner's Log, and the
+// boundary handling mirrors logstore.Store exactly rather than approximately.
+//
+// That precision is the point of the fake. "toSeq == 0 means the head" and
+// "fromSeq < 1 clamps to 1" are the conventions the real store implements, so a
+// fake that treated 0 as an empty range would let the loop pass its tests and
+// then read nothing at all against the real log.
+func (m *memLog) Read(fromSeq, toSeq int64) ([]kernel.Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if fromSeq < 1 {
+		fromSeq = 1
+	}
+	if toSeq == 0 || toSeq > m.head {
+		toSeq = m.head
+	}
+	var out []kernel.Event
+	for _, e := range m.events {
+		if e.Seq >= fromSeq && e.Seq <= toSeq {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (m *memLog) Head() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.head
+}
+
 func (m *memLog) order() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

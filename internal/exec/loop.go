@@ -71,6 +71,28 @@ type Loop struct {
 	Time   Timekeeper
 	Config kernel.Config
 
+	// Cursor is the seq of the last event whose effects were already executed.
+	// The loop resumes at Cursor+1. Zero means the beginning of the log.
+	//
+	// This has to be given rather than inferred, and both ways of inferring it are
+	// wrong in a way that costs either money or the whole run:
+	//
+	//   - Head() assumes every event in the log was already acted upon. That is
+	//     false for a run that has only just started: run.started sits in the log,
+	//     its stage.entered was never executed, so the loop finds nothing unread,
+	//     declares the run idle, and it dies of silence before anybody was asked to
+	//     work. It is false again for any pass that stopped mid-fold, because
+	//     executing one event appends several: those appends sit above the last
+	//     event the loop actually decided and would be skipped forever.
+	//   - Zero assumes nothing was acted upon. That is false on resume: every turn
+	//     is spawned a second time, so a provider is paid twice for work whose
+	//     result is already in the log.
+	//
+	// It is a cache in exactly the sense ADR-0002 means: the log stays the truth,
+	// and this only records how far a previous pass got. Losing it costs
+	// duplicated effects, never correctness of the state.
+	Cursor int64
+
 	// MaxSteps bounds how many events the loop will fold in one call.
 	//
 	// This guards against a reducer bug, not against a long run. If a derived
@@ -113,6 +135,12 @@ type Outcome struct {
 	// StoppedBy names the condition that ended the loop, for `run show` and for
 	// tests. See the stop constants.
 	StoppedBy string
+
+	// Cursor is how far this pass got: the seq of the last event whose effects
+	// were executed. Handing it to the Cursor field of a later Loop continues the
+	// run without re-executing anything, which is what lets an interrupted run be
+	// resumed without paying a provider twice. See Loop.Cursor.
+	Cursor int64
 }
 
 // The reasons a loop stops. They are distinct because they call for different
@@ -159,18 +187,39 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 	// That is what makes resume work: a run interrupted mid-stage comes back with
 	// its members, its spend and its armed stage exactly as the log describes
 	// them, because the log is the only thing that describes them.
-	state, err := l.Log.Fold(l.Config, 0)
-	if err != nil {
-		return out, fmt.Errorf("run loop: fold the existing log: %w", err)
+	// It is folded up to the CURSOR and not to the log tip, and the two differ in
+	// the case that matters. Executing one event appends several, so a pass that
+	// stopped mid-fold left events above its cursor that were never decided.
+	// Folding to the tip would absorb those into the starting state, and the loop
+	// would then never read them: the effects they call for — the turns, the
+	// timers, the stage advance — are lost while the state claims they happened.
+	// Folding to the cursor leaves them unread, which is exactly what they are.
+	//
+	// Fold's untilSeq treats 0 as "the whole log", so a zero cursor cannot be
+	// passed through: it would fold everything and mean the precise opposite of
+	// the nothing-consumed-yet that it denotes here. The empty state is the honest
+	// starting point, and it is what makes a fresh run correct, because run.started
+	// is then read and decided rather than silently absorbed.
+	cursor := l.Cursor
+	if cursor > 0 {
+		state, err := l.Log.Fold(l.Config, cursor)
+		if err != nil {
+			return out, fmt.Errorf("run loop: fold the log up to seq %d: %w", cursor, err)
+		}
+		out.State = state
 	}
-	cursor := l.Log.Head()
-	out.State = state
+	out.Cursor = cursor
 
 	// The Runner mints ids for events that arrive without one. Seeding it past
 	// the log tip is what stops a resumed run from re-issuing ids the first half
 	// already used, which would make caused_by identify two events instead of
 	// one and put forks in the causal graph that never happened.
-	l.Runner.SeedIDs(cursor)
+	//
+	// The seed is the TIP and not the cursor. Those differ precisely when a pass
+	// stopped mid-fold, and the tip is the safe one: ids were already minted for
+	// events written above the cursor, so seeding from the cursor would hand the
+	// next event an id that is already in the log.
+	l.Runner.SeedIDs(l.Log.Head())
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -228,6 +277,17 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 				return out, fmt.Errorf("run loop: execute the effects of %s (seq %d): %w",
 					e.Type, e.Seq, err)
 			}
+
+			// The cursor advances only once the effects of this event have been
+			// carried out, so it never claims more progress than was made. The
+			// failure above returns with the cursor still on the previous event,
+			// which makes a resumed run re-execute this one.
+			//
+			// That direction is the deliberate one. A cursor that lags re-executes
+			// an event's effects; a cursor that leads skips them. Re-spawning a turn
+			// costs money, and skipping the turn a stage waits on costs the whole
+			// run: it waits forever for a result nobody will produce.
+			out.Cursor = cursor
 		}
 	}
 }
