@@ -122,10 +122,22 @@ func (f *Fake) record(c Call) {
 
 // SpawnTurn simulates an agent turn.
 //
-// It emits llm.response carrying the cost and agent.turn_done, in that order,
-// because that is the order the real executor must use: the reducer charges the
-// budget on llm.response, and a turn_done seen first would let a run finish
-// under budget on paper while having already spent the money.
+// It emits agent.activated, then llm.response carrying the cost, then
+// agent.turn_done. That order is the order the real executor must use, and each
+// step of it is load-bearing.
+//
+// agent.activated comes FIRST because it is what marks the member busy. Without
+// it the simulated member went straight from idle to idle: State.Turns never
+// moved, so --max-turns could never be reached in a simulation; m.Busy() was
+// never true, so coalescing (the 5x saving that applyTurnDone exists for) never
+// engaged and every queued cause opened its own turn; and a steer arriving
+// mid-turn took the not-busy branch instead of queueing. A simulation that
+// silently skips the turn lifecycle is worse than no simulation, because it
+// predicts a run that cannot happen.
+//
+// llm.response precedes agent.turn_done because the reducer charges the budget
+// on llm.response. A turn_done seen first would let a run look finished and
+// under budget on paper while the money was already spent.
 func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Event, error) {
 	// Cancellation is checked before doing anything, not after, so a cancelled
 	// run stops spending instead of paying for turns whose results will be
@@ -144,6 +156,13 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 	})
 
 	return []kernel.Event{
+		{
+			ID:      f.id(e.Agent, "act"),
+			Type:    kernel.AgentActivated,
+			Source:  kernel.SourceRuntime,
+			Actor:   e.Agent,
+			Payload: map[string]any{"agent": e.Agent, "simulated": true},
+		},
 		{
 			ID:     f.id(e.Agent, "llm"),
 			Type:   kernel.LLMResponse,
