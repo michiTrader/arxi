@@ -364,3 +364,279 @@ func TestLoopQuiescenceIsEmittedOnce(t *testing.T) {
 			"  the log was: %v", got, types(log))
 	}
 }
+
+// ---------------------------------------------------------------- the clock
+
+// TestLoopFiresStageTimeoutThroughTheClock proves the loop advances time rather
+// than only reacting to events.
+//
+// The stage arms a 30-minute timer and nobody submits. There are no unread events
+// and nobody busy, so a loop that only folded events would stop here and call the
+// run idle. It has to notice the armed deadline, move the clock to it, and turn
+// what fired into an event.
+func TestLoopFiresStageTimeoutThroughTheClock(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{
+		{Name: "build", AdvanceWhen: "all", TimeoutMs: 1_800_000, OnTimeout: "advance"},
+		{Name: "review", AdvanceWhen: "any"},
+	}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.Submits = false // nobody submits, so only the deadline can move the run
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !hasType(log, kernel.TimerTick) {
+		t.Fatalf("no timer.tick reached the log.\n"+
+			"  consequence: the loop never advanced the clock, so a stage with a "+
+			"timeout waits forever and the run is reported as silent rather than "+
+			"timed out.\n  the log was: %v", types(log))
+	}
+	if !hasType(log, kernel.StageTimeout) {
+		t.Fatalf("a timer fired but no stage.timeout was derived.\n"+
+			"  consequence: every on_timeout branch is dead code, so escalate, "+
+			"advance and fail are configuration the run silently ignores.\n"+
+			"  the log was: %v", types(log))
+	}
+}
+
+// A fired timer must be translated by the REDUCER, not by the loop. The loop
+// appends timer.tick and nothing else, so `run`, `--sim`, resume and replay all
+// derive stage.timeout from the same rule. A loop that emitted stage.timeout
+// directly would leave replay -- which appends nothing -- unable to agree.
+func TestLoopAppendsTicksNotDomainEvents(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{
+		{Name: "build", AdvanceWhen: "all", TimeoutMs: 1000, OnTimeout: "fail"},
+	}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.Submits = false
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The tick must precede the timeout it caused: the reducer derives the domain
+	// event from the tick, so the reverse order would mean the loop invented it.
+	seenTick := false
+	for _, ty := range types(log) {
+		if ty == kernel.TimerTick {
+			seenTick = true
+		}
+		if ty == kernel.StageTimeout && !seenTick {
+			t.Fatalf("stage.timeout appears before any timer.tick, so the loop "+
+				"invented a domain event instead of reporting that a deadline "+
+				"passed; replay could not reproduce it. The log was: %v", types(log))
+		}
+	}
+}
+
+// A tick is runtime, not agent, and that classification is load-bearing: runtime
+// events do not re-trigger watchers. A tick marked otherwise would let a watcher
+// on `*` react to the mere passage of time, which is an infinite loop with a
+// credit card attached.
+func TestLoopTicksAreRuntimeSourced(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{
+		{Name: "build", AdvanceWhen: "all", TimeoutMs: 1000, OnTimeout: "fail"},
+	}
+	c.Watchers = []kernel.Watcher{{Agent: "security", Pattern: "*", Action: "notify"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.Submits = false
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	evs, _ := log.Read(1, 0)
+	for _, e := range evs {
+		if e.Type == kernel.TimerTick && e.Source != kernel.SourceRuntime {
+			t.Errorf("timer.tick carried source %q, expected %q: a watcher on `*` "+
+				"would then react to the passage of time and open a paid turn per "+
+				"tick", e.Source, kernel.SourceRuntime)
+		}
+	}
+}
+
+// ----------------------------------------------------------------- ceilings
+
+// The turn ceiling has to be reachable end to end. --max-turns exists to stop a
+// looping blueprint, so if the loop never enforces it the flag is decorative and
+// a cycle runs until somebody notices by hand.
+func TestLoopEnforcesMaxTurns(t *testing.T) {
+	c := teamCfg()
+	loop, log, _, _ := newLoop(c)
+	seedRun(t, log, c, map[string]any{"max_turns": 1.0})
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if out.State.Status != kernel.StatusExpired {
+		t.Fatalf("status = %q with max_turns=1, expected expired.\n"+
+			"  consequence: --max-turns is decorative end to end, and a looping "+
+			"blueprint runs until somebody notices by hand.\n  the log was: %v",
+			out.State.Status, types(log))
+	}
+	if !hasType(log, kernel.RunExpired) {
+		t.Errorf("no run.expired in the log; the ceiling has to be a recorded fact, "+
+			"not a status somebody set. The log was: %v", types(log))
+	}
+}
+
+// The budget must block and ASK rather than kill the run. The work already done
+// cost money and a human may want to pay for more; ending the run throws that
+// away with no way back. This is deliberately asymmetric with the turn ceiling,
+// where asking would just move the loop to somebody's inbox.
+func TestLoopBudgetExhaustionBlocksAndAsks(t *testing.T) {
+	c := teamCfg()
+	loop, log, fake, _ := newLoop(c)
+	fake.TurnCostUSD = 10.0
+	seedRun(t, log, c, map[string]any{"budget_usd": 5.0})
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !hasType(log, kernel.BudgetExceeded) {
+		t.Fatalf("spending 10.00 against a 5.00 budget emitted no budget.exceeded.\n"+
+			"  consequence: --budget is not a ceiling but a suggestion, and the user "+
+			"learns the real number from the invoice.\n  the log was: %v", types(log))
+	}
+	if out.State.Status.Terminal() {
+		t.Errorf("status = %q: an exhausted budget must block and ask, not end the "+
+			"run. The work already done cost money and a human may want to pay for "+
+			"more; killing it throws that away with no way back", out.State.Status)
+	}
+	if !asked(fake) {
+		t.Errorf("nobody was asked about the exhausted budget; the fake saw: %v",
+			fake.Kinds())
+	}
+
+	// The ceiling has to STOP the spending, and this is the assertion that makes
+	// the test worth having. Every check above already passed while the run went
+	// on to spend 40.00 against a 5.00 budget: budget.exceeded was in the log, a
+	// human had been asked, and the reducer then entered the next stage and
+	// opened four more paid turns because StatusBlocked was a label no spawn site
+	// consulted. Asserting on the log and the inbox measures whether iash NOTICED
+	// the breach; only the spend measures whether it did anything about it.
+	//
+	// The bound is not the budget itself. Cost is known when a turn ends, so the
+	// turns already in flight when the ceiling breaks are paid for and no design
+	// avoids that. What must not happen is a turn opened AFTER the breach was
+	// folded, so the bound is the work in flight (two members, one turn each) and
+	// nothing beyond it.
+	const inFlight = 2 * 10.0
+	if out.State.TreeSpentUSD > inFlight {
+		t.Errorf("spent %.2f USD against a 5.00 budget, over the %.2f already in "+
+			"flight when the ceiling broke.\n"+
+			"  consequence: turns were opened AFTER the run was blocked, so the "+
+			"budget is enforced by the invoice rather than by the reducer.\n"+
+			"  the log was: %v", out.State.TreeSpentUSD, inFlight, types(log))
+	}
+
+	// One breach, one question. Being over the ceiling stays true for every later
+	// cost event, so an unguarded check re-asks on each one. Each copy is an inbox
+	// item with OnTimeout "fail", so a duplicate is not noise: it is another way
+	// to fail a run whose budget a human already agreed to raise, and the person
+	// answering cannot tell which copy is live.
+	if n := countType(log, kernel.BudgetExceeded); n != 1 {
+		t.Errorf("budget.exceeded appears %d times, expected exactly 1.\n"+
+			"  consequence: every surplus copy asks another human a question that "+
+			"fails the run on timeout, so one unanswered duplicate kills a run "+
+			"somebody already paid to continue.\n  the log was: %v", n, types(log))
+	}
+}
+
+// Blocking on the budget is only half a decision: the withheld work has to still
+// be there when somebody pays. The reducer parks the causes of the turns it
+// refused to open instead of dropping them, and that choice is invisible until a
+// human answers.
+//
+// If the causes were dropped, answering "raise" would resume a run with nothing
+// left to do. The stage would then sit with nobody working and nobody wakeable,
+// quiescence would fire, and the diagnosis would blame the advance rule of a
+// blueprint that was never at fault -- sending the user to debug their YAML over
+// a decision taken in spawnCauses.
+func TestLoopResumesTheWithheldWorkWhenTheBudgetIsRaised(t *testing.T) {
+	c := teamCfg()
+	loop, log, fake, _ := newLoop(c)
+	fake.TurnCostUSD = 10.0
+	seedRun(t, log, c, map[string]any{"budget_usd": 5.0})
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.State.Status != kernel.StatusBlocked {
+		t.Fatalf("status = %q, expected blocked before testing the resume; "+
+			"the log was: %v", out.State.Status, types(log))
+	}
+
+	// Somebody parked. A blocked run that holds no cause has nothing to resume,
+	// so this is the precondition the whole resume depends on.
+	parked := 0
+	for _, m := range out.State.Members {
+		parked += len(m.PendingCauses)
+	}
+	if parked == 0 {
+		t.Fatalf("the blocked run parked no causes.\n" +
+			"  consequence: raising the budget resumes a run with no work left, " +
+			"the stage dies of silence, and the diagnosis blames the blueprint " +
+			"for a turn this reducer declined to open")
+	}
+
+	// Answer the question the way a human who wants to keep going answers it.
+	var inboxID string
+	evs, _ := log.Read(1, 0)
+	for _, e := range evs {
+		if e.Type == kernel.InboxCreated {
+			inboxID = e.Str("inbox_id")
+		}
+	}
+	if inboxID == "" {
+		t.Fatalf("no inbox item to reply to; the log was: %v", types(log))
+	}
+
+	fake.TurnCostUSD = 0
+	if _, err := log.Append([]kernel.Event{{
+		ID: "ev-raise", Ts: "2026-08-27T00:01:00Z", Type: kernel.InboxReplied,
+		Scope: "run:r1", Source: kernel.SourceHuman,
+		Payload: map[string]any{"inbox_id": inboxID, "reply": "raise"},
+	}}); err != nil {
+		t.Fatalf("append the reply: %v", err)
+	}
+
+	// Resume from where the first pass stopped. Outcome.Cursor is exactly what a
+	// resumed process has, which is why the test uses it rather than re-reading
+	// from zero: starting at zero would re-execute every effect and pay twice.
+	loop.Cursor = out.Cursor
+	before := len(fake.Kinds())
+	out2, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error on resume: %v", err)
+	}
+
+	if len(fake.Kinds()) <= before {
+		t.Errorf("the raised budget opened no turn: the executor saw %v.\n"+
+			"  consequence: the parked causes were dropped rather than queued, so "+
+			"paying for more work buys silence.\n  the log was: %v",
+			fake.Kinds(), types(log))
+	}
+	if out2.State.Status == kernel.StatusBlocked {
+		t.Errorf("status is still blocked after the reply; a run that cannot be " +
+			"unblocked by answering the question has no way back and the work is lost")
+	}
+}

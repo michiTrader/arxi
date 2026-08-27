@@ -106,6 +106,16 @@ func (CancelTimer) Class() EffectClass { return ClassControl }
 // nobody answers: deciding it here and not at timeout time is mandatory,
 // because at timeout time there is nobody left watching.
 type AskHuman struct {
+	// ID is the inbox id the answer will be matched against, and it is minted by
+	// the reducer rather than by whoever executes the question.
+	//
+	// Without it the executor invents its own id, so inbox.replied carries a name
+	// the reducer never issued and applyInboxReplied matches nothing: the run
+	// stays blocked no matter who answers. That is worst exactly where it matters
+	// most, on budget.exceeded, whose entire promise is that a human can pay for
+	// more instead of losing the work. A question nobody can answer is a failure
+	// wearing the costume of a choice.
+	ID        string
 	Kind      string
 	Question  string
 	Agent     string

@@ -327,13 +327,19 @@ func (f *Fake) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event,
 
 	f.record(Call{Kind: "ask_human", Agent: e.Agent, Detail: e.Kind})
 
+	// inbox_id is the reducer's, never the fake's. The answer is matched against
+	// this id, so inventing one here would produce a question that looks perfectly
+	// normal in the log and cannot be answered by anybody: applyInboxReplied would
+	// find no item and the run would stay blocked forever. The realistic executor
+	// has the same obligation, which is why the id travels on the effect.
 	out := []kernel.Event{{
 		ID:     f.id(e.Kind, "inbox"),
 		Type:   kernel.InboxCreated,
 		Source: kernel.SourceRuntime,
 		Actor:  e.Agent,
 		Payload: map[string]any{
-			"kind": e.Kind, "question": e.Question, "agent": e.Agent,
+			"inbox_id": e.ID,
+			"kind":     e.Kind, "question": e.Question, "agent": e.Agent,
 			"on_timeout": e.OnTimeout, "timeout_ms": e.TimeoutMs,
 			"simulated": true,
 		},
@@ -346,7 +352,8 @@ func (f *Fake) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event,
 			Source: kernel.SourceHuman,
 			Actor:  e.Agent,
 			Payload: map[string]any{
-				"kind": e.Kind, "reply": reply, "simulated": true,
+				"inbox_id": e.ID,
+				"kind":     e.Kind, "reply": reply, "simulated": true,
 			},
 		})
 	}

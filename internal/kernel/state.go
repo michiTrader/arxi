@@ -202,6 +202,20 @@ type State struct {
 	BudgetWarned     bool `json:"budget_warned,omitempty"`
 	QuiescentEmitted bool `json:"quiescent_emitted,omitempty"`
 
+	// BudgetBlocked records that the exhausted budget was already reported and
+	// asked about. Same shape as BudgetWarned and for the same reason: being over
+	// the ceiling stays true for every later cost event, so without a memory of
+	// having responded, each one emits another budget.exceeded and asks another
+	// human. That is not a cosmetic duplicate. Every copy of the question is a
+	// separate inbox item with OnTimeout "fail", so one unanswered copy can fail
+	// a run a human already agreed to pay for, and the person answering cannot
+	// tell which of the four identical questions is the live one.
+	//
+	// It is cleared in applyCost as soon as spend is below the ceiling again,
+	// which is what makes a raised budget enforceable: the next breach is a new
+	// fact about a new ceiling and has to be asked about again.
+	BudgetBlocked bool `json:"budget_blocked,omitempty"`
+
 	// StageResolved records that the current stage already met its advance rule
 	// and acted on it. Same purpose as the two flags above and for the same
 	// reason: the advance rule STAYS met once satisfied, so without a memory of
@@ -217,6 +231,21 @@ func (s *State) Member(name string) *Member {
 	for i := range s.Members {
 		if s.Members[i].Name == name {
 			return &s.Members[i]
+		}
+	}
+	return nil
+}
+
+// InboxItem looks up a question by id and returns a pointer so it can be
+// modified. Nil means no such question, which is how the InboxCreated case tells
+// a new item from the confirmation of one already recorded.
+func (s *State) InboxItem(id string) *InboxItem {
+	if id == "" {
+		return nil
+	}
+	for i := range s.Inbox {
+		if s.Inbox[i].ID == id {
+			return &s.Inbox[i]
 		}
 	}
 	return nil
