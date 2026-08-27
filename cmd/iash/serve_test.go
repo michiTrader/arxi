@@ -623,25 +623,56 @@ func TestAnOversizedLineEndsTheConnectionInsteadOfDesynchronising(t *testing.T) 
 	}
 }
 
-// --listen must refuse a TCP address.
+// --listen must refuse everything that is not a unix socket.
 //
 // The protocol has no authentication and a connected client can spend the budget,
-// so the unix socket's file permissions ARE the authentication. A TCP port offers
-// the same control to anyone who reaches it.
-func TestListenRefusesAddressesWithNoAuthentication(t *testing.T) {
+// so the unix socket's file permissions ARE the authentication. A network port
+// offers the same control to anyone who reaches it.
+//
+// The list is deliberately wider than "tcp://". An earlier version of the guard
+// special-cased that one scheme and mutation testing showed the clause was dead
+// weight — the general check was doing all the work. So the test asserts the
+// GENERAL property (only unix:// is admitted) rather than enumerating the schemes
+// somebody happened to think of, which is what let the dead clause hide.
+func TestListenRefusesEverythingThatIsNotAUnixSocket(t *testing.T) {
 	for _, addr := range []string{
 		"tcp://0.0.0.0:9000",
 		"tcp://127.0.0.1:9000",
+		"tcp6://[::]:9000",
+		"vsock://3:9000",
+		"http://localhost:9000",
 		":9000",
 		"0.0.0.0:9000",
 		"localhost:9000",
+		"/tmp/iash.sock", // a bare path: plausible, and not an address
+		"unix:/tmp/iash.sock",
+		"stdio",
 	} {
 		if _, err := parseServeFlags([]string{"--listen", addr}); err == nil {
 			t.Errorf("--listen %q was accepted.\n"+
-				"  consequence: this protocol has no handshake and no token, so a "+
-				"TCP port hands whoever reaches it the ability to start runs and "+
-				"spend the budget. The unix socket's 0700 mode is the only "+
-				"authentication that exists.", addr)
+				"  consequence: this protocol has no handshake and no token, so any "+
+				"address reachable over a network hands whoever reaches it the "+
+				"ability to start runs and spend the budget. The unix socket's 0700 "+
+				"mode is the only authentication that exists, so anything that is "+
+				"not unix:// must be refused by default rather than by having been "+
+				"enumerated.", addr)
+		}
+	}
+
+	// An address carrying a port must be told WHY, not just handed the syntax.
+	// "use unix:///path" in answer to `--listen :9000` reads as a formatting nit,
+	// and the operator retries with `unix://0.0.0.0:9000`.
+	for _, addr := range []string{"tcp://0.0.0.0:9000", ":9000", "localhost:9000"} {
+		_, err := parseServeFlags([]string{"--listen", addr})
+		if err == nil {
+			continue // already reported above
+		}
+		if !strings.Contains(err.Error(), "authentication") {
+			t.Errorf("--listen %q was refused without explaining that the socket "+
+				"permissions are the authentication: %v.\n"+
+				"  consequence: the refusal reads as a syntax preference, so the "+
+				"operator looks for the spelling that works instead of learning "+
+				"that a port will never be supported", addr, err)
 		}
 	}
 }

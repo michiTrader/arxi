@@ -592,29 +592,45 @@ func parseServeFlags(args []string) (string, error) {
 		return "", nil
 	}
 
-	// tcp:// is refused rather than supported.
+	// Anything that is not a unix:// address is REFUSED. One allow-list check,
+	// not a list of banned schemes.
 	//
 	// This protocol has no authentication: a connected client can start runs,
 	// inject prompts and spend the budget. On a unix socket the filesystem
-	// permissions are the authentication (0700 above). On a TCP port there is
-	// nothing, so `--listen tcp://0.0.0.0:9000` would hand full control of the
-	// orchestrator to whoever reaches the port. Refusing is not a missing feature;
-	// adding it needs auth first, and the message says so.
+	// permissions are the authentication (0700 in serveSocket). On a TCP port
+	// there is nothing, so `--listen tcp://0.0.0.0:9000` would hand full control
+	// of the orchestrator to whoever reaches the port. Refusing is not a missing
+	// feature; adding it needs auth first, and the message says so.
 	//
-	// Parenthesised deliberately: && binds tighter than || in Go, so without the
-	// parentheses the intent would survive as an accident rather than a
-	// statement. The rule is "tcp:// explicitly, or anything carrying a
-	// port-looking colon that is not a unix path" — which catches `:9000` and
-	// `0.0.0.0:9000`, the two spellings somebody reaches for when unix:// feels
-	// like a detour.
-	if strings.HasPrefix(listen, "tcp://") ||
-		(strings.Contains(listen, ":") && !strings.HasPrefix(listen, "unix://")) {
-		return "", fmt.Errorf("--listen %q is not supported: this protocol has no "+
-			"authentication, so the unix socket's file permissions ARE the "+
-			"authentication. A TCP port would give whoever reaches it the ability "+
-			"to start runs and spend the budget. Use unix:///path/to.sock", listen)
-	}
+	// The first version of this check read
+	//
+	//	if strings.HasPrefix(listen, "tcp://") ||
+	//	   (strings.Contains(listen, ":") && !strings.HasPrefix(listen, "unix://"))
+	//
+	// and mutation testing found the tcp:// clause was DEAD: every `tcp://...`
+	// contains the colon of `://`, so the second clause already caught it, and
+	// deleting the first changed no behaviour at all. That is worse than
+	// redundant in a security guard — it reads as two conditions being enforced
+	// when one is doing all the work, so a reader cannot tell which clause
+	// matters and a later edit to the load-bearing one looks harmless.
+	//
+	// Allow-listing removes the question. A scheme nobody has thought of yet
+	// (tcp6://, vsock://, an empty-but-not-empty address) is refused by default
+	// rather than by having been enumerated, which is the same argument as an
+	// undeclared ToolPolicy defaulting to deny.
 	if !strings.HasPrefix(listen, "unix://") {
+		// The message is chosen by what the operator appears to have TRIED, so
+		// that somebody reaching for a TCP port is told why it will never be
+		// supported rather than just told the correct syntax. Being handed
+		// `unix:///path` in answer to `--listen :9000` reads as a formatting nit,
+		// and the operator retries with `unix://0.0.0.0:9000`.
+		if strings.Contains(listen, ":") {
+			return "", fmt.Errorf("--listen %q is not supported: this protocol has "+
+				"no authentication, so the unix socket's file permissions ARE the "+
+				"authentication. A network port would give whoever reaches it the "+
+				"ability to start runs and spend the budget. Use "+
+				"unix:///path/to.sock", listen)
+		}
 		return "", fmt.Errorf("--listen %q must be a unix:// address, "+
 			"for example unix:///tmp/iash.sock", listen)
 	}
