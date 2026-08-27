@@ -89,6 +89,7 @@ surface` shows all of them; `iash schema` emits the manifest an agent consumes.
 What runs today:
 
 ```
+iash run start <bp> <prompt> --budget N --sim   run a blueprint to completion
 iash schema                     emit the surface manifest (JSON)
 iash surface                    see the whole surface, human readable
 iash why <file>                 explain why a run is not advancing
@@ -109,13 +110,14 @@ Underneath, four packages are done and tested:
 Most of what it shows the user never wrote:
 
 ```
-$ iash blueprint validate ./team.yaml
+$ iash blueprint validate ./examples/feature-team.yaml
 blueprint feature-team is valid (2 stages, 3 members)
   workspace: worktree  (resolved: backend and frontend can write)
-  stage build: advance_when=all      on_timeout=escalate timeout=30m
-  stage review: advance_when=quorum:2 on_timeout=escalate
+  stage build: advance_when=all on_timeout=escalate timeout=30m
+  stage review: advance_when=any on_timeout=escalate
   security is advisory: gives an opinion, does not count toward advance rules
-  sha: 183a81b323b8
+  watcher security on run.quiescent: notify
+  sha: 44c08e284a9c
 ```
 
 That is deliberate: a default you cannot see is indistinguishable from a bug
@@ -129,13 +131,48 @@ outside that subset **by name**, with the line and the fix, because a parser
 that guesses returns a config that looks plausible and is not what the file
 says.
 
+That blueprint is in the repo, at `examples/feature-team.yaml`, and it is the
+one `run start` is invoked with below. An example that is not executable drifts
+away from the code and nobody notices until somebody copies it.
+
+`run start` is where those four packages meet. It loads and freezes the
+blueprint, appends `run.started`, and then folds the log forward one step at a
+time until the run reaches a terminal status or goes quiet:
+
+```
+$ iash run start ./examples/feature-team.yaml "add rate limiting" --budget 2.00 --sim
+run rmtbqzimz-f393e8d7 started (budget 2.00 USD, workspace auto→worktree)
+run rmtbqzimz-f393e8d7 succeeded (seq 21, stopped by reaching a terminal status)
+  stage:  review
+  turns:  4
+  spent:  0.0400 of 2.0000 USD in the tree
+  cursor: 21 (resume from here)
+  log:    /tmp/.../events.ndjson
+```
+
+It prints the **cursor** because resuming is not a matter of reopening the log:
+the loop's starting point has to be *given*. `Head()` would assume every event
+was already acted upon, and `0` would assume none was — the first silently skips
+the effect a stage is waiting for, the second silently pays for the same turns
+twice. The cursor is also why the loop writes it *after* the step succeeds and
+not before: lagging costs a re-executed turn, leading costs the whole run, quietly.
+
+Without `--sim` the command **refuses**, and says why: there is no LLM-backed
+`Executor` in this build, so a real run would print a plausible run id, a
+plausible cost and a plausible result for work nobody did. `--sim` drives the
+same reducer, the same log and the same loop; only the executor and the clock
+are fake, so the run you get is the run you would get minus the model calls.
+That is also what makes `replay` and `run why` work on a simulated log: the log
+is the truth, and nothing in the reducer knows which executor produced it.
+
 The rest of the surface is **declared and verified by tests, but not wired to a
 command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-Missing: `run start` and the run loop that joins the four packages above,
-`serve` (NDJSON protocol), triggers and eval.
+Missing: the live executor behind `run start` (the loop, the log and the
+reducer are done and driven end to end by `--sim`; what is absent is the thing
+that actually calls a model), `serve` (NDJSON protocol), triggers and eval.
 
 ## Build and test
 
