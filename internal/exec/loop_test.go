@@ -882,3 +882,151 @@ func TestLoopCancellationStopsWithoutDecidingTheRun(t *testing.T) {
 			"pressed it to stop", n, fake.Kinds())
 	}
 }
+
+// ------------------------------------------------------- the remaining guards
+
+// TestLoopStepLimitNamesTheCycleAndWhyNothingElseCatchesIt protects the message,
+// not just the error.
+//
+// The step limit is the only bound that can catch a reducer deriving events from
+// events forever: --max-turns sees no turns opened and the budget sees no money
+// spent, so both report a perfectly healthy run while the log grows until the
+// disk fills. That makes this error the sole evidence the user will ever get,
+// and an error that only says "step limit exceeded" turns the one available clue
+// into a number to tune. The operator raises MaxSteps, waits longer, and fills
+// the disk anyway.
+//
+// So the assertions are on the words: the error must distinguish a CYCLE from a
+// long run, say that the other two ceilings cannot see it, and point at the
+// place to look.
+func TestLoopStepLimitNamesTheCycleAndWhyNothingElseCatchesIt(t *testing.T) {
+	c := teamCfg()
+	loop, log, _, _ := newLoop(c)
+	loop.MaxSteps = 3
+	seedRun(t, log, c, nil)
+
+	_, err := loop.Run(context.Background())
+	if err == nil {
+		t.Fatal("folding past MaxSteps returned no error.\n" +
+			"  consequence: the only ceiling that can catch a derivation cycle does " +
+			"not report it, so the loop spins at full CPU appending events until " +
+			"the disk fills, while --max-turns and the budget both show a healthy run")
+	}
+	if !errors.Is(err, ErrStepLimit) {
+		t.Fatalf("error %v does not wrap ErrStepLimit.\n"+
+			"  consequence: the caller cannot separate a reducer bug from a failed "+
+			"write or a corrupt log, so `run start` reports all three the same way "+
+			"and the bug that needs a maintainer looks like a full disk", err)
+	}
+
+	msg := err.Error()
+	// Each of these carries a distinct piece of the diagnosis. Together they are
+	// the difference between a bug report and a knob.
+	for _, want := range []string{
+		"cycle",       // it is a cycle, not a run that needed more room
+		"--max-turns", // and neither of the other ceilings can see it,
+		"budget",      // which is why nobody noticed earlier
+		"cause each other",
+	} {
+		if !contains(msg, want) {
+			t.Errorf("the step-limit error does not mention %q.\n  it said: %s\n"+
+				"  consequence: this message is the ONLY evidence a derivation cycle "+
+				"ever produces. Without naming the cycle and the two ceilings that "+
+				"are blind to it, the operator reads it as a limit to raise, raises "+
+				"it, and fills the disk on the next run instead of the first.",
+				want, msg)
+		}
+	}
+}
+
+// TestLoopIdleOnAHumanIsNotQuiescence is the false positive ADR-0004 calls the
+// expensive direction to get wrong.
+//
+// A run blocked on an unanswered question looks EXACTLY like a run that went
+// silent: nobody is thinking, nobody is runnable, no money is moving. The
+// difference is that this one is behaving correctly and is waiting for a person.
+//
+// Emitting quiescence here would be worse than emitting nothing. A signal that
+// fires on healthy runs gets ignored, and it gets ignored precisely when it is
+// true -- so the one failure mode the whole mechanism exists to catch becomes
+// invisible because of the noise made by runs that were fine. And with no
+// watcher the run would be FAILED outright: a run cancelled for the offence of
+// waiting for the approval it was told to ask for.
+func TestLoopIdleOnAHumanIsNotQuiescence(t *testing.T) {
+	c := teamCfg()
+	c.Watchers = nil // nobody to absorb a false positive: it would kill the run
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "all"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	// Nobody submits, so the stage cannot advance on its own; the run's only
+	// live thread is the pending question. No canned reply, so it stays pending.
+	fake.Submits = false
+	seedRun(t, log, c, nil)
+
+	// backend calls a tool it may not run unattended. Appended as a real event,
+	// not injected into the state, so the reducer reaches applyToolDenied -- the
+	// path that puts a member in MemberWaiting and creates the inbox item.
+	//
+	// It is appended before the loop starts rather than mid-pass because the
+	// question has to be pending at the moment the run settles, and that is the
+	// only moment this test is about. The loop folds it at seq 2 and derives
+	// stage.entered at seq 3, so the stage is entered with backend ALREADY
+	// waiting: the exact ordering that used to reset the member to idle and buy a
+	// second turn for an agent whose tool was still unapproved.
+	if _, err := log.Append([]kernel.Event{{
+		ID: "ev-denied", Ts: "2026-08-27T00:00:01Z", Type: kernel.ToolCallDenied,
+		Scope: "run:r1", Source: kernel.SourceRuntime, Actor: "backend",
+		Payload: map[string]any{"tool": "bash", "policy": "ask"},
+	}}); err != nil {
+		t.Fatalf("append tool.call_denied: %v", err)
+	}
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if hasType(log, kernel.RunQuiescent) {
+		t.Errorf("a run waiting on an unanswered question emitted run.quiescent.\n"+
+			"  the log was: %v\n"+
+			"  consequence: quiescence fires on runs that are behaving correctly, so "+
+			"users learn to ignore it -- and it is then ignored exactly when it is "+
+			"true, which is the one case the signal exists for (ADR-0004).\n"+
+			"  remedy: keep the unanswered-inbox check in checkQuiescence.",
+			types(log))
+	}
+	if out.State.Status == kernel.StatusFailed {
+		t.Errorf("the run FAILED while waiting for a human.\n" +
+			"  consequence: the run is cancelled for the offence of asking the " +
+			"approval question the blueprint told it to ask, and the work already " +
+			"paid for is discarded. Answering the question can no longer resume it.")
+	}
+	if out.StoppedBy != StopIdle {
+		t.Errorf("stopped by %q, expected %q.\n"+
+			"  consequence: a run parked on a human must be reported as idle and "+
+			"resumable. Any other reason tells the caller there is nothing to come "+
+			"back to, so nobody comes back and the answer is never applied.",
+			out.StoppedBy, StopIdle)
+	}
+
+	// And the diagnosis must be available: idle-on-a-human is only harmless if
+	// the user can find out WHO is waiting for WHAT.
+	m := out.State.Member("backend")
+	if m == nil || m.State != kernel.MemberWaiting {
+		t.Fatalf("backend is %v, expected waiting: without the waiting state "+
+			"`run why` cannot explain the stop and the user sees a run that is "+
+			"merely doing nothing", m)
+	}
+	if m.BlockedOn == nil || m.BlockedOn["inbox_id"] == nil {
+		t.Errorf("the waiting member carries no inbox_id in BlockedOn.\n" +
+			"  consequence: `run why` can say the run is blocked but not which " +
+			"question unblocks it, so the user has to guess which inbox item to " +
+			"answer -- and answering the wrong one leaves the run parked.")
+	}
+	if !asked(fake) {
+		t.Error("no question reached the executor, so nobody can ever answer it: " +
+			"the run would sit idle forever with an inbox item that exists only " +
+			"in the state")
+	}
+}

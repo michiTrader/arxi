@@ -1100,3 +1100,79 @@ func TestGolden(t *testing.T) {
 			"and review the diff carefully.\n--- want ---\n%s\n--- got ---\n%s", want, out)
 	}
 }
+
+// TestTurnDoneDoesNotResurrectAWaitingMember protects the guard at the top of
+// applyTurnDone.
+//
+// The ordering it defends is not a corner case, it is the ONLY ordering this
+// sequence has. A tool denied with policy=ask puts the member in MemberWaiting
+// while its turn is open, so the agent.turn_done that closes that same turn
+// always arrives afterwards. Clearing the state there produced a member that was
+// idle and blocked at once, and every consequence of that is silent:
+//
+//   - `run why` reads BlockedOn and reports a block that State denies having.
+//   - Runnable() reports idle members as runnable, so the member is handed new
+//     turns while its approval is still unanswered -- and each new turn requests
+//     the same tool, gets denied again, and files ANOTHER identical question.
+//   - Quiescence sees somebody runnable and stays quiet, so the run never even
+//     reports being stuck.
+//
+// The duplicate questions are the expensive part. The human answers one; the
+// others expire into their OnTimeout "deny", which denies a tool the user
+// already approved.
+func TestTurnDoneDoesNotResurrectAWaitingMember(t *testing.T) {
+	c := bp()
+	s := started(c)
+
+	// The turn is open, then the tool is denied: the real order.
+	s, _ = Decide(s, ev(AgentActivated, "backend", map[string]any{"agent": "backend"}), c)
+	s, _ = Decide(s, ev(ToolCallDenied, "backend", map[string]any{
+		"tool": "bash", "policy": "ask",
+	}), c)
+
+	if m := s.Member("backend"); m.State != MemberWaiting {
+		t.Fatalf("setup: backend is %q, expected waiting after policy=ask", m.State)
+	}
+	id := s.Member("backend").BlockedOn["inbox_id"]
+
+	// The turn that was already running now finishes.
+	s, fx := Decide(s, ev(AgentTurnDone, "backend", map[string]any{"agent": "backend"}), c)
+
+	m := s.Member("backend")
+	if m.State != MemberWaiting {
+		t.Errorf("backend is %q after agent.turn_done, expected it to stay waiting.\n"+
+			"  consequence: the member is idle and blocked simultaneously. `run why` "+
+			"reports a block State says does not exist, and Runnable() offers the "+
+			"member for new turns while its approval is unanswered.", m.State)
+	}
+	if m.BlockedOn == nil || m.BlockedOn["inbox_id"] != id {
+		t.Errorf("BlockedOn is %v, expected it to still name %v.\n"+
+			"  consequence: the reference that tells the user WHICH question "+
+			"unblocks the run is gone, so `run why` can only say something is "+
+			"wrong and the inbox has to be guessed at.", m.BlockedOn, id)
+	}
+	if m.Detail == "" {
+		t.Error("Detail was cleared, so the block has no reason attached: `run why` " +
+			"prints \"backend waits for \" with nothing after it")
+	}
+	if m.Runnable() {
+		t.Error("a member waiting on a human reports itself runnable.\n" +
+			"  consequence: it is handed a turn whose first act is to request the " +
+			"same unapproved tool, which files a SECOND identical question. The " +
+			"human answers one copy and the other expires into OnTimeout \"deny\", " +
+			"denying a tool that was already approved.")
+	}
+	if countEffects[SpawnTurn](fx) != 0 {
+		t.Errorf("agent.turn_done opened %d turn(s) for a member waiting on approval: "+
+			"that is money spent on work that cannot proceed",
+			countEffects[SpawnTurn](fx))
+	}
+
+	// And the turn must still be recorded as closed. Leaving TurnOpen set would
+	// make the member look eternally busy and mask every later silence.
+	if m.TurnOpen {
+		t.Error("TurnOpen survived agent.turn_done.\n" +
+			"  consequence: Busy() stays true forever, so quiescence can never " +
+			"fire again for this run and a genuine stall goes unreported.")
+	}
+}

@@ -400,6 +400,29 @@ func applyStageEntered(out *State, e Event, c Config) []Effect {
 		if m.State == MemberFailed {
 			continue
 		}
+
+		// A member waiting on a human keeps waiting, and its cause is PARKED
+		// rather than dropped, so entering a stage does not answer a question on
+		// the human's behalf.
+		//
+		// Resetting it to idle here looked harmless and cost twice. It destroyed
+		// the block -- an idle member still carrying a BlockedOn, so `run why`
+		// named a block State denied having -- and it opened a turn for an agent
+		// whose tool is still unapproved. That agent requests the same tool,
+		// policy=ask denies it again, and a SECOND identical question lands in the
+		// inbox. Now two items ask the same thing, the human answers one, and the
+		// other expires into its OnTimeout "deny": a tool the user approved gets
+		// denied by the copy of the question they did not happen to answer.
+		//
+		// Parking is what makes the answer still worth giving. When the reply
+		// arrives, applyInboxReplied clears the block and spawns with this cause,
+		// so the member joins the stage it was admitted to instead of waking with
+		// nothing to do and tripping quiescence.
+		if m.State == MemberWaiting {
+			m.PendingCauses = append(m.PendingCauses, e.ID)
+			continue
+		}
+
 		m.State = MemberIdle
 		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
 	}
@@ -648,6 +671,33 @@ func applyTurnDone(out *State, e Event, c Config) []Effect {
 	if m == nil {
 		return nil
 	}
+	// A member that is WAITING or FAILED is not returned to idle by the end of its
+	// turn, and this is the first thing checked because getting it wrong destroys
+	// the block rather than merely mislabelling it.
+	//
+	// Waiting is the case that bites. A tool denied with policy=ask puts the
+	// member in MemberWaiting DURING its turn, so the agent.turn_done that closes
+	// that same turn arrives afterwards -- always, not occasionally. Clearing the
+	// state here produced a member that was simultaneously idle and carrying a
+	// BlockedOn: `run why` reported a block that State said did not exist,
+	// Runnable() offered the member for new turns while its approval sat
+	// unanswered, and quiescence stayed silent because somebody looked runnable.
+	// The question then remained in the inbox with nothing depending on it, so
+	// answering it resumed nothing and its OnTimeout eventually denied a tool the
+	// user had already approved.
+	//
+	// Failed is excluded for the symmetric reason: a member whose turn died must
+	// not be handed more work by the flick of a state field, and the turn it never
+	// finished is not evidence that it recovered.
+	//
+	// Detail and SinceSeq are left alone in both cases too. They are what `run
+	// why` prints ("backend waits for approval since seq 7"), and a block with its
+	// reason erased is a block nobody can act on.
+	if m.State == MemberWaiting || m.State == MemberFailed {
+		m.TurnOpen = false
+		return nil
+	}
+
 	// A finished turn returns the member to idle UNLESS it already submitted for
 	// this stage, and that exception is load-bearing rather than tidy.
 	//

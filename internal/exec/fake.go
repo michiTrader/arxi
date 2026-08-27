@@ -57,6 +57,27 @@ type Fake struct {
 	// impossible to test what a run does while waiting.
 	HumanReplies map[string]string
 
+	// AskTools maps tool name to the policy that stops it, normally "ask". The
+	// call produces tool.call_denied instead of running, which is how a
+	// simulation reaches the human-in-the-loop path at all.
+	//
+	// It is separate from FailTools because a denial is not a failure. A failed
+	// tool is a fact the agent reacts to and the run continues; a denied one
+	// suspends the member until a person answers, and those two produce entirely
+	// different runs. Without this knob the approval scenario the design
+	// specifies was unreachable in --sim, so the state a run spends the most
+	// wall-clock time in -- waiting for a human -- could only ever be tested by
+	// hand-appending the event, which tests the reducer and not the path.
+	AskTools map[string]string
+
+	// DenyTurnTool makes a member's simulated turn call a tool before finishing,
+	// keyed by agent name. Without it, a simulated turn calls nothing, so a
+	// policy=ask denial could never arise DURING a turn -- which is the only
+	// moment it arises in a real run, since an agent requests a tool while
+	// thinking. Appending the denial from outside instead puts it before the
+	// stage that requested it was even entered, a shape no provider produces.
+	DenyTurnTool map[string]string
+
 	// Submits decides whether a simulated turn ends by submitting to its stage.
 	// True in NewFake, and that default is what makes --sim able to reach the end
 	// of a staged blueprint at all.
@@ -104,6 +125,8 @@ func NewFake() *Fake {
 		HumanReplies: map[string]string{},
 		Submits:      true,
 		SubmitAgents: map[string]bool{},
+		AskTools:     map[string]string{},
+		DenyTurnTool: map[string]string{},
 	}
 }
 
@@ -205,6 +228,30 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 		},
 	}
 
+	// A tool call during the turn, when the test asked for one. It goes here --
+	// after llm.response and before turn_done -- because that is when an agent
+	// calls a tool: while it is thinking, having been billed for the reasoning
+	// that decided to call it.
+	//
+	// The denial it produces is what suspends the member mid-turn, and only from
+	// inside the turn does that shape match a real run. The turn_done still
+	// follows, because the provider closes the turn whether or not the tool was
+	// allowed; the reducer is what must keep the member waiting across it.
+	if tool, ok := f.DenyTurnTool[e.Agent]; ok {
+		if policy, stopped := f.AskTools[tool]; stopped {
+			events = append(events, kernel.Event{
+				ID:     f.id(e.Agent, "denied-"+tool),
+				Type:   kernel.ToolCallDenied,
+				Source: kernel.SourceRuntime,
+				Actor:  e.Agent,
+				Payload: map[string]any{
+					"agent": e.Agent, "tool": tool,
+					"policy": policy, "simulated": true,
+				},
+			})
+		}
+	}
+
 	// The submit goes BEFORE turn_done, because that is the order a real run
 	// produces: an agent submits by calling a tool while its turn is open, and the
 	// turn ends afterwards. Emitting it after would make the reducer see a member
@@ -284,6 +331,22 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 	// facts, and only the second one belongs in the log.
 	if err, ok := f.BreakTools[e.Tool]; ok {
 		return nil, fmt.Errorf("call tool %s: %w", e.Tool, err)
+	}
+
+	// A policy stop comes before the failure knobs because the tool never ran:
+	// deciding it failed would put a result in the log for a call nobody made,
+	// and the reducer would react to an outcome instead of suspending the member.
+	if policy, ok := f.AskTools[e.Tool]; ok {
+		return []kernel.Event{{
+			ID:     f.id(e.Agent, "denied-"+e.Tool),
+			Type:   kernel.ToolCallDenied,
+			Source: kernel.SourceRuntime,
+			Actor:  e.Agent,
+			Payload: map[string]any{
+				"agent": e.Agent, "tool": e.Tool,
+				"policy": policy, "simulated": true,
+			},
+		}}, nil
 	}
 
 	if reason, ok := f.FailTools[e.Tool]; ok {
