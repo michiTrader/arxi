@@ -1176,3 +1176,119 @@ func TestTurnDoneDoesNotResurrectAWaitingMember(t *testing.T) {
 			"fire again for this run and a genuine stall goes unreported.")
 	}
 }
+
+// TestStageEntryDoesNotResurrectAWaitingMember protects the sibling guard in
+// applyStageEntered, and it exists because the guard in applyTurnDone was not
+// enough on its own.
+//
+// Entering a stage wakes everybody who participates in it, which is correct and
+// is the mechanism that gets work started. But a member waiting on a human is
+// not asleep, and waking it has the same two costs as clearing it in
+// applyTurnDone: the block is destroyed, and a turn is bought for an agent whose
+// tool is still unapproved. That turn requests the same tool, gets denied again,
+// and files a SECOND identical question -- so the human answers one copy while
+// the other expires into OnTimeout "deny", denying a tool already approved.
+//
+// The cause is PARKED rather than dropped, and that half matters just as much.
+// Withholding the turn without remembering why would mean the reply, when it
+// finally comes, wakes a member with nothing to do: no cause, so no turn, so the
+// run goes quiet and quiescence blames a blueprint that is correct. Queue, do not
+// drop.
+func TestStageEntryDoesNotResurrectAWaitingMember(t *testing.T) {
+	c := bp()
+	s := started(c)
+
+	// backend is waiting on an approval, arrived at the only way it can be: a
+	// tool denied with policy=ask during an open turn.
+	s, _ = Decide(s, ev(AgentActivated, "backend", map[string]any{"agent": "backend"}), c)
+	s, _ = Decide(s, ev(ToolCallDenied, "backend", map[string]any{
+		"tool": "bash", "policy": "ask",
+	}), c)
+	if m := s.Member("backend"); m.State != MemberWaiting {
+		t.Fatalf("setup: backend is %q, expected waiting after policy=ask", m.State)
+	}
+	id := s.Member("backend").BlockedOn["inbox_id"]
+
+	// The run now enters a stage backend participates in.
+	before := len(s.Inbox)
+	s, fx := Decide(s, ev(StageEntered, "", map[string]any{
+		"stage": c.Stages[0].Name, "index": 0,
+	}), c)
+
+	m := s.Member("backend")
+	if m.State != MemberWaiting {
+		t.Errorf("backend is %q after stage.entered, expected it to stay waiting.\n"+
+			"  consequence: entering a stage answers the approval question on the "+
+			"human's behalf. The member is idle and blocked at once, so `run why` "+
+			"reports a block State denies, and the agent is handed a turn whose "+
+			"first act is to request the same unapproved tool.", m.State)
+	}
+	if m.BlockedOn == nil || m.BlockedOn["inbox_id"] != id {
+		t.Errorf("BlockedOn is %v, expected it to still name %v: the reference that "+
+			"says WHICH question unblocks the run was discarded by a stage change",
+			m.BlockedOn, id)
+	}
+	// Counted for backend specifically, not across the whole effect list. The
+	// other participants SHOULD get turns -- that is what entering a stage is
+	// for -- so asserting zero turns overall would forbid the correct behaviour
+	// along with the bug.
+	if n := spawnsFor(fx, "backend"); n != 0 {
+		t.Errorf("stage.entered opened %d turn(s) for a member waiting on approval.\n"+
+			"  consequence: money spent on work that cannot proceed, and the turn "+
+			"files a duplicate of a question already pending. The human answers one "+
+			"copy and the other times out into \"deny\", denying an approved tool.", n)
+	}
+	// The stage must still start for everybody else: withholding one member's
+	// turn cannot become an excuse to stall the stage.
+	if n := countEffects[SpawnTurn](fx); n == 0 {
+		t.Error("stage.entered opened no turns at all.\n" +
+			"  consequence: one member waiting on a human froze the entire stage, so " +
+			"an approval question stops work that did not depend on it.")
+	}
+	if len(s.Inbox) != before {
+		t.Errorf("the inbox grew from %d to %d items on a stage change: a second copy "+
+			"of a pending question means one of them will expire unanswered",
+			before, len(s.Inbox))
+	}
+
+	// The cause must be REMEMBERED, not dropped, or the answer resumes nothing.
+	if len(m.PendingCauses) == 0 {
+		t.Fatal("the withheld cause was dropped instead of parked.\n" +
+			"  consequence: answering the question clears the block and finds no " +
+			"reason to open a turn, so the member wakes with nothing to do. The run " +
+			"then goes silent and quiescence reports the stage's advance rule as " +
+			"unsatisfiable -- sending the user to debug a correct blueprint about " +
+			"work the reducer is holding.\n" +
+			"  remedy: append to PendingCauses in the MemberWaiting branch.")
+	}
+
+	// And the reply must spend exactly that parked cause.
+	s, fx = Decide(s, ev(InboxReplied, "", map[string]any{
+		"inbox_id": id, "text": "approved",
+	}), c)
+	if m := s.Member("backend"); m.State == MemberWaiting {
+		t.Errorf("backend is still waiting after its question was answered: the reply " +
+			"must release the block it names, or no answer can ever resume a run")
+	}
+	if n := countEffects[SpawnTurn](fx); n == 0 {
+		t.Error("replying to the approval opened no turn.\n" +
+			"  consequence: the user answered, the block cleared, and the work still " +
+			"did not resume. From the outside that is indistinguishable from the " +
+			"answer having been ignored, and the run sits idle having been paid for.")
+	}
+}
+
+// spawnsFor counts the turns opened for one agent. Assertions need this rather
+// than countEffects[SpawnTurn] whenever the correct behaviour is "this member
+// gets no turn and the others do": a count over the whole list cannot tell the
+// withheld turn from a stalled stage, so it would pass a reducer that froze
+// everybody.
+func spawnsFor(fx []Effect, agent string) int {
+	n := 0
+	for _, f := range fx {
+		if v, ok := f.(SpawnTurn); ok && v.Agent == agent {
+			n++
+		}
+	}
+	return n
+}

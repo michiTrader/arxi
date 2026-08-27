@@ -97,14 +97,17 @@ iash blueprint validate <file>  check a blueprint and print the resolved config
 iash version                    version of the binary and of the surface
 ```
 
-Underneath, four packages are done and tested:
+Underneath, every package is done and tested — **220 tests, no dependencies**:
 
-| package | what it owns |
-|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` |
-| `internal/exec` | the effect runner, the fake executor, the injected clock |
-| `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` |
-| `internal/blueprint` | YAML loading, validation, and freezing by digest |
+| package | what it owns | tests |
+|---|---|---|
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 41 |
+| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 55 |
+| `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
+| `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
+| `internal/surface` | the capability manifest every command is checked against | 14 |
+| `cmd/iash` | the CLI | 12 |
+| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 6 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
@@ -135,7 +138,8 @@ That blueprint is in the repo, at `examples/feature-team.yaml`, and it is the
 one `run start` is invoked with below. An example that is not executable drifts
 away from the code and nobody notices until somebody copies it.
 
-`run start` is where those four packages meet. It loads and freezes the
+`run start` is where the kernel, the log, the executor and the blueprint meet.
+It loads and freezes the
 blueprint, appends `run.started`, and then folds the log forward one step at a
 time until the run reaches a terminal status or goes quiet:
 
