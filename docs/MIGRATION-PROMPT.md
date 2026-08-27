@@ -54,7 +54,7 @@ steps at the bottom and commit after each.
 Verify the baseline before changing anything:
 
 ```bash
-go build -or /tmp/iash ./cmd/iash
+go build -o /tmp/iash ./cmd/iash
 go test -count=1 ./...
 ```
 

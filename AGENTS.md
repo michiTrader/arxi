@@ -211,7 +211,7 @@ activated. Weakening the test would have hidden a bug that costs real money.
 Requires Go 1.22.
 
 ```bash
-go build -or iash ./cmd/iash
+go build -o iash ./cmd/iash
 go vet ./... && gofmt -l .
 go test -count=1 ./...
 UPDATE_GOLDEN=1 go test ./internal/kernel   # regenerate golden fixtures
