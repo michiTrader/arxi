@@ -18,13 +18,18 @@ out of some scenario naturally. The coverage table in §20.12 closes the loop: i
 lists all 45 and names the use case that reaches each one. It is generated from
 the registry, not maintained by hand — see `use_cases_test.go`.
 
-**Status of the commands.** Only `schema`, `surface`, `why` and `version` run
-today; the rest are declared and verified by tests but have no executor
-(ADR-0001 explains why declaring first is deliberate). So the outputs below are
-**specifications of what the command must print**, not transcripts — except in
-§20.3, which is real output from the current binary. Where a scenario depends on
-behavior the kernel already decides, the section names the reducer function so
-the doc can be checked against the code instead of believed.
+**Status of the commands.** `schema`, `surface`, `why`, `version`, `blueprint
+validate`, `run start` (`--sim` only) and `serve` run today; the rest are
+declared and verified by tests but have no executor (ADR-0001 explains why
+declaring first is deliberate). So the outputs below are **specifications of
+what the command must print**, not transcripts — except in §20.3, which is real
+output from the current binary. Where a scenario depends on behavior the kernel
+already decides, the section names the reducer function so the doc can be
+checked against the code instead of believed.
+
+This paragraph is easy to leave stale, and staleness here has a direction that
+costs: it under-reports what exists, so a contributor reads "no executor" and
+reimplements a command that is already in the tree and already tested.
 
 Conventions: `$` is a human shell. `>` is an agent invoking the same capability
 as a tool. Run ids are `r1`, `r2`; inbox ids are `inbox-1`.

@@ -90,6 +90,7 @@ What runs today:
 
 ```
 iash run start <bp> <prompt> --budget N --sim   run a blueprint to completion
+iash serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
 iash schema                     emit the surface manifest (JSON)
 iash surface                    see the whole surface, human readable
 iash why <file>                 explain why a run is not advancing
@@ -97,16 +98,27 @@ iash blueprint validate <file>  check a blueprint and print the resolved config
 iash version                    version of the binary and of the surface
 ```
 
-Underneath, every package is done and tested — **220 tests, no dependencies**:
+Underneath, every package is done and tested — **249 tests, no dependencies**.
+The count is of **cases reported by `go test -v`, subtests included**, which is
+what `go test -run` can address individually:
+
+```bash
+go test -v ./... 2>&1 | grep -c '^=== RUN'
+```
+
+The convention is stated because it is the only reason the number is checkable.
+An earlier version of this table counted subtests for two packages and top-level
+functions for the rest, and the total it summed to was a number no command could
+reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
 | package | what it owns | tests |
 |---|---|---|
 | `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 41 |
-| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 55 |
+| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
-| `internal/surface` | the capability manifest every command is checked against | 14 |
-| `cmd/iash` | the CLI | 12 |
+| `internal/surface` | the capability manifest every command is checked against | 20 |
+| `cmd/iash` | the CLI and the NDJSON protocol server | 33 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 6 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -169,6 +181,78 @@ are fake, so the run you get is the run you would get minus the model calls.
 That is also what makes `replay` and `run why` work on a simulated log: the log
 is the truth, and nothing in the reducer knows which executor produced it.
 
+`serve` is the same surface with a different mouth. One request per line, one
+response per line, NDJSON, in order:
+
+```
+$ iash serve
+{"type":"hello","version":"0.0.1-spec","surface_version":1,"types":["agent.create",...],"implemented":["blueprint.validate","schema"]}
+{"id":"1","type":"blueprint.validate","params":{"path":"./examples/feature-team.yaml"}}
+{"id":"1","ok":true,"result":{"name":"feature-team","sha":"44c08e284a9c...","workspace":"worktree", ...}}
+```
+
+Without `--listen` it speaks over stdio, which is why the transcript above is
+something you can pipe, `tee` and read with `cat`. A framed binary protocol
+would need a tool written for it before anybody could see what went wrong, and a
+protocol only its own client can read is a protocol nobody debugs.
+
+Requests are answered **strictly in order**, one connection at a time. Handling
+them concurrently would let a `state get` overtake the `state set` issued before
+it, and the lost update would have been authored by the server, not by the
+client that took care to serialize its own writes.
+
+Two decisions in there are worth defending, because both look like extra work
+until the day they are not.
+
+**`unknown_type` and `not_implemented` are different codes.** The client has to
+tell "your bug, retrying never helps" from "this build is behind, retrying after
+an upgrade helps":
+
+```
+{"id":"2","type":"run.list"}   → not_implemented  "declared in surface v1 and this build has
+                                                   no executor for it. The request was well
+                                                   formed; retrying will not help until the
+                                                   capability lands."
+{"id":"3","type":"run.abort"}  → unknown_type     "not a message type in surface v1. The type
+                                                   is the CLI path with dots: `run why` is
+                                                   `run.why`."
+```
+
+Collapse those into one code and every client picks one wrong behaviour for
+both: retry a typo forever, or abandon a capability that ships next week. A
+capability deliberately held off the wire says so too — `design` answers "is a
+real capability (`iash design`) and is not exposed to the protocol. That is
+deliberate, not missing", because "unknown" would send the reader looking for a
+misspelling that isn't there.
+
+**Any address that is not `unix://` is refused.** There is no handshake and no
+token, so the socket's file permissions *are* the authentication — it is created
+`0700`, and a connected client can start runs and spend the budget. `--listen
+tcp://0.0.0.0:9000` therefore does not bind; it explains that it would hand that
+ability to whoever reaches the port. The check is an allow-list rather than a
+list of refused schemes, for the same reason an undeclared `ToolPolicy` defaults
+to deny: a scheme nobody has thought of yet is then refused by default instead of
+by enumeration. This one was rewritten after mutation testing — the deny-list it
+replaced had a `tcp://` clause that could be deleted with no test noticing,
+since every `tcp://…` contains the colon the next clause already caught. Dead
+code in a security guard is worse than redundant: it reads as two conditions
+being enforced when one does all the work, so a later edit to the load-bearing
+one looks harmless.
+
+The dispatchable set is not a list inside the server. It is `ProtocolCommands()`,
+filtering the registry on `Kind&Protocol`. A hand-kept list would be a second
+surface, and the first time someone flags a new capability `Protocol`, `iash
+schema` would advertise a type the server answers `unknown_type` to — the client
+lied to by the one document it was told to trust.
+
+Unknown and malformed parameters are refused, never ignored and never coerced.
+`{"reasn":"x"}` on `run.cancel` is an error naming both what was sent and what
+is accepted, because a misspelled `if_seq` that is silently dropped turns a
+compare-and-swap into last-write-wins while the client still believes its write
+was conditional. `{"budget":"2.00"}` is refused rather than coerced, since
+coercion makes it `0` and the most cautious-looking request becomes the most
+dangerous one.
+
 The rest of the surface is **declared and verified by tests, but not wired to a
 command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
@@ -176,7 +260,7 @@ of lying with "unknown command".
 
 Missing: the live executor behind `run start` (the loop, the log and the
 reducer are done and driven end to end by `--sim`; what is absent is the thing
-that actually calls a model), `serve` (NDJSON protocol), triggers and eval.
+that actually calls a model), triggers and eval.
 
 ## Build and test
 
