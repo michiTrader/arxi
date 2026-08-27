@@ -47,6 +47,11 @@ func main() {
 			cmdBlueprintValidate(args[2:])
 			return
 		}
+	case "run":
+		if len(args) > 1 && args[1] == "start" {
+			cmdRunStart(args[2:])
+			return
+		}
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
