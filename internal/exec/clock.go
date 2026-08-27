@@ -142,6 +142,40 @@ func (v *VirtualClock) Advance(byMs int64) ([]string, error) {
 	return out, nil
 }
 
+// NextDeadlineMs returns how far the clock must advance for the next timer to
+// fire, and whether any timer is armed at all.
+//
+// It returns a DELTA and not an absolute instant because that is what Advance
+// consumes, and converting between the two at the call site is exactly the kind
+// of arithmetic that produces an off-by-one which only shows up as a timeout
+// that never fires.
+//
+// A timer that is already past due yields 1 rather than 0, and that floor is
+// load-bearing. The run loop advances by this amount to make progress; a 0
+// would let it call Advance(0) forever, each call reporting success and
+// changing nothing, so a run would hang while looking busy. One millisecond
+// always crosses the deadline of a timer that is already behind.
+func (v *VirtualClock) NextDeadlineMs() (int64, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if len(v.timers) == 0 {
+		return 0, false
+	}
+	first := true
+	var earliest int64
+	for _, at := range v.timers {
+		if first || at < earliest {
+			earliest, first = at, false
+		}
+	}
+	delta := earliest - v.nowMs
+	if delta < 1 {
+		delta = 1
+	}
+	return delta, true
+}
+
 // NowMs is the current virtual instant.
 func (v *VirtualClock) NowMs() int64 {
 	v.mu.Lock()

@@ -57,7 +57,9 @@ type Fake struct {
 	// impossible to test what a run does while waiting.
 	HumanReplies map[string]string
 
-	nextID int
+	// counters tracks occurrences per (scope, kind) rather than one global
+	// number. See the comment on id for why the difference matters.
+	counters map[string]int
 }
 
 // Call is one effect the Fake received.
@@ -80,16 +82,32 @@ func NewFake() *Fake {
 	}
 }
 
-// id returns a deterministic event id.
+// id returns a deterministic event id, derived from what the effect IS rather
+// than from when it happened to be executed.
 //
 // Deterministic and not a UUID, because ids appear in caused_by chains and
 // therefore in the log. With random ids, two --sim runs over identical input
 // produce logs that differ on every line, and `run diff` becomes useless
 // exactly when it would be most useful. The prefix marks them as simulated so
 // nobody mistakes a simulated log for a real one.
-func (f *Fake) id() string {
-	f.nextID++
-	return fmt.Sprintf("sim-%04d", f.nextID)
+//
+// The id is built from (scope, kind, occurrence) rather than from one global
+// counter, and that is a correction of a real bug rather than a stylistic
+// preference. A global counter is deterministic in VALUE but not in
+// ASSIGNMENT: the runner executes independent effects in parallel, so
+// whichever goroutine reaches the mutex first takes the lower number. Spawning
+// turns for `writer` and `editor` in the same step therefore produced
+// sim-0001/0002 for the writer on some runs and sim-0003/0004 on others. Every
+// number was stable; who received it was a coin flip. Keying by effect content
+// instead means the writer's first turn is sim-writer-llm-1 no matter who wins
+// the race, so the log a simulation produces depends only on its input.
+func (f *Fake) id(scope, kind string) string {
+	if f.counters == nil {
+		f.counters = map[string]int{}
+	}
+	key := scope + "/" + kind
+	f.counters[key]++
+	return fmt.Sprintf("sim-%s-%s-%d", scope, kind, f.counters[key])
 }
 
 // record appends to Calls. Callers must hold the mutex.
@@ -127,7 +145,7 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 
 	return []kernel.Event{
 		{
-			ID:     f.id(),
+			ID:     f.id(e.Agent, "llm"),
 			Type:   kernel.LLMResponse,
 			Source: kernel.SourceAgent,
 			Actor:  e.Agent,
@@ -142,7 +160,7 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 			},
 		},
 		{
-			ID:      f.id(),
+			ID:      f.id(e.Agent, "turn"),
 			Type:    kernel.AgentTurnDone,
 			Source:  kernel.SourceAgent,
 			Actor:   e.Agent,
@@ -171,7 +189,7 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 
 	if reason, ok := f.FailTools[e.Tool]; ok {
 		return []kernel.Event{{
-			ID:     f.id(),
+			ID:     f.id(e.Agent, "tool-"+e.Tool),
 			Type:   kernel.ToolCallCompleted,
 			Source: kernel.SourceRuntime,
 			Actor:  e.Agent,
@@ -183,7 +201,7 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 	}
 
 	return []kernel.Event{{
-		ID:     f.id(),
+		ID:     f.id(e.Agent, "tool-"+e.Tool),
 		Type:   kernel.ToolCallCompleted,
 		Source: kernel.SourceRuntime,
 		Actor:  e.Agent,
@@ -211,7 +229,7 @@ func (f *Fake) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event,
 	f.record(Call{Kind: "ask_human", Agent: e.Agent, Detail: e.Kind})
 
 	out := []kernel.Event{{
-		ID:     f.id(),
+		ID:     f.id(e.Kind, "inbox"),
 		Type:   kernel.InboxCreated,
 		Source: kernel.SourceRuntime,
 		Actor:  e.Agent,
@@ -224,7 +242,7 @@ func (f *Fake) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event,
 
 	if reply, ok := f.HumanReplies[e.Kind]; ok {
 		out = append(out, kernel.Event{
-			ID:     f.id(),
+			ID:     f.id(e.Kind, "reply"),
 			Type:   kernel.InboxReplied,
 			Source: kernel.SourceHuman,
 			Actor:  e.Agent,
