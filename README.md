@@ -89,19 +89,53 @@ surface` shows all of them; `iash schema` emits the manifest an agent consumes.
 What runs today:
 
 ```
-iash schema        emit the surface manifest (JSON)
-iash surface       see the whole surface, human readable
-iash why <file>    explain why a run is not advancing
-iash version       version of the binary and of the surface
+iash schema                     emit the surface manifest (JSON)
+iash surface                    see the whole surface, human readable
+iash why <file>                 explain why a run is not advancing
+iash blueprint validate <file>  check a blueprint and print the resolved config
+iash version                    version of the binary and of the surface
 ```
 
-The rest of the surface is **declared and verified by tests, but has no
-executor**. The CLI is honest about it: for a command that is declared and not
+Underneath, four packages are done and tested:
+
+| package | what it owns |
+|---|---|
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` |
+| `internal/exec` | the effect runner, the fake executor, the injected clock |
+| `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` |
+| `internal/blueprint` | YAML loading, validation, and freezing by digest |
+
+`blueprint validate` prints the config **as resolved**, not the file read back.
+Most of what it shows the user never wrote:
+
+```
+$ iash blueprint validate ./team.yaml
+blueprint feature-team is valid (2 stages, 3 members)
+  workspace: worktree  (resolved: backend and frontend can write)
+  stage build: advance_when=all      on_timeout=escalate timeout=30m
+  stage review: advance_when=quorum:2 on_timeout=escalate
+  security is advisory: gives an opinion, does not count toward advance rules
+  sha: 183a81b323b8
+```
+
+That is deliberate: a default you cannot see is indistinguishable from a bug
+when it fires. And it refuses blueprints that would fail *silently* — a
+`quorum:5` over three members does not make the run fail, it makes it go quiet
+after everybody has already been paid for.
+
+The YAML parser is written by hand, over a deliberately small subset, so the
+binary keeps shipping with no runtime and no dependencies. It refuses anything
+outside that subset **by name**, with the line and the fix, because a parser
+that guesses returns a config that looks plausible and is not what the file
+says.
+
+The rest of the surface is **declared and verified by tests, but not wired to a
+command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-Missing: the executor (`internal/exec`), blueprint loading, `serve` (NDJSON
-protocol), triggers and eval.
+Missing: `run start` and the run loop that joins the four packages above,
+`serve` (NDJSON protocol), triggers and eval.
 
 ## Build and test
 

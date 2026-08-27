@@ -101,6 +101,31 @@ func TestKernelDoesNotImportOtherLayers(t *testing.T) {
 	}
 }
 
+// TestBlueprintDependsOnlyOnTheKernel keeps blueprint loading a leaf.
+//
+// The temptation as the run loop lands will be to have the loader open the log
+// or start a run itself, because it already holds the digest everything else
+// needs. That inverts the layering: loading a blueprint is reading a file and
+// resolving defaults, and it has to stay callable by `blueprint validate` with
+// no runtime present. If validating a file required a log directory, the one
+// command a user runs BEFORE owning a run would need a run to exist.
+func TestBlueprintDependsOnlyOnTheKernel(t *testing.T) {
+	p := list(t, mod+"internal/blueprint")
+	for _, d := range p.Deps {
+		if !strings.HasPrefix(d, mod) {
+			continue
+		}
+		if d == mod+"internal/kernel" {
+			continue
+		}
+		t.Errorf("the blueprint loader depends on %s.\n"+
+			"  why it is wrong: loading is reading a file and resolving defaults; it must "+
+			"stay runnable with no log, no clock and no executor.\n"+
+			"  what to do: return the resolved Config and let the caller wire it to the "+
+			"runtime (see docs/design/10-execution.md 10.2)", d)
+	}
+}
+
 func TestSurfaceDoesNotImportTheExecutor(t *testing.T) {
 	p := list(t, mod+"internal/surface")
 	for _, d := range p.Deps {

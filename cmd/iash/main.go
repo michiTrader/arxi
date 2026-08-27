@@ -42,6 +42,11 @@ func main() {
 	case "why":
 		cmdWhy(args[1:])
 		return
+	case "blueprint":
+		if len(args) > 1 && args[1] == "validate" {
+			cmdBlueprintValidate(args[2:])
+			return
+		}
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
@@ -70,10 +75,11 @@ USAGE
   iash <command> [args]
 
 IMPLEMENTED TODAY
-  schema          emit the surface manifest (JSON)
-  surface         see the whole surface, human readable
-  why <file>      explain why a run is not advancing
-  version         version of the binary and of the surface
+  schema                     emit the surface manifest (JSON)
+  surface                    see the whole surface, human readable
+  why <file>                 explain why a run is not advancing
+  blueprint validate <file>  check a blueprint and print the resolved config
+  version                    version of the binary and of the surface
 
 The rest of the surface is declared and verified by tests, but has no executor
 yet. 'iash surface' lists everything that is going to exist.
