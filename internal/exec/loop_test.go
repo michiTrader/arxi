@@ -959,28 +959,23 @@ func TestLoopIdleOnAHumanIsNotQuiescence(t *testing.T) {
 	c = c.ResolveDefaults()
 
 	loop, log, fake, _ := newLoop(c)
-	// Nobody submits, so the stage cannot advance on its own; the run's only
-	// live thread is the pending question. No canned reply, so it stays pending.
-	fake.Submits = false
-	seedRun(t, log, c, nil)
-
-	// backend calls a tool it may not run unattended. Appended as a real event,
-	// not injected into the state, so the reducer reaches applyToolDenied -- the
-	// path that puts a member in MemberWaiting and creates the inbox item.
+	// backend reaches for bash during its turn and is stopped by policy=ask, so
+	// the denial arises where a real one does: inside an open turn, from a member
+	// that was thinking. Driving it through the executor rather than appending the
+	// event by hand is what makes this a test of the PATH: hand-appending puts the
+	// denial before the stage that requested it was entered, a shape no provider
+	// can produce.
 	//
-	// It is appended before the loop starts rather than mid-pass because the
-	// question has to be pending at the moment the run settles, and that is the
-	// only moment this test is about. The loop folds it at seq 2 and derives
-	// stage.entered at seq 3, so the stage is entered with backend ALREADY
-	// waiting: the exact ordering that used to reset the member to idle and buy a
-	// second turn for an agent whose tool was still unapproved.
-	if _, err := log.Append([]kernel.Event{{
-		ID: "ev-denied", Ts: "2026-08-27T00:00:01Z", Type: kernel.ToolCallDenied,
-		Scope: "run:r1", Source: kernel.SourceRuntime, Actor: "backend",
-		Payload: map[string]any{"tool": "bash", "policy": "ask"},
-	}}); err != nil {
-		t.Fatalf("append tool.call_denied: %v", err)
-	}
+	// frontend submits normally, which is what makes this the interesting case
+	// rather than a run where nothing happened: the stage is genuinely waiting on
+	// one specific member, and that member is waiting on one specific person.
+	//
+	// No canned reply in HumanReplies, so the question stays open. That is the
+	// state under test.
+	fake.AskTools = map[string]string{"bash": "ask"}
+	fake.DenyTurnTool = map[string]string{"backend": "bash"}
+	fake.SubmitAgents = map[string]bool{"frontend": true}
+	seedRun(t, log, c, nil)
 
 	out, err := loop.Run(context.Background())
 	if err != nil {
@@ -1028,5 +1023,142 @@ func TestLoopIdleOnAHumanIsNotQuiescence(t *testing.T) {
 		t.Error("no question reached the executor, so nobody can ever answer it: " +
 			"the run would sit idle forever with an inbox item that exists only " +
 			"in the state")
+	}
+}
+
+// TestLoopSurvivesAFailingTurn: an effect that fails is a fact about the run,
+// not a reason to abandon it.
+//
+// The loop deliberately does not stop on effect-level errors, and the reason is
+// in the blueprint rather than in optimism. A turn that failed is something the
+// reducer may legitimately react to -- a watcher on agent.failed, a stage that
+// advances without the missing member, a coordinator that reassigns the work --
+// and stopping the loop would prevent exactly the recovery the user declared.
+//
+// The other half is that the failure must be VISIBLE. Continuing quietly would
+// be worse than stopping: the run would carry on, reach some conclusion, and
+// nothing would record that one member never worked. So the error is collected
+// and reported, and the siblings that already spent money keep their events.
+func TestLoopSurvivesAFailingTurn(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "any"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	// A TRANSPORT failure on a tool: the call never landed, so it produces an
+	// error and no event. This is the shape that used to be able to abort a run,
+	// because unlike a domain failure there is nothing in the log to react to.
+	fake.BreakTools["write"] = errors.New("provider connection reset")
+	// The watcher turns the write into a real CallTool during the run.
+	c.Watchers = []kernel.Watcher{
+		{Agent: "security", Pattern: "agent.turn_done", Action: "run_tool", Tool: "write"},
+	}
+	loop.Config = c
+	loop.Runner.Config = c
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+
+	// The run must not be abandoned because a tool call could not be delivered.
+	if err != nil {
+		t.Fatalf("the loop returned a fatal error because an EFFECT failed: %v\n"+
+			"  consequence: a single unreachable provider call ends the whole run, "+
+			"so the watcher on agent.failed, the stage that could advance without "+
+			"the missing member, and every other recovery the blueprint declared "+
+			"never get the chance to run.\n"+
+			"  remedy: effect errors belong in Outcome.Errs; only step-level "+
+			"failures (a refused write, an unordered effect list) stop the loop.", err)
+	}
+	if len(out.Errs) == 0 {
+		t.Errorf("a tool call failed at the transport level and Outcome.Errs is empty.\n"+
+			"  consequence: this failure produces NO event -- the call never landed, "+
+			"so there is nothing in the log to see it by. If it is not reported "+
+			"here it is reported nowhere, and the run reaches a conclusion with a "+
+			"member that silently never worked.\n  the log was: %v", types(log))
+	}
+	if !out.State.Status.Terminal() {
+		t.Errorf("status = %q: the run neither finished nor failed after a broken "+
+			"tool call, so it is left in a state nobody polls and nobody resumes",
+			out.State.Status)
+	}
+	// The turns that did land must have their events regardless: they spent money,
+	// and a log missing them describes a world that did not happen.
+	if !hasType(log, kernel.LLMResponse) {
+		t.Errorf("no llm.response survived the failing effect.\n"+
+			"  consequence: the sibling turns already paid a provider, and dropping "+
+			"their events makes the log disagree with the bill.\n  the log was: %v",
+			types(log))
+	}
+}
+
+// TestLoopSurvivesALogRefusingSnapshots: a snapshot is a cache (ADR-0002), so a
+// run that cannot write one is still correct, only slower to inspect.
+//
+// This is the loop-level half of the guarantee. The Runner already declines to
+// fail a step over it, but the loop is what turns a step into a run, and if it
+// treated the skip as a stop then a read-only disk or a full volume would kill
+// runs that are otherwise perfectly healthy -- inverting the ADR and making an
+// optimization mandatory.
+//
+// The run is driven to a real conclusion here, not one step, because the
+// interesting claim is that the CONCLUSION is unaffected: same status, same
+// stage, same turns, same bill as a run whose snapshots all succeeded.
+func TestLoopSurvivesALogRefusingSnapshots(t *testing.T) {
+	c := teamCfg()
+
+	// The reference: everything works.
+	ref, refLog, _, _ := newLoop(c)
+	seedRun(t, refLog, c, nil)
+	refOut, err := ref.Run(context.Background())
+	if err != nil {
+		t.Fatalf("reference pass: %v", err)
+	}
+
+	// The same run against a log that refuses every snapshot write.
+	loop, log, _, _ := newLoop(c)
+	log.failSnapshot = errors.New("read-only file system")
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("the loop failed because a SNAPSHOT could not be written: %v\n"+
+			"  consequence: the log is the truth and snapshots are a cache "+
+			"(ADR-0002). Failing here inverts that: a full disk or a read-only "+
+			"mount kills runs that are entirely correct, and the run is lost for "+
+			"the sake of an index that only makes `run show` faster.", err)
+	}
+
+	if out.State.Status != refOut.State.Status {
+		t.Errorf("status = %q with snapshots failing, %q with them working.\n"+
+			"  consequence: whether a run succeeds depends on whether a CACHE could "+
+			"be written, so the same events reach different conclusions on two "+
+			"machines", out.State.Status, refOut.State.Status)
+	}
+	if out.State.Turns != refOut.State.Turns {
+		t.Errorf("turns = %d with snapshots failing, %d with them working: the "+
+			"amount of work done changed because a cache write failed",
+			out.State.Turns, refOut.State.Turns)
+	}
+	if out.State.TreeSpentUSD != refOut.State.TreeSpentUSD {
+		t.Errorf("spend = %.4f with snapshots failing, %.4f with them working: a "+
+			"failed cache write changed the bill", out.State.TreeSpentUSD,
+			refOut.State.TreeSpentUSD)
+	}
+	if len(log.snapshots) != 0 {
+		t.Errorf("%d snapshots were recorded by a log that refuses them, so the "+
+			"test is not exercising the failure it claims to", len(log.snapshots))
+	}
+
+	// And the state must still be recoverable from the log alone, which is the
+	// reason losing snapshots is survivable in the first place.
+	folded, err := log.Fold(c, 0)
+	if err != nil {
+		t.Fatalf("folding the snapshot-less log: %v", err)
+	}
+	if folded.Status != out.State.Status {
+		t.Errorf("the folded log says %q, the run said %q.\n"+
+			"  consequence: with no snapshot to fall back on, the fold is the ONLY "+
+			"way to recover this run's state. If they disagree, a run that lost its "+
+			"cache also lost its history.", folded.Status, out.State.Status)
 	}
 }
