@@ -141,6 +141,19 @@ type Outcome struct {
 	// run without re-executing anything, which is what lets an interrupted run be
 	// resumed without paying a provider twice. See Loop.Cursor.
 	Cursor int64
+
+	// SnapshotSkipped counts the snapshots that could not be written.
+	//
+	// It is carried up from the Runner rather than discarded, and the reason is
+	// the same one that makes a skipped snapshot non-fatal in the first place. A
+	// snapshot is a cache (ADR-0002), so failing to write one must not stop the
+	// run -- but "must not stop the run" is not the same as "nobody needs to
+	// know". The Runner counts these deliberately; swallowing the count here
+	// means a read-only disk or a corrupt tail degrades every run silently, and
+	// `run show` and `run why` just get slower and slower with nothing anywhere
+	// to point at. An optimization that has stopped working is invisible exactly
+	// because it was optional.
+	SnapshotSkipped int
 }
 
 // The reasons a loop stops. They are distinct because they call for different
@@ -269,6 +282,7 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 
 			res, err := l.Runner.Run(ctx, fx)
 			out.Errs = append(out.Errs, res.Errs...)
+			out.SnapshotSkipped += res.SnapshotSkipped
 			if err != nil {
 				// A step-level error is not an effect that failed, it is a step
 				// that could not be carried out: the log refused a write, or the

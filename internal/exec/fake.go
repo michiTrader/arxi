@@ -51,6 +51,20 @@ type Fake struct {
 	// about what happened, so nothing is written.
 	BreakTools map[string]error
 
+	// BreakTurns maps agent name to a TRANSPORT failure when its turn is opened:
+	// the provider was unreachable, rate-limited or returned a 500, so the turn
+	// never happened and no event describes it.
+	//
+	// This is the most ordinary failure a real run meets and it was the one the
+	// simulation could not produce. BreakTools covers a tool that could not be
+	// reached, but a turn is where the money and the coordination live, and the
+	// two fail differently: a broken tool leaves a member mid-turn that can still
+	// finish, while a broken turn leaves a member the reducer believes is
+	// thinking and that will never emit agent.turn_done. Without a way to
+	// simulate it, the loop's promise not to abandon a run over one failed effect
+	// was only ever documented, never exercised.
+	BreakTurns map[string]error
+
 	// HumanReplies maps inbox kind to an immediate answer. Empty means the
 	// question stays open, which is the realistic default: AskHuman normally
 	// blocks, and a fake that always answers instantly would make it
@@ -127,6 +141,7 @@ func NewFake() *Fake {
 		SubmitAgents: map[string]bool{},
 		AskTools:     map[string]string{},
 		DenyTurnTool: map[string]string{},
+		BreakTurns:   map[string]error{},
 	}
 }
 
@@ -202,6 +217,18 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 		Agent:  e.Agent,
 		Detail: fmt.Sprintf("coalesced=%d", e.Coalesced),
 	})
+
+	// A provider that could not be reached. Recorded above and then failed here,
+	// deliberately in that order: the attempt is a fact worth keeping even though
+	// it produced nothing, otherwise a run that failed to reach a provider four
+	// times looks identical to one that never tried.
+	//
+	// No events are returned, which is the honest answer. Emitting agent.activated
+	// before failing would leave a member the reducer believes is thinking, with a
+	// turn that can never close.
+	if err, ok := f.BreakTurns[e.Agent]; ok {
+		return nil, fmt.Errorf("spawn turn for %s: %w", e.Agent, err)
+	}
 
 	events := []kernel.Event{
 		{

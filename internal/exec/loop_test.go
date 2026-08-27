@@ -1162,3 +1162,176 @@ func TestLoopSurvivesALogRefusingSnapshots(t *testing.T) {
 			"cache also lost its history.", folded.Status, out.State.Status)
 	}
 }
+
+// TestLoopSurvivesALogThatRefusesSnapshots: a snapshot is a cache, so a run that
+// cannot write one is still a correct run (ADR-0002).
+//
+// This is the ADR's easy half to get backwards. Snapshots exist to make a long
+// log cheap to inspect, and the temptation on a failed write is to treat it like
+// any other log error and stop -- which inverts the ADR and turns an
+// optimization into a requirement. A read-only disk would then kill runs that
+// are otherwise perfectly healthy, and the money already spent goes with them.
+//
+// The other half is that "not fatal" must not become "not mentioned". The count
+// has to reach the caller, or a permanently failing cache degrades every run
+// invisibly and `run show` just gets slower forever with nothing to point at.
+func TestLoopSurvivesALogThatRefusesSnapshots(t *testing.T) {
+	c := teamCfg()
+
+	// The reference: the same run with a log that accepts snapshots. Every
+	// assertion below compares against this, because the claim is not merely
+	// "it did not crash" -- it is that the run reached the SAME conclusion.
+	ref, refLog, _, _ := newLoop(c)
+	seedRun(t, refLog, c, nil)
+	want, err := ref.Run(context.Background())
+	if err != nil {
+		t.Fatalf("reference pass: %v", err)
+	}
+	if want.SnapshotSkipped != 0 {
+		t.Fatalf("setup: the reference skipped %d snapshots, so it is not a clean "+
+			"baseline to compare against", want.SnapshotSkipped)
+	}
+
+	loop, log, _, _ := newLoop(c)
+	log.failSnapshot = errors.New("read-only file system")
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("the loop FAILED because a snapshot could not be written: %v\n"+
+			"  consequence: a cache write turns into a dead run. ADR-0002 says the "+
+			"log is the truth and the snapshot is an optimization, so a read-only "+
+			"disk would kill runs that are entirely correct and discard everything "+
+			"already paid for.\n"+
+			"  remedy: keep runSnapshot counting into SnapshotSkipped instead of "+
+			"returning an error.", err)
+	}
+
+	if out.State.Status != want.State.Status {
+		t.Errorf("status = %q with snapshots failing, %q with them working.\n"+
+			"  consequence: whether a run succeeds depends on whether its CACHE "+
+			"could be written, so the same events reach two different conclusions "+
+			"and the log stops being the truth.",
+			out.State.Status, want.State.Status)
+	}
+	if out.State.Turns != want.State.Turns || out.State.TreeSpentUSD != want.State.TreeSpentUSD {
+		t.Errorf("work differs: %d turns / %.4f USD with snapshots failing, "+
+			"%d / %.4f with them working.\n"+
+			"  consequence: a failing cache changed how much work happened and what "+
+			"it cost, which means the snapshot is no longer an optimization but a "+
+			"participant in the run.",
+			out.State.Turns, out.State.TreeSpentUSD,
+			want.State.Turns, want.State.TreeSpentUSD)
+	}
+
+	// The log itself must be unharmed: it is the artifact `replay` and `run why`
+	// read, and a run whose log is short a few events is one that cannot be
+	// explained afterwards.
+	if got, exp := len(types(log)), len(types(refLog)); got != exp {
+		t.Errorf("the log holds %d events, the reference holds %d.\n"+
+			"  got:  %v\n  want: %v\n"+
+			"  consequence: a failed snapshot cost the log real events, so the run "+
+			"can never be replayed or explained -- which is precisely what the "+
+			"snapshot was only ever supposed to make FASTER.",
+			got, exp, types(log), types(refLog))
+	}
+
+	// And it must be reported.
+	if out.SnapshotSkipped == 0 {
+		t.Error("SnapshotSkipped is 0 although every snapshot write was refused.\n" +
+			"  consequence: the loop swallows the Runner's count, so a permanently " +
+			"broken cache is invisible. Every run degrades, `run show` and `run why` " +
+			"get slower and slower, and there is nothing anywhere for an operator " +
+			"to point at -- the failure hides behind being optional.\n" +
+			"  remedy: accumulate res.SnapshotSkipped into the Outcome.")
+	}
+}
+
+// TestLoopCarriesOnAfterATurnThatCouldNotBeReached: one unreachable provider
+// must not abandon the run.
+//
+// This is the most ordinary failure a real run meets -- a 500, a rate limit, a
+// dropped connection -- and it is the one the loop deliberately does NOT stop
+// on. The reasoning is in Outcome.Errs: an effect that failed is a fact the
+// reducer may legitimately react to, and stopping the fold would prevent exactly
+// the recovery a blueprint declared. Aborting the whole run because one member's
+// turn did not connect throws away every other member's finished, paid-for work.
+//
+// So the assertions are that the run KEEPS GOING, that the failure is REPORTED
+// rather than swallowed, and that the log stays replayable. The last is the
+// subtle one: a broken turn must leave nothing behind, because a member the
+// reducer believes is thinking has an open turn that can never close, and it
+// would then look eternally busy and mask every later silence.
+func TestLoopCarriesOnAfterATurnThatCouldNotBeReached(t *testing.T) {
+	c := teamCfg()
+	c.Watchers = nil
+	c.Stages = []kernel.StageConfig{{Name: "build", AdvanceWhen: "any"}}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	// backend's provider is down; frontend's is fine. `any` means the stage can
+	// still be satisfied, which is the point: the run has a way forward and the
+	// loop must take it rather than stopping at the first error.
+	fake.BreakTurns = map[string]error{"backend": errors.New("503 from the provider")}
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("the loop returned a fatal error for ONE unreachable provider: %v\n"+
+			"  consequence: a single 503 abandons the whole run, discarding the "+
+			"finished and already-paid-for work of every other member. A rate limit "+
+			"on one agent would kill a run that could still succeed.\n"+
+			"  remedy: keep effect-level failures in Outcome.Errs and keep folding.",
+			err)
+	}
+
+	// Reported, not swallowed.
+	if len(out.Errs) == 0 {
+		t.Error("the failed turn produced no entry in Outcome.Errs.\n" +
+			"  consequence: the run is missing work nobody is told about. A user " +
+			"sees a result that silently excludes an agent, and a retry cannot be " +
+			"decided on because there is no record that anything failed.")
+	}
+	if !spawnedFor(fake, "backend") {
+		t.Error("no turn was even attempted for backend: the failure has to come " +
+			"from a real attempt, or this test is not exercising the path it claims")
+	}
+
+	// The run must have gone somewhere. `any` is satisfiable by frontend alone.
+	if !hasType(log, kernel.StageSubmitted) {
+		t.Errorf("no submit reached the log after one provider failed.\n"+
+			"  the log was: %v\n"+
+			"  consequence: one broken provider stopped the members that were "+
+			"working, so a stage that only needed ANY submit got none.", types(log))
+	}
+	if out.State.Status == kernel.StatusFailed {
+		t.Errorf("the run failed although its advance rule was `any` and frontend "+
+			"was reachable.\n  result: %q\n"+
+			"  consequence: a blueprint that explicitly tolerates one member not "+
+			"delivering is defeated by the transport, so `any` means `all` whenever "+
+			"a provider hiccups.", out.State.Result)
+	}
+
+	// And backend must not be left looking busy forever.
+	if m := out.State.Member("backend"); m != nil && m.TurnOpen {
+		t.Error("backend still has TurnOpen after its turn failed to start.\n" +
+			"  consequence: Busy() stays true forever, so quiescence can never fire " +
+			"again for this run and a genuine stall later on goes unreported -- the " +
+			"one failure mode that costs a whole night.")
+	}
+
+	// The log has to remain foldable: it is what `replay` and `run why` read.
+	folded, ferr := log.Fold(c, 0)
+	if ferr != nil {
+		t.Fatalf("the log cannot be folded after a failed turn: %v\n"+
+			"  consequence: the run cannot be replayed or explained, so the incident "+
+			"that most needs investigating is the one that destroyed the evidence.",
+			ferr)
+	}
+	if folded.Status != out.State.Status {
+		t.Errorf("folding the log gives status %q, the live run ended at %q.\n"+
+			"  consequence: State = fold(log) is broken by a failed effect, so "+
+			"`run why` contradicts the run it is explaining.",
+			folded.Status, out.State.Status)
+	}
+}
