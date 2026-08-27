@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -348,9 +350,28 @@ func parseStartFlags(args []string) (startFlags, error) {
 	return f, nil
 }
 
-// newRunID mints a run id that sorts chronologically and does not collide within
-// a second. §20.1 shows `r1`, which is what the docs use for readability; a real
-// id has to survive two runs started in the same minute.
+// newRunID mints a run id that sorts chronologically and does not collide.
+//
+// §20.1 shows `r1`, which is what the docs use for readability. A real id needs
+// more than a timestamp, because the id IS the run directory: two runs that mint
+// the same one open the same log and append their events into each other. Both
+// become unreplayable and neither can be separated from the other afterwards, so
+// the work and the audit trail are lost together.
+//
+// The first version of this used millisecond resolution alone and repeated on
+// the second mint in a tight loop, which is exactly what a script or a CI job
+// does. So the timestamp — which makes ids sortable, and therefore `run list`
+// readable — is combined with random bytes, which make them unique. Time alone
+// sorts but collides; randomness alone is unique but says nothing about when the
+// run happened.
 func newRunID() string {
-	return "r" + strconv.FormatInt(time.Now().UTC().UnixNano()/1e6, 36)
+	ms := time.Now().UTC().UnixMilli()
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Degrade to the nanosecond clock rather than refuse to start. A weaker
+		// id is a smaller problem than a run that cannot begin over entropy.
+		return "r" + strconv.FormatInt(ms, 36) +
+			"-" + strconv.FormatInt(int64(time.Now().Nanosecond()), 36)
+	}
+	return "r" + strconv.FormatInt(ms, 36) + "-" + hex.EncodeToString(b[:])
 }
