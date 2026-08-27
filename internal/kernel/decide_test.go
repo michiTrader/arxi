@@ -265,6 +265,229 @@ func TestStageTimeoutWithoutObserverAsksTheHuman(t *testing.T) {
 	}
 }
 
+// TestRunStartedEntersTheFirstStage protects the entry point of every staged
+// run.
+//
+// Without this derivation a staged run starts with everybody idle, no timer
+// armed and no pending effect, so the very next step satisfies every condition
+// in checkQuiescence: the run is declared silent and dies before a single agent
+// was asked to work. The symptom reads as "my blueprint is broken" while the
+// blueprint is fine, which is the most expensive kind of wrong error message.
+func TestRunStartedEntersTheFirstStage(t *testing.T) {
+	c := bp()
+	n := nextSeq()
+	e := Event{
+		Seq: n, ID: "e" + strconv.FormatInt(n, 10), Type: RunStarted,
+		Scope: "run:r1", Source: SourceRuntime,
+		Payload: map[string]any{"run_id": "r1", "actor": "team", "budget_usd": 5.0},
+	}
+
+	_, fx := Decide(State{}, e, c)
+
+	em, ok := firstEffect[Emit](fx)
+	if !ok {
+		t.Fatalf("run.started emitted no stage.entered for a blueprint with %d stages.\n"+
+			"  consequence: nobody enters stage %q, so no turn is opened, no timer is "+
+			"armed, and the next step declares the run quiescent before any work happened.\n"+
+			"  remedy: applyRunStarted must Emit stage.entered with index 0.",
+			len(c.Stages), c.Stages[0].Name)
+	}
+	if em.Event.Type != StageEntered {
+		t.Fatalf("run.started emitted %q, expected %q", em.Event.Type, StageEntered)
+	}
+	if got := em.Event.Str("stage"); got != "execute" {
+		t.Errorf("entered stage %q, expected the FIRST stage %q; entering any other "+
+			"stage skips work the blueprint declared", got, "execute")
+	}
+	if got := em.Event.Num("index"); got != 0 {
+		t.Errorf("entered index %v, expected 0", got)
+	}
+}
+
+// An unstaged blueprint must NOT get a stage.entered: there is no stage to
+// enter, and inventing one would make the single-agent run of §20.1 fold into a
+// state referring to a stage its blueprint never declared.
+func TestRunStartedWithoutStagesEntersNothing(t *testing.T) {
+	c := Config{Members: []MemberConfig{{Name: "reviewer"}}}.ResolveDefaults()
+	n := nextSeq()
+	e := Event{
+		Seq: n, ID: "e" + strconv.FormatInt(n, 10), Type: RunStarted,
+		Scope: "run:r1", Source: SourceRuntime,
+		Payload: map[string]any{"run_id": "r1", "actor": "reviewer", "budget_usd": 2.0},
+	}
+
+	_, fx := Decide(State{}, e, c)
+
+	for _, f := range fx {
+		if em, ok := f.(Emit); ok && em.Event.Type == StageEntered {
+			t.Fatalf("an unstaged blueprint entered stage %q.\n"+
+				"  consequence: the state names a stage the blueprint never declared, and "+
+				"advance rules would be evaluated against it.\n"+
+				"  remedy: applyRunStarted returns nil when len(c.Stages) == 0.",
+				em.Event.Str("stage"))
+		}
+	}
+}
+
+// ---------------------------------------------------------------- the clock
+
+// TestTimerTickBecomesStageTimeout protects the translation that makes every
+// on_timeout branch reachable.
+//
+// A tick that only cleared ActiveTimer left the stage waiting forever with its
+// deadline gone, and — because clearing the timer removes the last reason
+// checkQuiescence stays quiet — the run was then reported as mysteriously silent
+// instead of as timed out. `escalate`, `advance`, `fail` and the AskHuman
+// fallback were unreachable code that only a hand-written event could enter.
+func TestTimerTickBecomesStageTimeout(t *testing.T) {
+	c := bp()
+	s := started(c)
+	s, _ = Decide(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
+
+	if s.ActiveTimer != "stage:execute" {
+		t.Fatalf("ActiveTimer = %q, expected stage:execute", s.ActiveTimer)
+	}
+
+	s2, fx := Decide(s, ev(TimerTick, "", map[string]any{"timer_id": "stage:execute"}), c)
+
+	em, ok := firstEffect[Emit](fx)
+	if !ok {
+		t.Fatalf("a fired stage timer produced no event.\n" +
+			"  consequence: the stage loses its deadline and waits forever, and the run " +
+			"is diagnosed as silent rather than as timed out; every on_timeout branch is " +
+			"dead code.\n" +
+			"  remedy: applyTimerTick must Emit stage.timeout for the active stage timer.")
+	}
+	if em.Event.Type != StageTimeout {
+		t.Fatalf("tick emitted %q, expected %q", em.Event.Type, StageTimeout)
+	}
+	if got := em.Event.Str("stage"); got != "execute" {
+		t.Errorf("timeout names stage %q, expected execute; on_timeout would be read "+
+			"from the wrong stage", got)
+	}
+	if s2.ActiveTimer != "" {
+		t.Errorf("ActiveTimer = %q after firing, expected empty: a timer that already "+
+			"fired must not be able to fire twice", s2.ActiveTimer)
+	}
+}
+
+// A tick for a timer that is no longer active is stale by construction: the
+// stage advanced and CancelTimer raced the firing. Honouring it would expire a
+// stage that already finished, which is the double outcome CancelTimer is
+// classified as a control effect to prevent.
+func TestStaleTimerTickIsIgnored(t *testing.T) {
+	c := bp()
+	s := started(c)
+	s, _ = Decide(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
+
+	_, fx := Decide(s, ev(TimerTick, "", map[string]any{"timer_id": "stage:some-old-stage"}), c)
+
+	for _, f := range fx {
+		if em, ok := f.(Emit); ok && em.Event.Type == StageTimeout {
+			t.Fatalf("a tick naming %q expired the CURRENT stage.\n"+
+				"  consequence: a stage that already advanced is timed out by its "+
+				"predecessor's timer, so the run ends in two different ways depending on "+
+				"scheduling luck.\n"+
+				"  remedy: applyTimerTick returns nil unless timer_id == ActiveTimer.",
+				"stage:some-old-stage")
+		}
+	}
+}
+
+// A timer whose id carries no `stage:` prefix belongs to some other subsystem.
+// Emitting a stage timeout for it would fabricate an event about a stage that
+// was never involved.
+func TestForeignTimerTickEmitsNoStageTimeout(t *testing.T) {
+	c := bp()
+	s := started(c)
+	s.ActiveTimer = "inbox:7"
+
+	s2, fx := Decide(s, ev(TimerTick, "", map[string]any{"timer_id": "inbox:7"}), c)
+
+	for _, f := range fx {
+		if em, ok := f.(Emit); ok && em.Event.Type == StageTimeout {
+			t.Fatal("a non-stage timer produced a stage.timeout.\n" +
+				"  consequence: the log claims a stage expired when no stage was involved.\n" +
+				"  remedy: applyTimerTick requires the stage: prefix before emitting.")
+		}
+	}
+	if s2.ActiveTimer != "" {
+		t.Errorf("ActiveTimer = %q; a timer that fired is consumed whether or not it "+
+			"maps to a stage, otherwise it fires forever", s2.ActiveTimer)
+	}
+}
+
+// ------------------------------------------------------------ turn ceiling
+
+// TestMaxTurnsIsEnforced protects a ceiling that was declared and ignored.
+//
+// MaxTurns was read out of run.started, stored in the State and compared against
+// nothing, so `--max-turns 3` was a number the user typed and the reducer never
+// used. It is the only bound that catches a run which LOOPS rather than spends: a
+// watcher cascade of individually cheap turns can spin for hours without ever
+// approaching a dollar ceiling.
+func TestMaxTurnsIsEnforced(t *testing.T) {
+	c := bp()
+	n := nextSeq()
+	s, _ := Decide(State{}, Event{
+		Seq: n, ID: "e" + strconv.FormatInt(n, 10), Type: RunStarted,
+		Scope: "run:r1", Source: SourceRuntime,
+		Payload: map[string]any{
+			"run_id": "r1", "actor": "team", "budget_usd": 100.0, "max_turns": 3,
+		},
+	}, c)
+
+	if s.MaxTurns != 3 {
+		t.Fatalf("MaxTurns = %d, expected 3", s.MaxTurns)
+	}
+
+	// Two turns are below the ceiling and must not stop the run.
+	for i := 0; i < 2; i++ {
+		var fx []Effect
+		s, fx = Decide(s, ev(AgentActivated, "backend", nil), c)
+		for _, f := range fx {
+			if em, ok := f.(Emit); ok && em.Event.Type == RunExpired {
+				t.Fatalf("the run expired on turn %d of a ceiling of 3: the ceiling is "+
+					"off by one and stops work the user paid for", i+1)
+			}
+		}
+	}
+
+	// The third reaches it.
+	_, fx := Decide(s, ev(AgentActivated, "designer", nil), c)
+	em, ok := firstEffect[Emit](fx)
+	if !ok || em.Event.Type != RunExpired {
+		t.Fatalf("turn 3 of a ceiling of 3 did not expire the run (effects: %#v).\n"+
+			"  consequence: --max-turns is decorative, and a cheap watcher loop runs "+
+			"until somebody notices by hand.\n"+
+			"  remedy: applyActivated must Emit run.expired when Turns reaches MaxTurns.", fx)
+	}
+	if got := em.Event.Str("reason"); got != "max_turns" {
+		t.Errorf("expiry reason = %q, expected max_turns; `run why` reads this field to "+
+			"say WHICH limit stopped the run", got)
+	}
+}
+
+// A run with no declared ceiling must never expire on turn count. MaxTurns is
+// optional (`--max-turns 0` is the documented default), and treating 0 as
+// "zero turns allowed" would make every unbounded run die on its first activation.
+func TestMaxTurnsZeroMeansNoCeiling(t *testing.T) {
+	c := bp()
+	s := started(c) // no max_turns in the payload
+
+	for i := 0; i < 5; i++ {
+		var fx []Effect
+		s, fx = Decide(s, ev(AgentActivated, "backend", nil), c)
+		for _, f := range fx {
+			if em, ok := f.(Emit); ok && em.Event.Type == RunExpired {
+				t.Fatalf("a run with no ceiling expired on turn %d.\n"+
+					"  consequence: every run without --max-turns dies immediately.\n"+
+					"  remedy: applyActivated must treat MaxTurns <= 0 as unbounded.", i+1)
+			}
+		}
+	}
+}
+
 // -------------------------------------------------------- turns and causes
 
 // Protects the most direct saving of the design: five reasons to talk to the
