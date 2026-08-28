@@ -2,7 +2,7 @@
 
 ## 20.0 What this document is for
 
-`iash surface` lists the 45 declared capabilities. A list is not a design: it
+`iash surface` lists the 46 declared capabilities. A list is not a design: it
 tells you what exists and nothing about whether the set is *coherent*. Two
 questions a list cannot answer:
 
@@ -15,7 +15,7 @@ questions a list cannot answer:
 
 So this document walks **use cases**, not commands, and every command has to fall
 out of some scenario naturally. The coverage table in §20.12 closes the loop: it
-lists all 45 and names the use case that reaches each one. It is generated from
+lists all 46 and names the use case that reaches each one. It is generated from
 the registry, not maintained by hand — see `use_cases_test.go`.
 
 **Status of the commands.** `schema`, `surface`, `why`, `version`, `blueprint
@@ -601,14 +601,41 @@ Prompt changes get judged by anecdote unless something measures them.
 
 ```
 $ iash eval run ./suites/review-quality.yaml --budget 12.00
-eval e1: 20 cases, 20 completed, 11.30 USD
+eval e20260828T223546: 20 cases, 20 judged, 11.30 USD of 12.00
+  pass rate: 0.65 (13 passed, 7 failed)
+  stored:    evals/e20260828T223546.json
 
-$ iash eval compare e1 e2
-                    e1        e2      delta
-pass rate         0.65      0.80     +0.15
-mean cost USD     0.565     0.702    +0.137
-mean turns         3.2       4.1      +0.9
+... edit the prompt, run it again ...
+
+$ iash eval list
+ID                  SUITE           PASS  JUDGED  COST   NOTE
+e20260828T224101-2  review-quality  0.80  20/20   14.04
+e20260828T223546    review-quality  0.65  20/20   11.30
+
+compare two: iash eval compare e20260828T223546 e20260828T224101-2
+
+$ iash eval compare e20260828T223546 e20260828T224101-2
+                   e20260828T223546  e20260828T224101-2     delta
+pass rate                      0.65                0.80     +0.15
+mean cost USD                 0.565               0.702    +0.137
+mean turns                      3.2                 4.1      +0.9
 ```
+
+`eval list` is not a convenience beside `compare`; it is what makes `compare`
+reachable. A run id is the UTC second it started, because there is no counter to
+mint `e1` and `e2` from without reading every existing run first -- and nobody
+retypes `e20260828T224101-2` from memory. Without a listing, `compare` takes two
+arguments the user has no way to discover, and the real workflow becomes
+`ls evals/`: a person reading the storage layout because the tool declined to
+tell them. The `-2` on the second id is there because two runs can start inside
+one second, which is what a scripted loop does.
+
+A run is never rewritten. `compare` cites runs by id, and a citation that keeps
+resolving while its numbers change is worse than one that breaks, so `eval run`
+refuses an id that already exists rather than replacing it. There is no pruning
+either: "keep the last N" deletes the interesting run, which is old by
+definition, and a retention policy eventually deletes the baseline somebody is
+about to cite.
 
 `eval compare` reports cost next to quality on purpose. A prompt change that
 improves the pass rate by 15% while raising cost 24% is a trade-off, not a win,
@@ -642,7 +669,7 @@ message type are three **mechanical projections of one registry entry** —
 synonym anywhere would fork the vocabulary and require a hand-maintained mapping
 forever.
 
-Of 45 declared capabilities, **32 are exposed as agent tools**. The 13 that are
+Of 46 declared capabilities, **33 are exposed as agent tools**. The 13 that are
 not are a security boundary, not an oversight:
 
 | not an agent tool | why an agent must not have it |

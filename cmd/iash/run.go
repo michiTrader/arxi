@@ -15,20 +15,22 @@ import (
 	"github.com/michiTrader/iash/internal/exec"
 	"github.com/michiTrader/iash/internal/kernel"
 	"github.com/michiTrader/iash/internal/logstore"
+	"github.com/michiTrader/iash/internal/surface"
 )
 
 // startFlags is what `run start` was invoked with, after parsing but before any
 // of it is trusted.
 type startFlags struct {
-	actor     string
-	prompt    string
-	budget    float64
-	budgetSet bool
-	maxTurns  int
-	workspace string
-	sim       bool
-	runID     string
-	dir       string
+	actor      string
+	prompt     string
+	promptFlag string
+	budget     float64
+	budgetSet  bool
+	maxTurns   int
+	workspace  string
+	sim        bool
+	runID      string
+	dir        string
 }
 
 // cmdRunStart implements `iash run start <actor> <prompt> --budget N`.
@@ -45,11 +47,20 @@ type startFlags struct {
 // plausible result for work nobody did, and the user would have no way to tell.
 // Saying so costs a line of output and is the only honest option.
 func cmdRunStart(args []string) {
+	// Short flags are expanded before parsing, from the surface's own assignment,
+	// so this parser only ever sees long names. See expandShort in flags.go.
+	args, err := expandShort(surface.Lookup("run", "start"), args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "iash run start: %v\n", err)
+		os.Exit(2)
+	}
+
 	f, err := parseStartFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "iash run start: %v\n\n"+
 			"usage: iash run start <actor> <prompt> --budget <usd> [--max-turns N]\n"+
-			"                      [--workspace shared|worktree|copy|none] [--sim]\n", err)
+			"                      [--workspace shared|worktree|copy|none] [--sim]\n"+
+			"short: -a actor  -p prompt  -b budget  -w workspace  -S sim\n", err)
 		os.Exit(2)
 	}
 
@@ -245,6 +256,16 @@ func parseStartFlags(args []string) (startFlags, error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 
+		// Everything after `--` is a positional, never a flag. A prompt is free
+		// text and can legitimately start with a dash ("--sim is broken"); with
+		// no escape hatch that objective is simply unpassable, and the closest
+		// thing the user can do is quote it, which does not help because quotes
+		// are the shell's and are gone by now.
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+
 		// --flag=value and --flag value are both accepted. Supporting only one
 		// makes the other a silent misparse: `--budget=2.00` consumed as a
 		// positional would become the prompt, and the run would start with no
@@ -264,6 +285,24 @@ func parseStartFlags(args []string) (startFlags, error) {
 		switch name {
 		case "--sim":
 			f.sim = true
+		// The two positional parameters are also accepted by name. The registry
+		// declares them as `actor` and `prompt` and publishes those names to the
+		// tool schema and the protocol, so --actor is not a spelling invented
+		// here; refusing it would mean -a expands to a flag this parser drops,
+		// and a flag that parses and is then ignored starts a run with no
+		// objective while looking like it worked.
+		case "--actor":
+			v, err := next()
+			if err != nil {
+				return f, err
+			}
+			positional = append([]string{v}, positional...)
+		case "--prompt":
+			v, err := next()
+			if err != nil {
+				return f, err
+			}
+			f.promptFlag = v
 		case "--budget":
 			v, err := next()
 			if err != nil {
@@ -320,14 +359,30 @@ func parseStartFlags(args []string) (startFlags, error) {
 		}
 	}
 
-	if len(positional) < 1 {
-		return f, fmt.Errorf("missing the actor to run")
+	// A prompt given as --prompt is taken whole; a positional prompt is joined
+	// from the remaining words, because a shell that was not quoted splits it and
+	// silently truncating to the first word would run a different objective.
+	if f.promptFlag != "" {
+		if len(positional) < 1 {
+			return f, fmt.Errorf("missing the actor to run")
+		}
+		if len(positional) > 1 {
+			return f, fmt.Errorf("the prompt was given twice: once as --prompt %q "+
+				"and once positionally (%q). Guessing which one is meant would run "+
+				"an objective the user did not choose",
+				f.promptFlag, strings.Join(positional[1:], " "))
+		}
+		f.actor, f.prompt = positional[0], f.promptFlag
+	} else {
+		if len(positional) < 1 {
+			return f, fmt.Errorf("missing the actor to run")
+		}
+		if len(positional) < 2 {
+			return f, fmt.Errorf("missing the prompt: a run with no objective has " +
+				"nothing to put in the agents' context")
+		}
+		f.actor, f.prompt = positional[0], strings.Join(positional[1:], " ")
 	}
-	if len(positional) < 2 {
-		return f, fmt.Errorf("missing the prompt: a run with no objective has " +
-			"nothing to put in the agents' context")
-	}
-	f.actor, f.prompt = positional[0], strings.Join(positional[1:], " ")
 
 	// --budget is checked here and has NO default, which is the one piece of
 	// validation this function is not free to relax. Every other ceiling can

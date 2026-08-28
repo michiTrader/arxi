@@ -203,3 +203,307 @@ func TestExecutorIsNotPure(t *testing.T) {
 			"argument in ADR-0003 no longer describes the code.")
 	}
 }
+
+// TestTheScheduleParserDoesNotReadTheWallClock keeps internal/trigger's testing
+// property enforceable by the compiler rather than by review.
+//
+// The package needs `time` — a calendar is not optional for cron — so it cannot
+// live in the kernel, and TestKernelIsPure already guarantees it will not drift
+// back in. What this test protects is the other half: the package must not reach
+// for anything that makes the ANSWER depend on the machine it runs on. Every
+// function that says when a trigger fires takes `now` as a parameter, which is
+// what makes "the last day of February", "the minute before midnight" and "the
+// machine was asleep for four days" three-line tests instead of untestable.
+//
+// os is what would break that first, and it would break it invisibly: a TZ read
+// from the environment would make the leap-year tests pass here and the nightly
+// audit fire an hour off on a server in another region.
+func TestTheScheduleParserDoesNotReadTheWallClock(t *testing.T) {
+	// `time` is the point of the package; everything else banned in the kernel
+	// is banned here too, for the reasons the kernel bans it.
+	permitted := map[string]bool{"time": true}
+
+	for _, p := range ownClosure(t, mod+"internal/trigger") {
+		if p.ImportPath != mod+"internal/trigger" {
+			continue
+		}
+		for _, imp := range p.Imports {
+			if permitted[imp] {
+				continue
+			}
+			if why, bad := forbidden[imp]; bad {
+				t.Errorf("internal/trigger imports %q.\n"+
+					"  why this is wrong: %s. This package answers \"when does "+
+					"this fire\" and every answer must be a function of the `now` "+
+					"it is handed, or the cases worth testing (leap day, a "+
+					"schedule already missed, the minute before midnight) become "+
+					"the cases that cannot be tested.\n"+
+					"  what to do: take the value as a parameter. If it is I/O, it "+
+					"belongs in the caller: parsing a schedule and storing one are "+
+					"different jobs.", imp, why)
+			}
+		}
+	}
+}
+
+// TestTheScheduleParserDependsOnDeclarationsAndNotOnTheRuntime.
+//
+// internal/trigger may import internal/surface and nothing else of ours.
+//
+// This test was written as a strict leaf rule — no project imports at all — and
+// it failed one commit later, on the import that makes `--then` correct. Worth
+// recording which of the two was wrong, because "the test fired, so loosen the
+// test" is how a rule stops meaning anything.
+//
+// The rule was wrong, and it was wrong because it named three packages
+// (kernel, exec, store) while the reason it gave was about RUNTIME: no log, no
+// clock, no run present. internal/surface is not runtime. It imports `sort` and
+// `strings`, it is a declaration of what the system can do, and importing it is
+// what lets `--then` accept any command the registry publishes instead of
+// carrying its own hand-written list of actions — which is precisely the
+// duplication that had already gone stale (`notify:` named a command that does
+// not exist) before any trigger code was written.
+//
+// So the line is drawn at declarations versus runtime, and it is enforced on the
+// CLOSURE rather than on the direct import. That matters: TestSurfaceDoesNotImportTheExecutor
+// keeps the surface itself clean today, but if the surface ever grew a runtime
+// dependency, this test would fail here too instead of quietly inheriting it.
+func TestTheScheduleParserDependsOnDeclarationsAndNotOnTheRuntime(t *testing.T) {
+	// Declarations, not runtime. A schedule needs to know which commands exist;
+	// it must never need a log, a clock or a run to answer that.
+	permitted := map[string]bool{mod + "internal/surface": true}
+
+	for _, d := range list(t, mod+"internal/trigger").Deps {
+		if !strings.HasPrefix(d, mod) || permitted[d] {
+			continue
+		}
+		t.Errorf("internal/trigger depends on %s.\n"+
+			"  why this is wrong: parsing `--on cron:0 3 * * *` and deciding what "+
+			"`--then` may invoke are a calendar and a lookup in the declared "+
+			"surface. Both must stay answerable with no log, no clock and no run "+
+			"present, exactly as internal/blueprint stays callable by `blueprint "+
+			"validate`.\n"+
+			"  the one exception is internal/surface, and it is an exception "+
+			"because it is a DECLARATION: %s is runtime, and a schedule that "+
+			"needs the runtime to parse cannot be validated before it is "+
+			"installed.\n"+
+			"  what to do: return the parsed Spec and Action, and let cmd/iash "+
+			"join them to whatever runs them.", d, d)
+	}
+}
+
+// TestTheTriggerStoreIsTheOnlyPlaceTriggersTouchTheDisk.
+//
+// internal/trigstore exists because internal/trigger is forbidden to import
+// `os`, and this test is what keeps that separation from being pointless.
+//
+// The rule: trigstore may depend on internal/trigger (it stores those records)
+// and on nothing else of ours. In particular not on the executor and not on the
+// log. A store that reached into either would make `trigger list` — a command
+// that just reads five files — require a run to be present, and the whole reason
+// triggers are readable without a running system is that `trigger list` is what
+// a user types when they suspect nothing is running.
+//
+// The alternative was to put these functions in cmd/iash beside the flag
+// parsing, which passes every architecture test by not being a package. It fails
+// the first time anything other than the CLI needs to read a trigger, which is
+// the scheduler — the very next step. Persistence reachable only from a main
+// package is persistence that gets copy-pasted.
+func TestTheTriggerStoreIsTheOnlyPlaceTriggersTouchTheDisk(t *testing.T) {
+	permitted := map[string]bool{
+		mod + "internal/trigger": true,
+		mod + "internal/surface": true, // inherited through trigger, a declaration
+	}
+	for _, d := range list(t, mod+"internal/trigstore").Deps {
+		if !strings.HasPrefix(d, mod) || permitted[d] {
+			continue
+		}
+		t.Errorf("internal/trigstore depends on %s.\n"+
+			"  why this is wrong: the store's whole job is bytes on disk for the "+
+			"records internal/trigger defines. Reading a trigger must not need a "+
+			"log, a clock or a run, because `trigger list` is exactly what a user "+
+			"types when they suspect nothing is running.\n"+
+			"  what to do: keep the store reading and writing trigger.Record, and "+
+			"let cmd/iash join it to whatever executes the actions.", d)
+	}
+}
+
+// TestTheScheduleParserStillCannotReachTheDisk.
+//
+// The companion to the test above, and the reason the split is worth two
+// packages instead of one. If `os` ever becomes importable from
+// internal/trigger, trigstore stops being a boundary and becomes a file people
+// bypass — and the schedule parser becomes untestable without a filesystem,
+// which is how 29 February and the minute before midnight turn into cases that
+// only get exercised when the calendar happens to cooperate.
+//
+// Stated as its own test rather than folded into the existing purity check,
+// because it is a different claim: that one says the parser does not read the
+// wall clock, this one says it does not read the disk.
+func TestTheScheduleParserStillCannotReachTheDisk(t *testing.T) {
+	banned := map[string]string{
+		"os":       "a schedule that needs the filesystem to parse cannot be validated before it is stored",
+		"os/exec":  "deciding what `--then` may invoke is a lookup, not an execution",
+		"io":       "reading and writing trigger files belongs to internal/trigstore",
+		"bufio":    "reading and writing trigger files belongs to internal/trigstore",
+		"net":      "a trigger fires an effect; it does not perform one",
+		"net/http": "a trigger fires an effect; it does not perform one",
+	}
+	for _, p := range ownClosure(t, mod+"internal/trigger") {
+		for _, imp := range p.Imports {
+			if why, bad := banned[imp]; bad {
+				t.Errorf("%s imports %q.\n  why this is wrong: %s\n"+
+					"  what to do: internal/trigstore already owns this; have it "+
+					"hand a trigger.Record in and out.", p.ImportPath, imp, why)
+			}
+		}
+	}
+}
+
+// TestEvalDoesNotDependOnTheExecutorItMeasures.
+//
+// internal/eval may depend on internal/blueprint (a suite names one per case,
+// and a suite pointing at an invalid blueprint is wrong before anything runs)
+// and on nothing else of ours. In particular not on internal/exec.
+//
+// The rule is about the direction of the dependency, and the direction is the
+// whole design. `eval run` folds over cases and asks something to execute each
+// one, but it asks through an interface it declares itself — CaseRunner, one
+// method — so the thing being measured is supplied by the caller. That is what
+// lets 22 tests drive the budget arithmetic, the reserve, the prefix bias and
+// the error path with a fake that returns a string, and it is why those tests
+// take milliseconds instead of needing a loop, a log and a clock.
+//
+// Point it the other way and the tests that matter become the tests nobody
+// writes. "What does a suite report when the money runs out two cases in" would
+// need a real executor spending real budget; "what does it report when a case
+// errors" would need one that fails on demand. Both are one line with a fake.
+//
+// There is a second reason, and it is the one that would bite first. An eval
+// package that imported the executor could not be imported BY it — Go forbids
+// the cycle — and the natural next feature is exactly that: a run that
+// evaluates its own output. Keeping eval a leaf keeps that possible.
+func TestEvalDoesNotDependOnTheExecutorItMeasures(t *testing.T) {
+	permitted := map[string]bool{
+		mod + "internal/blueprint": true,
+		mod + "internal/kernel":    true, // inherited through blueprint
+	}
+	for _, d := range list(t, mod+"internal/eval").Deps {
+		if !strings.HasPrefix(d, mod) || permitted[d] {
+			continue
+		}
+		t.Errorf("internal/eval depends on %s.\n"+
+			"  why this is wrong: eval measures a runner it does not own. It "+
+			"declares CaseRunner — one method — and the caller supplies the "+
+			"thing being measured, which is what lets the budget arithmetic, "+
+			"the reserve, the prefix bias and the error path be tested with a "+
+			"fake that returns a string instead of a loop, a log and a clock.\n"+
+			"  and: an eval that imported the executor could not be imported "+
+			"BY it, and a run that evaluates its own output is the obvious "+
+			"next feature.\n"+
+			"  what to do: widen CaseRunner if the fold needs more, and let "+
+			"cmd/iash join eval to whatever executes a case.", d)
+	}
+}
+
+// TestEvalDoesNotReadTheClockOrTheNetwork.
+//
+// A narrower claim than the leaf rule above, and a separate one: eval reads
+// files (a suite is a file, and LoadFile is its entry point) so `os` cannot be
+// banned here the way the kernel bans it. What must stay out is anything that
+// makes the same suite produce a different verdict on a different machine or a
+// different afternoon.
+//
+// `time` is the one worth stating. A run summary carries StartedAt, and the
+// obvious convenience is to have the package fill it in — which is exactly what
+// makes a report irreproducible and a test of "what does a truncated run say"
+// depend on when it ran. The field is a string, set by the caller, for the same
+// reason every trigger function takes `now` as a parameter.
+//
+// The consequence is visible in the eval tests: they assert on complete output
+// blocks, including the run id, because nothing in the package invented one.
+func TestEvalDoesNotReadTheClockOrTheNetwork(t *testing.T) {
+	banned := map[string]string{
+		"time":         "a summary that timestamps itself cannot be compared byte for byte, and StartedAt is the caller's fact to state",
+		"net":          "a suite is a file and a verdict is a comparison; neither is a request",
+		"net/http":     "a suite is a file and a verdict is a comparison; neither is a request",
+		"os/exec":      "executing a case is the CaseRunner's job, and eval must not be able to become one",
+		"math/rand":    "a pass rate that varies between reads of the same suite is not a measurement",
+		"crypto/rand":  "a pass rate that varies between reads of the same suite is not a measurement",
+		"database/sql": "persisting a run belongs to a store package, as it does for the log and for triggers",
+	}
+	for _, imp := range list(t, mod+"internal/eval").Imports {
+		if why, bad := banned[imp]; bad {
+			t.Errorf("internal/eval imports %q.\n  why this is wrong: %s\n"+
+				"  what to do: take the value as a parameter. Every number "+
+				"this package reports is quoted in a decision, so every one "+
+				"of them has to be a function of the suite and the results, "+
+				"not of the machine.", imp, why)
+		}
+	}
+}
+
+// TestTheEvalStoreIsTheOnlyPlaceRunsTouchTheDisk.
+//
+// internal/evalstore exists because internal/eval is forbidden database/sql by
+// TestEvalDoesNotReadTheClockOrTheNetwork, with the reason written out there:
+// persisting a run belongs to a store package, as it does for the log and for
+// triggers. This test is what keeps that separation from being pointless.
+//
+// The rule: evalstore may depend on internal/eval and nothing else of ours. In
+// particular not on the executor. `eval compare e1 e2` reads two files and does
+// arithmetic — a comparison of runs from last month must not require the thing
+// that produced them to still exist, still be configured, or still be able to
+// reach a model. A store that pulled in the executor would make yesterday's
+// evidence unreadable on a machine with no API key.
+func TestTheEvalStoreIsTheOnlyPlaceRunsTouchTheDisk(t *testing.T) {
+	permitted := map[string]bool{
+		mod + "internal/eval":      true,
+		mod + "internal/blueprint": true, // inherited through eval
+		mod + "internal/kernel":    true, // inherited through blueprint
+	}
+	for _, d := range list(t, mod+"internal/evalstore").Deps {
+		if !strings.HasPrefix(d, mod) || permitted[d] {
+			continue
+		}
+		t.Errorf("internal/evalstore depends on %s.\n"+
+			"  why this is wrong: the store's whole job is bytes on disk for the "+
+			"summaries internal/eval defines. Reading a run must not need an "+
+			"executor, a log or a clock, because `eval compare` is how a decision "+
+			"made last month gets defended — on whatever machine is asking.\n"+
+			"  what to do: keep the store reading and writing eval.RunSummary, "+
+			"and let cmd/iash join it to whatever produced the runs.", d)
+	}
+}
+
+// TestTheEvalStoreDoesNotDecideWhatARunMeans.
+//
+// The store may not compute a rate. Totals, PassRate, Compare and Validate all
+// live in internal/eval, and the reason is the same one that put Decide in the
+// kernel: the denominator of a pass rate is the single most consequential
+// decision in this repository, and there must be exactly one place it is made.
+//
+// The specific failure this prevents is a store that grows a convenience — a
+// PassRate on a listing row, a "summary" struct for `eval list` — computed from
+// the results it happens to have in hand. It would divide by the wrong
+// denominator once and then be quoted forever, and it would disagree with
+// `eval run`'s own output while both looked authoritative.
+//
+// `math` is the giveaway import, so it is banned outright rather than checked
+// for by reading the code.
+func TestTheEvalStoreDoesNotDecideWhatARunMeans(t *testing.T) {
+	banned := map[string]string{
+		"math":     "arithmetic on a run belongs to internal/eval: Totals and PassRate are one decision made in one place, and a second implementation would disagree with the first while both looked authoritative",
+		"time":     "a run states its own StartedAt, which the caller supplies; a store that reads the clock would stamp a run with when it was SAVED and invite that to be read as when it RAN",
+		"net":      "a store is a directory",
+		"net/http": "a store is a directory",
+		"os/exec":  "producing a run is the CaseRunner's job; a store that could execute one would make `eval list` able to spend money",
+	}
+	for _, imp := range list(t, mod+"internal/evalstore").Imports {
+		if why, bad := banned[imp]; bad {
+			t.Errorf("internal/evalstore imports %s.\n  why this is wrong: %s\n"+
+				"  what to do: put the decision in internal/eval, where the "+
+				"existing tests for it are.", imp, why)
+		}
+	}
+}

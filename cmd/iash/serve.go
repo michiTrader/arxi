@@ -469,11 +469,18 @@ func handleBlueprintValidate(params map[string]any) (any, error) {
 
 // cmdServe implements `iash serve [--listen <addr>]`.
 func cmdServe(args []string) {
+	args, err := expandShort(surface.Lookup("serve"), args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "iash serve: %v\n", err)
+		os.Exit(2)
+	}
+
 	listen, err := parseServeFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "iash serve: %v\n\n"+
 			"usage: iash serve [--listen unix:///path/to.sock]\n"+
-			"       with no --listen it speaks the protocol over stdin/stdout\n", err)
+			"       with no --listen it speaks the protocol over stdin/stdout\n"+
+			"short: -l listen\n", err)
 		os.Exit(2)
 	}
 
@@ -583,6 +590,19 @@ func parseServeFlags(args []string) (string, error) {
 				i++
 				listen = args[i]
 			}
+		case "--json":
+			// Accepted and ignored, for the same reason run start accepts
+			// --attach and ignores it: the surface declares it, and a declared
+			// flag that errors reads like a bug in the binary rather than a
+			// deliberate omission.
+			//
+			// Here it is also already true. WireParams gives --json to every
+			// non-mutating command, and serve's entire output is NDJSON — asking
+			// for JSON output from the JSON protocol is a request that was
+			// already granted. Rejecting it would mean `iash surface --flags`
+			// advertises -J on serve and serve refuses it, which is the drift
+			// TestEveryShortFlagReachesItsParameter exists to catch. It caught
+			// exactly this.
 		default:
 			return "", fmt.Errorf("unknown flag %s", args[i])
 		}

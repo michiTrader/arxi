@@ -1,0 +1,49 @@
+{
+  "seq": 9,
+  "state": {
+    "run_id": "rmtcbfq42-ff898e05",
+    "actor": "feature-team",
+    "status": "running",
+    "seq": 9,
+    "blueprint_sha": "44c08e284a9c8c5ac1567bb28da2701ee0bb4cc851fe68b472e395855b477a2b",
+    "stage": "build",
+    "stage_index": 0,
+    "members": [
+      {
+        "name": "backend",
+        "role": "implementer",
+        "state": "submitted",
+        "since_seq": 6,
+        "spent_usd": 0.01,
+        "turns": 1,
+        "submitted": true
+      },
+      {
+        "name": "frontend",
+        "role": "implementer",
+        "state": "submitted",
+        "since_seq": 9,
+        "spent_usd": 0.01,
+        "turns": 1,
+        "submitted": true,
+        "turn_open": true
+      },
+      {
+        "name": "security",
+        "role": "reviewer",
+        "advisory": true,
+        "state": "inactive",
+        "since_seq": 1,
+        "spent_usd": 0,
+        "turns": 0
+      }
+    ],
+    "spent_usd": 0.02,
+    "budget_usd": 1.5,
+    "turns": 2,
+    "tree_spent_usd": 0.02,
+    "spawn_depth": 0,
+    "stage_resolved": true,
+    "next_inbox_id": 1
+  }
+}

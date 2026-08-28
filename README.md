@@ -98,7 +98,55 @@ iash blueprint validate <file>  check a blueprint and print the resolved config
 iash version                    version of the binary and of the surface
 ```
 
-Underneath, every package is done and tested — **249 tests, no dependencies**.
+Short flags exist, and they are the surface's, not each command's:
+
+```
+$ iash run start -a ./examples/feature-team.yaml -p "add rate limiting" -b 2.00 -S
+$ iash surface --flags        # the whole assignment, and what each letter reaches
+  -b  --budget         4 commands
+  -r  --run            13 commands
+  -p  --prompt         run start
+  -f  --path           blueprint validate
+```
+
+One letter means one thing everywhere, or it does not exist. The two obvious
+implementations both fail, and for the same reason the protocol's message list is
+derived rather than written down.
+
+Per-command aliases would let `-p` be prompt here and something else there.
+That does not break loudly: `-p` keeps working, it just stops meaning what the
+reader learned it meant.
+
+Deriving the letter from the first character is worse. This surface has `budget`
+and `base-url`, `to`/`tools`/`text`/`type`/`ttl`, `on`/`on-busy`/`on-missed`.
+Auto-assignment gives the letter to whichever entry the registry lists first, so
+`-b 5` is a spend ceiling today and a provider URL after somebody sorts the
+file. A short flag whose meaning depends on the order of a slice does not fail
+when it breaks — the script silently does something else with the number.
+
+So there is one global name→letter map, and one expander that rewrites `-p` into
+`--prompt` before any parser runs. A letter is only valid on a command that *has*
+that parameter: `-r` is `--run` on the thirteen commands that take a run id and
+an **error** on the rest, because binding it to something else would discard the
+value while the command reported success. The refusal says so rather than
+guessing:
+
+```
+$ iash blueprint validate -r r1
+-r is --run elsewhere in the surface, but blueprint validate has no run
+parameter, so there is nothing for it to abbreviate here.
+it accepts: -f (--path), -J (--json)
+```
+
+Booleans group (`-SJ`); a flag that takes a value does not. `-Sb 2` is refused
+rather than guessed, because inside a group nothing says which letter the `2`
+belongs to, and a parser that guesses about a spend ceiling is the failure
+`--budget`'s mandatory-ness exists to prevent.
+
+The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
+`{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
+
+Underneath, every package is done and tested — **625 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -117,9 +165,13 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
-| `internal/surface` | the capability manifest every command is checked against | 20 |
-| `cmd/iash` | the CLI and the NDJSON protocol server | 33 |
-| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 6 |
+| `internal/surface` | the capability manifest every command is checked against | 28 |
+| `internal/trigger` | schedules, and what a trigger is allowed to invoke | 106 |
+| `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
+| `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
+| `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
+| `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 126 |
+| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 14 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
@@ -260,7 +312,262 @@ of lying with "unknown command".
 
 Missing: the live executor behind `run start` (the loop, the log and the
 reducer are done and driven end to end by `--sim`; what is absent is the thing
-that actually calls a model), triggers and eval.
+that actually calls a model) and the trigger **scheduler**.
+
+Eval runs now persist. `eval run` writes one file per run, `eval list` shows
+what exists, and `eval compare` reads two of them:
+
+```bash
+$ iash eval run --suite ./suites/review-quality.yaml --budget 1.00 --sim
+eval e20260828T223546: 2 cases, 2 judged, 0.02 USD of 1.00
+  pass rate: 1.00 (2 passed, 0 failed)
+  stored:    evals/e20260828T223546.json
+
+$ iash eval list
+ID                  SUITE           PASS  JUDGED  COST  NOTE
+e20260828T223546-2  review-quality  1.00  2/2     0.02  sim
+e20260828T223546    review-quality  1.00  2/2     0.02  sim
+
+compare two: iash eval compare e20260828T223546 e20260828T223546-2
+```
+
+Three things in that output are deliberate. The `sim` note is a stored field, so
+a fake run stays labelled as one forever and `compare` refuses to read a
+simulated baseline against a real candidate without saying so first — a caveat
+printed **above** the table, because one printed below is read after the
+conclusion has been drawn. The `-2` suffix is there because two runs can start
+in the same UTC second, which is what a scripted loop does; the id is resolved
+before the suite runs, so a collision cannot be discovered after the money is
+spent. And a run is never rewritten or pruned: `compare` cites runs by id, and a
+citation that keeps resolving while its numbers change is worse than one that
+breaks.
+
+Triggers are **most of the way done, and it is worth being precise about which
+part is not**. Schedules parse, firings compute, the action boundary is
+enforced, triggers persist, and `iash trigger create/list/show/pause` works:
+
+```bash
+$ iash trigger create nightly-audit \
+    --on "cron:0 3 * * *" \
+    --then "run start security-team 'audit dependencies for new CVEs'" \
+    --budget 5.00 --budget-period day
+trigger nightly-audit created (next: 2026-08-29 03:00Z)
+
+$ iash trigger list
+NAME           ON              STATUS  LAST   NEXT
+nightly-audit  cron:0 3 * * *  active  never  2026-08-29 03:00Z
+```
+
+**Nothing fires yet.** There is no process watching the clock, so `NEXT` is a
+prediction and `LAST` will say `never` forever. That is the last piece, and it
+is last on purpose: the order was chosen so the parts that are wrong *silently*
+came first. A scheduler built on a parser that quietly disagreed with crontab
+would fire on the wrong days and nothing would report it — whereas a correct
+parser with no scheduler is a system that visibly does nothing, which is the
+failure that gets noticed in a second.
+
+There is also no `trigger delete`, and that is a decision rather than an
+omission — `pause` keeps the configuration and the history, and the reason a
+trigger was stopped is usually the thing you want to read later. Asking for
+`delete` gets told so, rather than being told it is not a command.
+
+```
+cron:0 3 * * *        every:15m        at:2026-09-01T03:00:00Z
+webhook:/deploy       file:./src       event:stage.failed
+```
+
+Everything is **UTC**, and that costs something visible: "3am" is 3am UTC, not
+3am where you live. The alternative is worse — a local 02:30 daily trigger fires
+twice or not at all on a DST transition, on the one night nobody is watching,
+which is the entire premise of a nightly job.
+
+The cron parser takes **numbers only**. `MON` is refused with the number to
+write, because implementations disagree on whether the week starts at Sunday=0
+or Monday=0, and a job running on the wrong day of the week goes unnoticed for
+weeks. It implements cron's genuinely counter-intuitive day rule — when *both*
+day-of-month and day-of-week are restricted, **either** matching fires — because
+people paste crontab lines, and a line that means something narrower here would
+fire less often than the user has already watched it fire elsewhere, with no
+error to point at.
+
+`cron:0 3 30 2 *` (February 30th: five valid fields, an instant that never
+happens) is **refused at create time**, not stored. Stored, it would sit in
+`trigger list` marked active and never once run.
+
+`--then` takes **an iash command**, with no prefix:
+
+```
+--then "run start security-team 'audit dependencies for new CVEs'"
+```
+
+There is no action vocabulary, and that is the point. It was declared as
+`run:|emit:|notify:` — a hand-written list of things a trigger may do, sitting
+inside the file whose whole purpose is that there is only one such list — and it
+had already drifted: **`notify` is not a command in iash**. Naming the surface
+instead of copying part of it means every verb iash gains is triggerable the day
+it lands.
+
+Which commands are legal is derived from the same flag that decides what an
+agent may call. A trigger fires unattended, so a trigger is not a human, and
+`--then "inbox approve i1"` is refused: a trigger that approves inbox items
+turns every `ask` policy in the system into `allow`, on a schedule, at 3am. That
+is checked in the parser rather than left to the human approving `trigger
+create`, because nobody reconstructs the security table from memory while
+reading a one-line diff.
+
+The **next firing is never stored**, only computed. A persisted `NEXT` is a
+second copy of a derivable fact and it rots by existing: after four days of
+downtime it is a timestamp in the past, indistinguishable from a broken
+schedule. A paused trigger reports no next firing at all, even though its
+schedule still names one — an operator scanning that column for "is my
+automation running" reads a future timestamp as *yes*.
+
+**Eval** runs, under `--sim`. Suite files load and are validated, the fold over
+cases executes them against a budget, and the result is reported together with
+what it is a measurement *of*:
+
+```
+$ iash eval run ./suites/review-quality.yaml --budget 12.00 --sim
+note: one sample per case over 3 judged cases: a difference smaller than about
+0.50 between two runs of this suite is not distinguishable from noise
+
+eval e20260828T214104: 3 cases, 3 judged, 0.03 USD of 12.00
+  pass rate: 1.00 (3 passed, 0 failed)
+  mean cost: 0.0100 USD per judged case
+```
+
+`3 cases, 3 judged`, and not §20.11's `20 completed`: "completed" says nothing
+about whether anything was **judgeable**, and the judged count is the denominator
+of the number on the next line.
+
+Run the same suite against a budget that cannot finish it, and the report changes
+shape rather than just its numbers:
+
+```
+$ iash eval run ./suites/review-quality.yaml --budget 0.02 --sim
+note: the budget ran out after 2 of 3 cases, so 1 case(s) never ran
+(rejects-hardcoded-secret) — the cases that DID run are the first ones in the
+file, not a sample of the suite, so this pass rate is over a prefix and carries
+whatever bias the file's ordering has
+note: spent 0.0200 of the 0.02 USD budget; a run that stops on budget is a
+measurement of cost, not of quality — raise --budget before reading the pass
+rate as a result
+
+eval e20260828T214104: 3 cases, 2 judged, 0.02 USD of 0.02
+  pass rate: 1.00 (2 passed, 0 failed)
+  unjudged:  0 errored, 1 skipped
+  mean cost: 0.0100 USD per judged case
+
+$ echo $?
+1
+```
+
+That says **1.00**, and it is the most dangerous number this tool can print. Two
+thirds of the suite was measured, every case that ran passed, and a reader
+scanning for a pass rate finds a perfect one. Three things are arranged against
+it: the exit code is **1**, so CI cannot record a truncated run as a clean pass;
+the notes print **before** the numbers; and the note names *which way the bias
+runs*. Cases execute in file order, so a truncated run measured a **prefix**, and
+hard-cases-last — the natural way to write a suite — makes the reported rate too
+high, and higher the earlier the money runs out. A prompt change that makes each
+case more expensive can therefore *raise* the reported pass rate.
+
+Cost is banked **before** a case's error is examined, because money spent by a
+case that then fell over is still spent, and a suite that treated failures as
+free would overrun its ceiling. A case is also **skipped rather than started** on
+what is left below a reserve: an agent handed less than one turn's budget does
+not fail cleanly, it produces a truncated answer that still gets judged and
+counts as a genuine `FAIL`.
+
+`--sim` is required — there is no LLM-backed executor in this build — and it
+**loads each case's blueprint**. That check is most of why `--sim` is worth
+running at all. The simulated answer does not depend on the blueprint, so
+skipping the load would change no output on the happy path; a suite naming a
+blueprint that does not exist would then judge every case, satisfy every
+`contains`, and report a healthy pass rate over answers no agent produced. The
+author would find out after paying for nineteen real runs.
+
+```
+$ iash eval run ./suites/typo.yaml --budget 12.00 --sim
+note: 2 case(s) errored and produced no judgeable answer; they are in the cost
+total (money was spent) and out of the pass rate (a harness failure is not a
+worse prompt)
+
+eval e20260828T214104: 2 cases, 0 judged, 0.00 USD of 12.00
+  pass rate: none — no case produced a judgeable answer
+  unjudged:  2 errored, 0 skipped
+  error: alpha                   blueprint "nowhere.yaml" could not be loaded, so this case did not run: open nowhere.yaml: no such file or directory
+  error: beta                    blueprint "nowhere.yaml" could not be loaded, so this case did not run: open nowhere.yaml: no such file or directory
+```
+
+`pass rate: none`, not `0.00`. "The worst possible result" and "no result" are
+opposite facts and must not share a representation. `--json` omits the
+`pass_rate` key entirely and sets `pass_rate_absent` instead, for the same reason
+the trigger CLI omits `next` rather than writing `"(paused)"` into it — except
+that `0.0` is worse than a human string in a machine field, because it parses.
+
+Both cases are reported, not just the first: "every case names a file that is not
+there" and "case 7 has a typo" have the same symptom in a single case and
+different causes. Failures are **named with their reason** throughout — `6 failed`
+tells somebody that something is wrong without telling them what to look at, and
+the reason a case failed is the whole reason the eval was run.
+
+`eval compare` is the half that does not work yet, and it **refuses** rather than
+approximating: nothing persists an eval run, so there is nothing to load, and two
+empty summaries would compare cleanly against each other and print a table of
+zeroes — a comparison of nothing that has the shape of a comparison. The refusal
+says which capability is missing and why comparing needs it, because the reader's
+first thought is that they mistyped a run id.
+
+The loader **refuses an expectation that cannot fail**. `expect:` with nothing
+under it, `contains: [""]`, and the same string in both `contains` and
+`not_contains` are all rejected at load time:
+
+```
+cases[0]: expect is required; a case with no expectation passes
+unconditionally, so it raises the pass rate while measuring nothing
+(valid: contains, not_contains, equals)
+cases[0].expect: contains[0] is empty, and every string contains the empty
+string, so this condition always holds
+cases[0].expect: "x" is in both contains and not_contains, so no output can
+satisfy this case
+```
+
+Each of those produces a case that reports `pass` for every possible output, and
+a suite of them reports a healthy pass rate while measuring nothing — the one
+failure mode of an eval tool that is worse than having no eval tool, because the
+number gets quoted in a decision.
+
+Every rate divides by **judged** cases, never by declared ones. Dividing by
+declared treats a harness crash as a worse prompt. The cost *total* does include
+errored cases — money spent before a case fell over is still spent, and the
+total is what the next `--budget` is chosen against — so the total and the mean
+deliberately disagree, and `compare` says which population each number came from
+instead of letting the two be read as one.
+
+`eval compare` treats a delta table as **a causal claim it has to defend**,
+because "the prompt got 15% better" is what a reader takes from it, and several
+things other than the prompt produce the same table: different suites, the same
+suite name with an edited file, two runs over different case sets, a run that
+judged only some of its cases, and — most often — a delta the size of the noise.
+Each is detected and printed **with** the numbers, ordered most-invalidating
+first, since a caveat under a table is read after the conclusion has been drawn.
+
+The sample-size check is where this repository had to take its own advice.
+`docs/design/20-use-cases.md` §20.11 celebrates a pass rate going **0.65 → 0.80
+over 20 cases**, and that result is **not evidence**: the 95% band on a
+difference between 13/20 and 16/20 is **±0.27**, nearly twice the delta. The
+first implementation compared against a threshold chosen by hand — "within two
+cases' worth", 0.10 here — and so said nothing about exactly that table, the one
+table in the repository a reader is most likely to imitate. A hand-picked
+threshold cannot know how many samples it is looking at, so it was replaced by
+an interval; the identical `+0.15` over 100 cases (band ±0.12) is reported
+without complaint.
+
+That interval is Agresti-Caffo rather than the textbook one, because the naive
+standard error is `p(1-p)/n` and collapses to **zero** at a 0% or 100% pass rate
+— 4/4 against 3/4 would be compared against ±0.00 and the difference declared
+real, certainty manufactured by the formula out of four samples.
 
 ## Build and test
 

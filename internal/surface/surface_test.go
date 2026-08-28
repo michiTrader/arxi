@@ -413,3 +413,234 @@ func TestWireParamsIsWhatTheSchemaPromises(t *testing.T) {
 			"that ADR-0006 requires is unreachable from a protocol client")
 	}
 }
+
+// TestShortFlagsAreUnambiguous is the invariant that makes a global map safe.
+//
+// One letter, one meaning, surface-wide. If two parameters ever claim the same
+// letter, then `-b` means a spend ceiling on one command and something else on
+// another, and the user who learned it on the first command silently does the
+// wrong thing on the second. That is the failure short flags exist to avoid, so
+// it is checked rather than assumed.
+func TestShortFlagsAreUnambiguous(t *testing.T) {
+	owner := map[string]string{}
+	for _, pp := range ShortFlags() {
+		name, letter := pp.Name, pp.Desc
+		if prev, taken := owner[letter]; taken {
+			t.Fatalf("-%s is claimed by both %q and %q. A letter that means two "+
+				"things is worse than no letter: the user who learned -%s on one "+
+				"command silently does something else on the other. Give one of "+
+				"them a different letter, or no short form at all, in shortFlags",
+				letter, prev, name, letter)
+		}
+		owner[letter] = name
+	}
+	if len(owner) == 0 {
+		t.Fatal("no short flags at all, so this test proves nothing. Either " +
+			"shortFlags was emptied or ShortFlags() stopped reading it")
+	}
+}
+
+// TestShortFlagsAreSingleLetters keeps the shorthand short.
+//
+// A two-character short flag is not a shorthand, it is a second spelling of the
+// long name, and it collides with the one-letter parser: `-ab` has to be either
+// a flag named "ab" or two flags "a" and "b", and it cannot be both.
+func TestShortFlagsAreSingleLetters(t *testing.T) {
+	for _, pp := range ShortFlags() {
+		if len([]rune(pp.Desc)) != 1 {
+			t.Fatalf("%q maps to %q, which is not one character. A multi-letter "+
+				"short flag is ambiguous against grouped flags and buys nothing "+
+				"over the long name; use the long form instead", pp.Name, pp.Desc)
+		}
+	}
+}
+
+// TestEveryShortFlagAbbreviatesARealParameter stops the map from outliving the
+// surface.
+//
+// A letter for a parameter no command has is a promise the CLI cannot keep: the
+// help text offers it, the parser accepts it, and every command rejects it. This
+// is the drift a per-command alias table would have hidden, caught here instead.
+func TestEveryShortFlagAbbreviatesARealParameter(t *testing.T) {
+	real := map[string]bool{}
+	for _, c := range Registry {
+		for _, pp := range c.WireParams() {
+			real[strings.ReplaceAll(pp.Name, "_", "-")] = true
+		}
+	}
+	for _, pp := range ShortFlags() {
+		if !real[pp.Name] {
+			t.Fatalf("-%s abbreviates %q, which no command in the surface "+
+				"declares. Either a parameter was renamed and shortFlags was not, "+
+				"or the letter was invented for a parameter that never existed. "+
+				"Remove it from shortFlags or fix the name", pp.Desc, pp.Name)
+		}
+	}
+}
+
+// TestLongForResolvesOnlyWithinTheCommand is why LongFor takes a receiver.
+//
+// `-r` is `run` on the thirteen commands that have a run parameter, and it is
+// nothing at all on the ones that do not. Resolving letters globally and letting
+// each command ignore what it does not recognise is how `blueprint validate -r x`
+// would validate nothing and report success.
+func TestLongForResolvesOnlyWithinTheCommand(t *testing.T) {
+	why := Lookup("run", "why")
+	if why == nil {
+		t.Fatal("run why is missing from the registry; this test cannot check " +
+			"short-flag resolution without a command that takes a run id")
+	}
+	if got := why.LongFor("r"); got != "run" {
+		t.Fatalf("run why resolves -r to %q, want \"run\". The command declares a "+
+			"run parameter, so its documented short form has to reach it or the "+
+			"shorthand is decoration", got)
+	}
+
+	validate := Lookup("blueprint", "validate")
+	if validate == nil {
+		t.Fatal("blueprint validate is missing from the registry; this test " +
+			"needs a command WITHOUT a run parameter to prove -r is scoped")
+	}
+	if got := validate.LongFor("r"); got != "" {
+		t.Fatalf("blueprint validate resolves -r to %q, want no resolution. A "+
+			"letter the command has no parameter for must fail, not bind to "+
+			"something else: silently accepting -r here means the flag is "+
+			"discarded and the command reports success on input it ignored", got)
+	}
+}
+
+// TestLongForFindsTheSyntheticJSONFlag: --json is added by WireParams, not
+// declared in Params, so a LongFor that walked Params directly would offer -J in
+// the help text and then reject it. That is the exact drift WireParams was
+// introduced to end, so it is checked on this path too.
+func TestLongForFindsTheSyntheticJSONFlag(t *testing.T) {
+	c := Lookup("run", "why")
+	if c == nil {
+		t.Fatal("run why is missing; this test needs a non-mutating command " +
+			"to check that the synthesized json flag is reachable")
+	}
+	if got := c.LongFor("J"); got != "json" {
+		t.Fatalf("run why resolves -J to %q, want \"json\". WireParams synthesizes "+
+			"the json flag for every reading command, so LongFor must read "+
+			"WireParams and not Params, or the shorthand exists in the help and "+
+			"not in the parser", got)
+	}
+
+	m := Lookup("run", "start")
+	if m == nil || !m.Mutates {
+		t.Fatal("run start is missing or no longer mutating; this test needs a " +
+			"mutating command to check that -J is NOT offered where --json is not")
+	}
+	if got := m.LongFor("J"); got != "" {
+		t.Fatalf("run start resolves -J to %q, want no resolution. A mutating "+
+			"command has no json flag, and offering its shorthand promises an "+
+			"output mode the command does not have", got)
+	}
+}
+
+// TestTheWireHasNoShortFlags: short forms are a courtesy to fingers. A protocol
+// client has none, and `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is
+// a fact. If a letter ever leaked into WireParams, `iash schema` would advertise
+// it and the server would reject it.
+func TestTheWireHasNoShortFlags(t *testing.T) {
+	for _, c := range Registry {
+		for _, pp := range c.WireParams() {
+			if len([]rune(pp.Name)) == 1 {
+				t.Fatalf("%s exposes a one-character parameter %q on the wire. "+
+					"Short flags belong to the CLI only: a machine client saves "+
+					"nothing by them and the log becomes unreadable. Keep the "+
+					"long name in Params", c.CLI(), pp.Name)
+			}
+		}
+	}
+}
+
+// TestAClosedSetIsDeclaredNotDescribed catches a parameter whose legal values
+// live in its description instead of its Enum.
+//
+// `budget-period` was declared with the description "period of the ceiling:
+// day|week|month" and no Enum, which makes the closed set a suggestion. Two
+// things read Enum and neither reads prose: jsonSchema, so an agent is handed a
+// free-form string where three values are legal, and the protocol validator, so
+// {"budget_period": "fortnight"} was accepted. A ceiling whose period nothing
+// agrees on is not a ceiling.
+//
+// Prefix schemes are exempt. `on` takes "cron:0 3 * * *" and `then` takes "run
+// start team 'x'": the pipes in those descriptions separate PREFIXES, not
+// values, and the payload after the colon is open by design. An enum there would
+// reject every real invocation, so they are listed by name rather than pattern —
+// a rule that says "unless it looks like a prefix" would be a rule nobody can
+// apply to a new parameter.
+func TestAClosedSetIsDeclaredNotDescribed(t *testing.T) {
+	// Parameters whose values are prefixes with a free-form payload.
+	openPayload := map[string]bool{
+		"on":   true, // cron:EXPR, webhook:PATH, event:PATTERN
+		"then": true, // run:..., emit:..., notify:...
+	}
+
+	for _, c := range Registry {
+		for _, pp := range c.Params {
+			if len(pp.Enum) > 0 || openPayload[pp.Name] {
+				continue
+			}
+			if strings.Contains(pp.Desc, "|") {
+				t.Fatalf("%s declares %q with alternatives in its description "+
+					"(%q) and no Enum.\nOnly Enum is machine-readable: the tool "+
+					"schema omits the constraint, so an agent sees a free-form "+
+					"string, and the protocol validator enforces Enum, so it "+
+					"accepts values this surface calls illegal. Use "+
+					"enum(p(...), \"a\", \"b\") or, if the payload after a prefix "+
+					"is genuinely open, add %q to openPayload in this test with "+
+					"the reason",
+					c.CLI(), pp.Name, pp.Desc, pp.Name)
+			}
+		}
+	}
+}
+
+// TestAnEnumeratedParameterHasADefaultOrIsRequired.
+//
+// An optional enum with no default is a hole: the command has to invent a value,
+// the invented one is invisible, and the surface no longer describes what runs.
+// Every enum in this surface is either required (the caller must choose) or
+// defaulted (the choice is written down where a reader can see it).
+func TestAnEnumeratedParameterHasADefaultOrIsRequired(t *testing.T) {
+	checked := 0
+	for _, c := range Registry {
+		for _, pp := range c.Params {
+			if len(pp.Enum) == 0 {
+				continue
+			}
+			checked++
+			if !pp.Required && pp.Default == "" {
+				t.Fatalf("%s declares %q as an enum that is neither required nor "+
+					"defaulted. The command will pick a value at runtime, and a "+
+					"default you cannot see is indistinguishable from a bug when "+
+					"it fires. Either req() it or give it def()",
+					c.CLI(), pp.Name)
+			}
+			// A default outside the enum answers a different question than the
+			// one asked, and does it silently.
+			if pp.Default != "" {
+				ok := false
+				for _, v := range pp.Enum {
+					if v == pp.Default {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					t.Fatalf("%s defaults %q to %q, which is not one of its own "+
+						"legal values %v. The default is what runs when the user "+
+						"says nothing, so a default the validator would reject "+
+						"means the common path is the illegal one",
+						c.CLI(), pp.Name, pp.Default, pp.Enum)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no enumerated parameters were found, so this test proves " +
+			"nothing. Either the registry lost its enums or Param.Enum was renamed")
+	}
+}
