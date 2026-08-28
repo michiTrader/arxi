@@ -372,12 +372,42 @@ func BuildManifest() Manifest {
 	return m
 }
 
+// WireParams returns the parameters as a MACHINE client sees them: names
+// normalized to underscores, plus the synthetic `json` flag that every
+// non-mutating command accepts.
+//
+// This exists so the tool schema and the protocol server read the parameter list
+// from the same function. They had drifted apart in the obvious way: jsonSchema
+// normalized `if-seq` to `if_seq` and bolted on a `json` property, so a server
+// that validated incoming requests against c.Params would have rejected
+// `if_seq` — a name the manifest itself told the client to use — and accepted
+// `json` nowhere. A client cannot be asked to obey a schema the server does not
+// read.
+//
+// Positional is deliberately carried through untouched even though the wire has
+// no positions. It stays because Required is what the wire enforces and pos()
+// sets both; dropping Positional here would mean two Param shapes to keep in
+// step for no gain.
+func (c Cmd) WireParams() []Param {
+	out := make([]Param, 0, len(c.Params)+1)
+	for _, pp := range c.Params {
+		pp.Name = strings.ReplaceAll(pp.Name, "-", "_")
+		out = append(out, pp)
+	}
+	// Everything that reads accepts --json. It is added here and not by hand in
+	// each command so that forgetting is impossible: a machine-readable output
+	// that exists in "most" commands is useless for automating anything.
+	if !c.Mutates {
+		out = append(out, Param{Name: "json", Type: "bool", Desc: "JSON output"})
+	}
+	return out
+}
+
 // jsonSchema derives the input schema from the declared Params.
 func jsonSchema(c Cmd) map[string]any {
 	props := map[string]any{}
 	var required []string
-	for _, pp := range c.Params {
-		name := strings.ReplaceAll(pp.Name, "-", "_")
+	for _, pp := range c.WireParams() {
 		typ := pp.Type
 		switch typ {
 		case "bool":
@@ -394,22 +424,61 @@ func jsonSchema(c Cmd) map[string]any {
 		if pp.Default != "" {
 			e["default"] = pp.Default
 		}
-		props[name] = e
+		props[pp.Name] = e
 		if pp.Required {
-			required = append(required, name)
+			required = append(required, pp.Name)
 		}
-	}
-	// Everything that reads accepts --json. It is added here and not by hand in
-	// each command so that forgetting is impossible: a machine-readable output
-	// that exists in "most" commands is useless for automating anything.
-	if !c.Mutates {
-		props["json"] = map[string]any{"type": "boolean", "description": "JSON output"}
 	}
 	s := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
 		s["required"] = required
 	}
 	return s
+}
+
+// ProtocolCommands returns every command a protocol client may send, sorted by
+// message type.
+//
+// This is DERIVED from the Kind flag and never hand-listed. A server with its
+// own list of accepted types is a second surface: the day somebody adds a
+// registry entry with Kind|Protocol, `iash schema` advertises a message type the
+// server answers "unknown type" to, and the client is being lied to by the only
+// document it was told to trust. Deriving it means the cost of exposing a new
+// capability over the wire stays one entry in Registry.
+//
+// Sorted because this list is the server's advertised capability set, and a
+// capability set that reorders between builds makes a golden test impossible and
+// a diff between two versions unreadable.
+func ProtocolCommands() []Cmd {
+	var out []Cmd
+	for _, c := range Registry {
+		if c.Kind&Protocol != 0 {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ProtocolType() < out[j].ProtocolType() })
+	return out
+}
+
+// LookupProtocol resolves a protocol message type to its command.
+//
+// It splits on "." and defers to Lookup rather than comparing ProtocolType()
+// strings, so the inverse uses the same path data as the forward direction. A
+// separate map from type to command would be the translation table this design
+// exists to avoid, and it would be the thing that goes stale.
+//
+// A command that is not exposed to the protocol returns nil even when the path
+// is real: `design` exists, and admitting it here would let a socket client open
+// an interactive designer on the operator's terminal.
+func LookupProtocol(msgType string) *Cmd {
+	if msgType == "" {
+		return nil
+	}
+	c := Lookup(strings.Split(msgType, ".")...)
+	if c == nil || c.Kind&Protocol == 0 {
+		return nil
+	}
+	return c
 }
 
 // Lookup finds a command by its path.

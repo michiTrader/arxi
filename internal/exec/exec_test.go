@@ -77,6 +77,37 @@ func (m *memLog) WriteSnapshot(st kernel.State, atSeq int64) error {
 	return nil
 }
 
+// Read and Head are what the run loop needs on top of the runner's Log, and the
+// boundary handling mirrors logstore.Store exactly rather than approximately.
+//
+// That precision is the point of the fake. "toSeq == 0 means the head" and
+// "fromSeq < 1 clamps to 1" are the conventions the real store implements, so a
+// fake that treated 0 as an empty range would let the loop pass its tests and
+// then read nothing at all against the real log.
+func (m *memLog) Read(fromSeq, toSeq int64) ([]kernel.Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if fromSeq < 1 {
+		fromSeq = 1
+	}
+	if toSeq == 0 || toSeq > m.head {
+		toSeq = m.head
+	}
+	var out []kernel.Event
+	for _, e := range m.events {
+		if e.Seq >= fromSeq && e.Seq <= toSeq {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (m *memLog) Head() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.head
+}
+
 func (m *memLog) order() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -92,6 +123,76 @@ func newRunner() (*Runner, *memLog, *Fake, *VirtualClock) {
 
 func emit(t kernel.EventType) kernel.Effect {
 	return kernel.Emit{Event: kernel.Event{ID: string(t), Type: t}}
+}
+
+// TestSimulatedTurnDrivesTheFullLifecycle protects what makes --sim predictive
+// rather than merely quiet.
+//
+// The Fake used to answer a turn with llm.response + agent.turn_done and nothing
+// else, so a simulated member went from idle straight back to idle. Three
+// behaviours silently could not occur in any simulation:
+//
+//   - State.Turns never advanced, so --max-turns was unreachable in --sim;
+//   - m.Busy() was never true, so applyTurnDone never coalesced and each queued
+//     cause opened its own paid turn — the exact 5x the design exists to avoid;
+//   - a steer arriving mid-turn took the not-busy branch instead of queueing.
+//
+// A simulation that skips the turn lifecycle is worse than no simulation: it
+// predicts a run that cannot happen, and it does so confidently.
+//
+// The ORDER is asserted, not just the presence. agent.activated must precede
+// llm.response (it is what marks the member busy) and llm.response must precede
+// agent.turn_done (the reducer charges the budget on it, so a turn_done seen
+// first would let a run look finished and under budget while the money was
+// already spent).
+func TestSimulatedTurnDrivesTheFullLifecycle(t *testing.T) {
+	r, _, _, _ := newRunner()
+
+	res, err := r.Run(context.Background(), []kernel.Effect{
+		kernel.SpawnTurn{Agent: "backend"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got []kernel.EventType
+	for _, e := range res.Events {
+		got = append(got, e.Type)
+	}
+	// The full lifecycle a real provider produces, in the order it produces it.
+	// The submit sits before turn_done because a real agent submits by calling a
+	// tool while its turn is still open.
+	want := []kernel.EventType{
+		kernel.AgentActivated, kernel.LLMResponse,
+		kernel.StageSubmitted, kernel.AgentTurnDone,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("a simulated turn produced %v, want %v.\n"+
+			"  consequence: without agent.activated the member never becomes busy, so "+
+			"in --sim State.Turns never advances (--max-turns is unreachable), "+
+			"coalescing never engages (every queued cause opens its own paid turn), "+
+			"and a mid-turn steer does not queue. Without stage.submitted no staged "+
+			"blueprint can ever advance, so --sim reports every correct staged "+
+			"blueprint as silently stuck.\n"+
+			"  remedy: Fake.SpawnTurn emits agent.activated, then llm.response, then "+
+			"the submit, then agent.turn_done.",
+			got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event %d is %q, want %q (full order %v).\n"+
+				"  consequence: agent.activated after llm.response leaves the member idle "+
+				"while it is billed; agent.turn_done before llm.response lets a run look "+
+				"finished and under budget with the money already spent.",
+				i, got[i], want[i], got)
+		}
+	}
+
+	if res.Events[0].Actor != "backend" {
+		t.Errorf("agent.activated names actor %q, want backend; the reducer looks the "+
+			"member up by Actor, so a blank one silently updates nobody",
+			res.Events[0].Actor)
+	}
 }
 
 // TestEveryVariantIsDispatched is the counterpart of kernel's
@@ -433,14 +534,15 @@ func TestFailingEffectDoesNotDiscardSiblings(t *testing.T) {
 			"one.", len(res.Errs))
 	}
 
-	// The turn produced llm.response + agent.turn_done, the working tool one
-	// tool.call_completed. The broken one produced nothing, by design.
-	if len(res.Events) != 3 {
+	// The turn produced the full lifecycle (activated, llm.response, submit,
+	// turn_done) and the working tool one tool.call_completed. The broken one
+	// produced nothing, by design.
+	if len(res.Events) != 5 {
 		var got []string
 		for _, e := range res.Events {
 			got = append(got, string(e.Type))
 		}
-		t.Fatalf("got %d events (%v), want 3: the successful siblings' events must "+
+		t.Fatalf("got %d events (%v), want 5: the successful siblings' events must "+
 			"survive a sibling's failure. They already spent money and touched the "+
 			"filesystem, so discarding them leaves the log describing a world "+
 			"that does not exist. Remedy: in runIndependent, append events "+
@@ -651,8 +753,9 @@ func TestRunnerIsRaceFree(t *testing.T) {
 	if err := res.Err(); err != nil {
 		t.Fatalf("unexpected effect errors: %v", err)
 	}
-	// 16 turns * 2 events + 16 tool calls * 1 event.
-	if want := 48; len(res.Events) != want {
+	// 16 turns * 4 events (activated, llm.response, submit, turn_done) + 16 tool
+	// calls * 1 event.
+	if want := 80; len(res.Events) != want {
 		t.Fatalf("got %d events, want %d", len(res.Events), want)
 	}
 }

@@ -1,10 +1,16 @@
 // Command iash is the binary.
 //
-// Today it truly implements three commands (schema, surface, why) and for
-// everything else it answers "declared but not implemented" with the exact name
-// of the capability. That is on purpose: the surface is frozen and verified by
-// tests BEFORE the executor exists, so adding a new command is implementing
-// something that was already promised, not inventing a new promise.
+// Today it implements schema, surface, why, blueprint validate, run start
+// (--sim only) and serve; for everything else it answers "declared but not
+// implemented" with the exact name of the capability. That is on purpose: the
+// surface is frozen and verified by tests BEFORE the executor exists, so adding
+// a new command is implementing something that was already promised, not
+// inventing a new promise.
+//
+// This paragraph has already been wrong once — it claimed three commands after
+// six existed. A doc comment that overstates what is missing is the kind of stale
+// documentation that costs a reader nothing and a contributor everything: they
+// reimplement what is already in the tree.
 package main
 
 import (
@@ -39,9 +45,22 @@ func main() {
 	case "surface":
 		cmdSurface()
 		return
+	case "serve":
+		cmdServe(args[1:])
+		return
 	case "why":
 		cmdWhy(args[1:])
 		return
+	case "blueprint":
+		if len(args) > 1 && args[1] == "validate" {
+			cmdBlueprintValidate(args[2:])
+			return
+		}
+	case "run":
+		if len(args) > 1 && args[1] == "start" {
+			cmdRunStart(args[2:])
+			return
+		}
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
@@ -70,10 +89,13 @@ USAGE
   iash <command> [args]
 
 IMPLEMENTED TODAY
-  schema          emit the surface manifest (JSON)
-  surface         see the whole surface, human readable
-  why <file>      explain why a run is not advancing
-  version         version of the binary and of the surface
+  schema                     emit the surface manifest (JSON)
+  surface                    see the whole surface, human readable
+  why <file>                 explain why a run is not advancing
+  blueprint validate <file>  check a blueprint and print the resolved config
+  run start <bp> <prompt>    run a blueprint to completion (--sim only today)
+  serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
+  version                    version of the binary and of the surface
 
 The rest of the surface is declared and verified by tests, but has no executor
 yet. 'iash surface' lists everything that is going to exist.

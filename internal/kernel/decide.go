@@ -38,7 +38,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 
 	switch e.Type {
 	case RunStarted:
-		applyRunStarted(&out, e, c)
+		fx = append(fx, applyRunStarted(&out, e, c)...)
 
 	case RunPrompt, AgentSteered, AgentNotified:
 		fx = append(fx, applyInjection(&out, e, c)...)
@@ -46,7 +46,12 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 	case RunPaused:
 		out.Status = StatusPaused
 	case RunUnpaused:
+		// Unpausing has to hand back the work the pause withheld, for the same
+		// reason answering a budget question does: spendingHalted parked those
+		// causes, so a resume that does not drain them restarts a run with nothing
+		// to do and quiescence blames the blueprint.
 		out.Status = StatusRunning
+		fx = append(fx, drainParked(&out, c)...)
 	case RunCancelled:
 		out.Status = StatusCancelled
 	case RunExpired:
@@ -63,12 +68,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		fx = append(fx, applyStageTimeout(&out, e, c)...)
 
 	case AgentActivated:
-		if m := out.Member(e.Actor); m != nil {
-			m.State = MemberThinking
-			m.SinceSeq = e.Seq
-			m.Turns++
-			out.Turns++
-		}
+		fx = append(fx, applyActivated(&out, e)...)
 	case AgentTurnDone:
 		fx = append(fx, applyTurnDone(&out, e, c)...)
 	case AgentBlocked:
@@ -123,28 +123,36 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		// money; the human decides whether to raise the budget or stop.
 		out.Status = StatusBlocked
 		fx = append(fx, AskHuman{
+			ID:        nextInboxID(&out),
 			Kind:      "budget",
 			Question:  fmt.Sprintf("budget exhausted (%.4f of %.4f USD in the tree). raise or cancel?", out.TreeSpentUSD, out.BudgetUSD),
 			OnTimeout: "fail",
 		})
 
 	case InboxCreated:
-		out.Inbox = append(out.Inbox, InboxItem{
-			ID:        e.Str("inbox_id"),
-			Kind:      e.Str("kind"),
-			Question:  e.Str("question"),
-			Agent:     e.Str("agent"),
-			OnTimeout: e.Str("on_timeout"),
-		})
+		// Idempotent by id. A question the reducer already recorded when it decided
+		// to ask (a tool approval blocks its member in the same step) would
+		// otherwise be entered twice: once by the decision and once by the event
+		// confirming it. Two entries for one question mean `run inbox` lists a
+		// phantom, and replying to the copy the human happens to pick leaves the
+		// other pending forever, so its OnTimeout eventually fails a run that was
+		// in fact answered.
+		if it := out.InboxItem(e.Str("inbox_id")); it == nil {
+			out.Inbox = append(out.Inbox, InboxItem{
+				ID:        e.Str("inbox_id"),
+				Kind:      e.Str("kind"),
+				Question:  e.Str("question"),
+				Agent:     e.Str("agent"),
+				OnTimeout: e.Str("on_timeout"),
+			})
+		}
 	case InboxReplied:
 		fx = append(fx, applyInboxReplied(&out, e, c)...)
 	case InboxTimeout:
 		fx = append(fx, applyInboxTimeout(&out, e)...)
 
 	case TimerTick:
-		if out.ActiveTimer == e.Str("timer_id") {
-			out.ActiveTimer = ""
-		}
+		fx = append(fx, applyTimerTick(&out, e)...)
 
 	case RunQuiescent:
 		// Quiescence wakes the coordinator. Only if NOBODY observes it does the
@@ -190,7 +198,27 @@ func Fold(s State, events []Event, c Config) (State, []Effect) {
 	return s, all
 }
 
-func applyRunStarted(out *State, e Event, c Config) {
+// applyRunStarted initializes the run and, when the blueprint is staged, enters
+// the first stage.
+//
+// ENTERING STAGE 0 IS THE REDUCER'S JOB, and that is the whole reason this
+// function returns effects at all. A staged run whose first stage is never
+// entered starts with every member idle and nothing armed, so the very next step
+// finds nobody busy, no timer and no pending effect: checkQuiescence fires and
+// the run dies of silence before anybody was asked to work. The symptom looks
+// like "the blueprint is wrong" and the blueprint is fine.
+//
+// The alternative was to let the caller append stage.entered after run.started.
+// That is worse in a way that outlasts this commit: `run`, `--sim` and a resumed
+// run are three call sites, and replay is a fourth that appends nothing at all.
+// The moment one of them forgets, folding the SAME log yields a different state
+// depending on who wrote it, and ADR-0002 stops holding. Deriving it means the
+// log carries the decision and every reader reaches the same conclusion.
+//
+// An unstaged blueprint (the single agent of §20.1) gets no stage.entered: there
+// is no stage to enter. That run is driven by the run.prompt that follows, which
+// is what opens the reviewer's first turn.
+func applyRunStarted(out *State, e Event, c Config) []Effect {
 	out.RunID = e.Str("run_id")
 	out.Actor = e.Str("actor")
 	out.Status = StatusRunning
@@ -221,6 +249,63 @@ func applyRunStarted(out *State, e Event, c Config) {
 			SinceSeq: e.Seq,
 		})
 	}
+
+	if len(c.Stages) == 0 {
+		return nil
+	}
+	return []Effect{Emit{Event: derived(out, e, StageEntered, map[string]any{
+		"stage": c.Stages[0].Name,
+		"index": 0,
+	})}}
+}
+
+// applyActivated counts a turn and enforces the turn ceiling.
+//
+// MaxTurns was being read out of run.started and stored in the State, and then
+// compared against nothing: `--max-turns 5` was a number the user typed, the
+// surface documented, and the reducer ignored. A ceiling that silently does not
+// hold is worse than no ceiling, because the user stops watching the run in the
+// belief that something else is watching it.
+//
+// The ceiling matters for a failure the budget cannot catch. A watcher loop whose
+// turns are individually cheap can spin for hours without ever crossing a dollar
+// limit; --max-turns is the bound on ITERATIONS, and it is the only bound that
+// catches a run that is looping rather than spending.
+//
+// Enforcement is here rather than in spawnFor for a reason worth keeping: a turn
+// that was decided but never executed must not consume the allowance. Counting at
+// activation means the count in the log always equals the turns that actually
+// happened, so folding an old log reaches the ceiling at exactly the same event
+// it reached it on the live run.
+//
+// The run FAILS rather than asking a human. That is the opposite of what the
+// budget does on BudgetExceeded, and the asymmetry is deliberate: exceeding a
+// budget means valuable work is at risk and a human may reasonably choose to pay
+// more, whereas hitting the turn ceiling is the signature of a loop, and asking a
+// human whether to keep looping only moves the loop into their inbox. The event
+// names the ceiling so `run why` can say which limit stopped the run.
+func applyActivated(out *State, e Event) []Effect {
+	m := out.Member(e.Actor)
+	if m == nil {
+		return nil
+	}
+	m.State = MemberThinking
+	m.SinceSeq = e.Seq
+	m.Turns++
+	out.Turns++
+
+	// The turn is open from here until agent.turn_done, whatever states the member
+	// passes through in between. See Member.TurnOpen.
+	m.TurnOpen = true
+
+	if out.MaxTurns <= 0 || out.Turns < out.MaxTurns {
+		return nil
+	}
+	return []Effect{Emit{Event: derived(out, e, RunExpired, map[string]any{
+		"reason":    "max_turns",
+		"turns":     out.Turns,
+		"max_turns": out.MaxTurns,
+	})}}
 }
 
 // applyInjection unifies run.prompt, agent.steered and agent.notified because
@@ -256,7 +341,7 @@ func applyInjection(out *State, e Event, c Config) []Effect {
 		}
 		m.State = MemberIdle
 		m.Submitted = false
-		fx = append(fx, spawnFor(out, *m, c, []string{e.ID}, 0))
+		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
 	}
 	return fx
 }
@@ -294,6 +379,11 @@ func applyStageEntered(out *State, e Event, c Config) []Effect {
 	out.Stage = name
 	out.StageIndex = idx
 
+	// The new stage has not resolved yet, whatever the previous one did. Clearing
+	// here rather than where the flag is set is what scopes it to a single stage:
+	// entering a stage is the only moment a fresh advance rule starts applying.
+	out.StageResolved = false
+
 	var fx []Effect
 	if st := c.StageAt(idx); st != nil && st.TimeoutMs > 0 {
 		id := "stage:" + name
@@ -310,8 +400,31 @@ func applyStageEntered(out *State, e Event, c Config) []Effect {
 		if m.State == MemberFailed {
 			continue
 		}
+
+		// A member waiting on a human keeps waiting, and its cause is PARKED
+		// rather than dropped, so entering a stage does not answer a question on
+		// the human's behalf.
+		//
+		// Resetting it to idle here looked harmless and cost twice. It destroyed
+		// the block -- an idle member still carrying a BlockedOn, so `run why`
+		// named a block State denied having -- and it opened a turn for an agent
+		// whose tool is still unapproved. That agent requests the same tool,
+		// policy=ask denies it again, and a SECOND identical question lands in the
+		// inbox. Now two items ask the same thing, the human answers one, and the
+		// other expires into its OnTimeout "deny": a tool the user approved gets
+		// denied by the copy of the question they did not happen to answer.
+		//
+		// Parking is what makes the answer still worth giving. When the reply
+		// arrives, applyInboxReplied clears the block and spawns with this cause,
+		// so the member joins the stage it was admitted to instead of waking with
+		// nothing to do and tripping quiescence.
+		if m.State == MemberWaiting {
+			m.PendingCauses = append(m.PendingCauses, e.ID)
+			continue
+		}
+
 		m.State = MemberIdle
-		fx = append(fx, spawnFor(out, *m, c, []string{e.ID}, 0))
+		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
 	}
 	return fx
 }
@@ -340,6 +453,25 @@ func applyStageSubmitted(out *State, e Event, c Config) []Effect {
 	if st == nil || !quorumMet(*out, c, *st) {
 		return nil
 	}
+
+	// A stage resolves ONCE, however many members go on submitting to it.
+	//
+	// Without this an `any` stage advanced on every submit it received: the first
+	// submit met the rule and emitted the advance, and so did the second and the
+	// third, because each is folded as its own step and each found the rule still
+	// met. On a final stage that meant three identical run.result events, so the
+	// log claimed the run finished three times and `run why` had three competing
+	// answers for one outcome. On a middle stage it is worse: each surplus submit
+	// emits another stage.advanced, skipping a stage every time.
+	//
+	// The flag is cleared by applyStageEntered, so it scopes to one stage and
+	// cannot suppress the next one. Same shape as QuiescentEmitted, for the same
+	// reason: the condition stays true after the response, so the response has to
+	// remember it already happened.
+	if out.StageResolved {
+		return nil
+	}
+	out.StageResolved = true
 
 	var fx []Effect
 	if out.ActiveTimer != "" {
@@ -409,11 +541,79 @@ func quorumMet(s State, c Config, st StageConfig) bool {
 	return done == total
 }
 
+// applyTimerTick translates a fired timer into the domain event it stands for.
+//
+// A tick is a fact about the CLOCK ("the deadline named stage:review passed"),
+// not about the run. Turning it into stage.timeout is what makes every branch of
+// applyStageTimeout reachable at all. Before this, a tick only cleared
+// ActiveTimer: a stage that ran out of time silently lost its deadline and went
+// on waiting, and because clearing ActiveTimer also removed the last reason
+// checkQuiescence had to stay quiet, the run was then reported as mysteriously
+// silent instead of as timed out. The `escalate` default, the `advance` branch
+// and the AskHuman fallback were all dead code, reachable only by hand-writing a
+// stage.timeout event that nothing produced.
+//
+// The translation belongs to the reducer because the mapping from timer id to
+// meaning is a DECISION. A run loop that emitted stage.timeout itself would have
+// to parse the id, and then `run`, `--sim` and a resumed run would each need that
+// same parsing, with replay unable to agree because it appends nothing.
+//
+// Only the ACTIVE timer produces an event. A tick naming any other timer is
+// stale by construction: the stage advanced and CancelTimer raced the firing.
+// Honouring it would expire a stage that had already finished, which is exactly
+// the double outcome CancelTimer is classified as control to prevent.
+//
+// The `stage:` prefix is required rather than assumed. An unprefixed id means
+// some other subsystem armed that timer, and inventing a stage timeout for it
+// would fabricate an event about a stage that was never involved.
+func applyTimerTick(out *State, e Event) []Effect {
+	id := e.Str("timer_id")
+	if id == "" || out.ActiveTimer != id {
+		return nil
+	}
+	out.ActiveTimer = ""
+
+	name, ok := afterPrefix(id, "stage:")
+	if !ok {
+		return nil
+	}
+	return []Effect{Emit{Event: derived(out, e, StageTimeout, map[string]any{
+		"stage":    name,
+		"index":    out.StageIndex,
+		"timer_id": id,
+	})}}
+}
+
+// afterPrefix returns the remainder after prefix, and whether there was one.
+//
+// It reports the two failures separately on purpose: "no prefix" means a timer
+// belonging to somebody else, while "prefix but empty remainder" means a stage
+// with no name. Collapsing them into a single empty string would let the second
+// case emit a timeout for stage "", which no stage can ever match.
+func afterPrefix(s, prefix string) (string, bool) {
+	if !strings.HasPrefix(s, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(s, prefix)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
 // applyStageTimeout: the default is to escalate, not to fail. A timeout almost
 // never means "impossible", it means "something got stuck, take a look". And if
 // nobody is looking, a human is asked before throwing the work in the trash.
 func applyStageTimeout(out *State, e Event, c Config) []Effect {
 	out.ActiveTimer = ""
+
+	// A stage that already resolved cannot time out: it is not the current stage
+	// any more, and acting on a deadline belonging to a stage that has ended
+	// advances the run a second time and skips the stage in between.
+	if out.StageResolved {
+		return nil
+	}
+
 	st := c.StageAt(out.StageIndex)
 	action := "escalate"
 	if st != nil && st.OnTimeout != "" {
@@ -427,6 +627,12 @@ func applyStageTimeout(out *State, e Event, c Config) []Effect {
 		return nil
 
 	case "advance":
+		// Only the branches that actually END the stage mark it resolved.
+		// `escalate` deliberately does not: it asks somebody to intervene and
+		// leaves the stage open, so the members still working can go on to satisfy
+		// the rule normally. Marking it there would make the escalation itself
+		// block the recovery it was asking for.
+		out.StageResolved = true
 		next := out.StageIndex + 1
 		if next >= len(c.Stages) {
 			return []Effect{Emit{Event: derived(out, e, RunResult, map[string]any{
@@ -449,6 +655,7 @@ func applyStageTimeout(out *State, e Event, c Config) []Effect {
 		}
 		out.Status = StatusBlocked
 		return []Effect{AskHuman{
+			ID:        nextInboxID(out),
 			Kind:      "stage_timeout",
 			Question:  "the stage " + out.Stage + " expired and nobody observes it. advance, extend or cancel?",
 			OnTimeout: "fail",
@@ -464,16 +671,61 @@ func applyTurnDone(out *State, e Event, c Config) []Effect {
 	if m == nil {
 		return nil
 	}
-	m.State = MemberIdle
+	// A member that is WAITING or FAILED is not returned to idle by the end of its
+	// turn, and this is the first thing checked because getting it wrong destroys
+	// the block rather than merely mislabelling it.
+	//
+	// Waiting is the case that bites. A tool denied with policy=ask puts the
+	// member in MemberWaiting DURING its turn, so the agent.turn_done that closes
+	// that same turn arrives afterwards -- always, not occasionally. Clearing the
+	// state here produced a member that was simultaneously idle and carrying a
+	// BlockedOn: `run why` reported a block that State said did not exist,
+	// Runnable() offered the member for new turns while its approval sat
+	// unanswered, and quiescence stayed silent because somebody looked runnable.
+	// The question then remained in the inbox with nothing depending on it, so
+	// answering it resumed nothing and its OnTimeout eventually denied a tool the
+	// user had already approved.
+	//
+	// Failed is excluded for the symmetric reason: a member whose turn died must
+	// not be handed more work by the flick of a state field, and the turn it never
+	// finished is not evidence that it recovered.
+	//
+	// Detail and SinceSeq are left alone in both cases too. They are what `run
+	// why` prints ("backend waits for approval since seq 7"), and a block with its
+	// reason erased is a block nobody can act on.
+	if m.State == MemberWaiting || m.State == MemberFailed {
+		m.TurnOpen = false
+		return nil
+	}
+
+	// A finished turn returns the member to idle UNLESS it already submitted for
+	// this stage, and that exception is load-bearing rather than tidy.
+	//
+	// A real agent submits by calling a tool DURING its turn, so stage.submitted
+	// arrives before agent.turn_done. Overwriting the state here would leave a
+	// member with Submitted=true and State=idle, and Runnable() reports idle
+	// members as runnable. That combination is the precise failure the comment on
+	// Runnable warns about: in a staged run where everyone has submitted but the
+	// advance rule cannot be met, the run looks eternally healthy because there
+	// are "runnable" members, so checkQuiescence stays silent and the run sits
+	// stuck forever with no diagnosis. Submitted is cleared on stage entry, so
+	// this cannot leak into the next stage.
+	if !m.Submitted {
+		m.State = MemberIdle
+	}
 	m.Detail = ""
 	m.SinceSeq = e.Seq
+
+	// The turn is over. This is the only place that clears it, so the flag tracks
+	// exactly the interval between activation and completion.
+	m.TurnOpen = false
 
 	if len(m.PendingCauses) == 0 {
 		return nil
 	}
 	causes := m.PendingCauses
 	m.PendingCauses = nil
-	return []Effect{spawnFor(out, *m, c, causes, len(causes))}
+	return spawnCauses(out, m, c, causes, len(causes))
 }
 
 func applyBlocked(out *State, e Event) {
@@ -505,8 +757,7 @@ func applyToolDenied(out *State, e Event) []Effect {
 		return nil
 	}
 
-	id := "inbox-" + strconv.Itoa(out.NextInboxID)
-	out.NextInboxID++
+	id := nextInboxID(out)
 	item := InboxItem{
 		ID:        id,
 		Kind:      "tool_approval",
@@ -514,6 +765,13 @@ func applyToolDenied(out *State, e Event) []Effect {
 		Agent:     e.Actor,
 		OnTimeout: "deny",
 	}
+
+	// Recorded here AND announced as an effect, deliberately, because the member
+	// is put in MemberWaiting in this same step. If the item only arrived with the
+	// inbox.created that the executor emits, the fold between the two events would
+	// hold a member waiting on an approval that the state says does not exist, and
+	// `run why` would report a block it cannot name. The InboxCreated case
+	// tolerates the duplicate by id for exactly this reason.
 	out.Inbox = append(out.Inbox, item)
 
 	if m := out.Member(e.Actor); m != nil {
@@ -524,11 +782,22 @@ func applyToolDenied(out *State, e Event) []Effect {
 	}
 
 	return []Effect{AskHuman{
+		ID:        id,
 		Kind:      item.Kind,
 		Question:  item.Question,
 		Agent:     e.Actor,
 		OnTimeout: item.OnTimeout,
 	}}
+}
+
+// nextInboxID mints the id of a question. It lives in the reducer, and not in
+// whoever executes the AskHuman, because the id has to be derivable from the log
+// alone: two folds of the same events must produce the same ids, or a resumed run
+// cannot match an answer given to the run before it.
+func nextInboxID(out *State) string {
+	id := "inbox-" + strconv.Itoa(out.NextInboxID)
+	out.NextInboxID++
+	return id
 }
 
 func applyInboxReplied(out *State, e Event, c Config) []Effect {
@@ -551,10 +820,46 @@ func applyInboxReplied(out *State, e Event, c Config) []Effect {
 		if out.Status == StatusBlocked {
 			out.Status = StatusRunning
 		}
-		fx = append(fx, spawnFor(out, *m, c, []string{e.ID}, 0))
+		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
 	}
 	if out.Status == StatusBlocked {
 		out.Status = StatusRunning
+		fx = append(fx, drainParked(out, c)...)
+	}
+	return fx
+}
+
+// drainParked opens the turns that were withheld while the run was blocked.
+//
+// It exists because unblocking the RUN is not the same as unblocking a MEMBER.
+// The loop above resumes members whose BlockedOn names this question, which is
+// the tool-approval shape: one member, one question. A budget question belongs to
+// nobody -- it halts the whole run -- so no member's BlockedOn ever matches it and
+// that loop resumes exactly zero of them. Meanwhile spawnCauses has been parking
+// the causes of every turn it declined to open.
+//
+// Without this drain, answering "raise" flipped the status back to running and
+// left every parked cause where it was. The run then had nobody working, nobody
+// blocked and nothing armed, so checkQuiescence fired and reported the stage's
+// advance rule as unsatisfiable -- sending the user to debug a blueprint that was
+// correct, about work this reducer was holding. Paying for more bought silence.
+func drainParked(out *State, c Config) []Effect {
+	var fx []Effect
+	for i := range out.Members {
+		m := &out.Members[i]
+		if len(m.PendingCauses) == 0 || m.Busy() || m.State == MemberFailed {
+			continue
+		}
+		if m.State == MemberWaiting {
+			// Still blocked on something of its own. Its causes stay parked and
+			// are drained by whatever resolves that block, so a member waiting on
+			// an approval is not handed a turn by an unrelated answer.
+			continue
+		}
+		causes := m.PendingCauses
+		m.PendingCauses = nil
+		m.State = MemberIdle
+		fx = append(fx, spawnFor(out, *m, c, causes, len(causes)))
 	}
 	return fx
 }
@@ -603,12 +908,26 @@ func applyCost(out *State, e Event, c Config, fx *[]Effect) {
 		return
 	}
 	if out.TreeSpentUSD >= out.BudgetUSD {
+		// Report the breach ONCE. Being over the ceiling stays true for every
+		// later cost event, so without this flag a run that overshoots emits a
+		// budget.exceeded per turn and asks a separate human question for each,
+		// every one of them carrying OnTimeout "fail". Four identical questions
+		// mean four ways to fail a run whose budget somebody already raised.
+		if out.BudgetBlocked {
+			return
+		}
+		out.BudgetBlocked = true
 		*fx = append(*fx, Emit{Event: derived(out, e, BudgetExceeded, map[string]any{
 			"tree_spent_usd": out.TreeSpentUSD,
 			"budget_usd":     out.BudgetUSD,
 		})})
 		return
 	}
+
+	// Back under the ceiling: the breach is over, so a future one is a new fact
+	// that must be reported again. This is the path a raised budget takes, and
+	// without it raising the budget buys silence rather than headroom.
+	out.BudgetBlocked = false
 	if !out.BudgetWarned && out.TreeSpentUSD >= out.BudgetUSD*c.BudgetWarnPct {
 		out.BudgetWarned = true
 		*fx = append(*fx, Emit{Event: derived(out, e, BudgetWarning, map[string]any{
@@ -645,6 +964,27 @@ func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 		}
 	}
 	if out.ActiveTimer != "" || anyBusy(*out) || anyRunnable(*out) {
+		return nil
+	}
+
+	// A stage that has already resolved is not silence: its stage.advanced and
+	// stage.entered were emitted and are on their way, and entering the next
+	// stage wakes everybody who participates in it.
+	//
+	// This closes a false positive that only appears once events are appended in
+	// batches, which is what a real turn does. The lifecycle of a turn lands as
+	// several events, so the submit that satisfies the rule is folded before the
+	// turn_done that follows it in the same batch, while the advance it emitted is
+	// appended after. Folding that turn_done therefore saw a stage where everyone
+	// submitted, nothing armed and nobody runnable, and concluded the run was
+	// stuck forever -- with the diagnosis "the rule is unsatisfiable with this
+	// blueprint" about a stage that had in fact just completed.
+	//
+	// ADR-0004 is explicit that this is the expensive direction to get wrong: a
+	// false positive destroys trust in the signal, and an ignored signal is worse
+	// than no signal because it is ignored exactly when it is true. It also cost
+	// money here, since the watcher woken by it opened a turn nobody asked for.
+	if out.StageResolved {
 		return nil
 	}
 	for _, it := range out.Inbox {
@@ -725,14 +1065,14 @@ func wakeWatchers(out *State, e Event, c Config) []Effect {
 				continue
 			}
 			m.State = MemberIdle
-			fx = append(fx, spawnFor(out, *m, c, []string{e.ID}, 0))
+			fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
 		default: // activate
 			if m.Busy() || m.State == MemberWaiting {
 				m.PendingCauses = append(m.PendingCauses, e.ID)
 				continue
 			}
 			m.State = MemberIdle
-			fx = append(fx, spawnFor(out, *m, c, []string{e.ID}, 0))
+			fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
 		}
 	}
 	return fx
@@ -749,6 +1089,40 @@ func matchPattern(pattern, typ string) bool {
 		return strings.HasPrefix(typ, strings.TrimSuffix(pattern, "*"))
 	}
 	return false
+}
+
+// spendingHalted reports that no new paid turn may be opened right now, and it
+// is the difference between a status and a ceiling.
+//
+// Setting Status = StatusBlocked on budget.exceeded only labelled the run. The
+// six spawnFor sites never consulted it, so a run that broke a 5.00 budget went
+// on entering stages and opening turns and finished having spent 40.00 -- eight
+// times the number the user typed, with the overshoot happening AFTER the
+// reducer had already noticed and asked about it. `--budget` was documented,
+// enforced by a status nothing read, and settled by the invoice.
+//
+// Paused is included for the same reason. `run pause` that keeps paying for
+// turns is not a pause, and the user watching the spend go up has no way to make
+// it stop short of cancelling and losing the work.
+//
+// The cause is QUEUED by the callers rather than dropped, which is the whole
+// reason this is a guard and not an early return. Raising the budget must resume
+// the work that was withheld; if the causes were discarded, answering "raise"
+// would unblock a run with nothing left to do and the stage would then die of
+// silence, blaming the blueprint for a decision taken here.
+func spendingHalted(s State) bool {
+	return s.Status == StatusBlocked || s.Status == StatusPaused
+}
+
+// spawnCauses either opens the turn or parks its causes on the member, and every
+// site that wants a turn goes through it so the budget cannot be enforced in
+// five places and forgotten in the sixth.
+func spawnCauses(out *State, m *Member, c Config, causes []string, coalesced int) []Effect {
+	if spendingHalted(*out) {
+		m.PendingCauses = append(m.PendingCauses, causes...)
+		return nil
+	}
+	return []Effect{spawnFor(out, *m, c, causes, coalesced)}
 }
 
 func spawnFor(out *State, m Member, c Config, causes []string, coalesced int) Effect {

@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -311,6 +312,68 @@ func (r *RealClock) Due() []string {
 		r.fired = append(r.fired, d.id)
 	}
 	return out
+}
+
+// NextDeadlineMs returns how long until the next timer fires, and whether any
+// timer is armed at all. Same contract as VirtualClock.NextDeadlineMs,
+// deliberately: the run loop calls this through one interface and must not be
+// able to tell which clock answered.
+//
+// The floor of 1 ms is the same load-bearing detail as in the virtual clock. A
+// timer already past due yields 1 rather than 0, because the loop advances by
+// this amount in order to make progress, and a 0 would let it wait zero
+// milliseconds forever — reporting success and changing nothing while the run
+// hangs looking busy.
+func (r *RealClock) NextDeadlineMs() (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.timers) == 0 {
+		return 0, false
+	}
+	now := r.now()
+	first := true
+	var earliest time.Time
+	for _, at := range r.timers {
+		if first || at.Before(earliest) {
+			earliest, first = at, false
+		}
+	}
+	delta := earliest.Sub(now).Milliseconds()
+	if delta < 1 {
+		delta = 1
+	}
+	return delta, true
+}
+
+// Sleep waits for byMs milliseconds, or until the context is cancelled.
+//
+// This is the ONLY blocking call in the run path, and concentrating it here is
+// what keeps everything else testable without a sleep anywhere: the reducer is
+// pure, the runner never waits, and the loop waits only through this method.
+//
+// It selects on ctx.Done rather than sleeping outright because a cancelled run
+// has to stop now. A bare time.Sleep would make `run cancel` wait out the
+// remainder of a thirty-minute stage timeout before noticing, and the user would
+// reasonably conclude that cancel does not work.
+//
+// A cancelled wait returns nil, not the context error, and that distinction is
+// deliberate: the wait genuinely ended, and the loop's own ctx.Err() check at the
+// top of its next iteration is what turns cancellation into StopCancelled.
+// Returning an error here would surface an ordinary cancellation as a failure of
+// the clock.
+func (r *RealClock) Sleep(ctx context.Context, byMs int64) error {
+	if byMs <= 0 {
+		return nil
+	}
+	t := time.NewTimer(time.Duration(byMs) * time.Millisecond)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 // TakeFired drains the fired queue, same contract as VirtualClock.TakeFired.
