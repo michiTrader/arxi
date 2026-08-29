@@ -90,7 +90,7 @@ sync:
 |---|---|---|---|
 | `["run","start"]` | `run start` | `iash_run_start` | `run.start` |
 
-There are **45 declared capabilities**, of which **32 are exposed as tools** to
+There are **47 declared capabilities**, of which **33 are exposed as tools** to
 the agents. The difference is not an oversight: there are things a human can do
 from the terminal that an agent should not be able to do to itself. `iash
 surface` shows all of them; `iash schema` emits the manifest an agent consumes.
@@ -157,7 +157,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **713 tests, no dependencies**.
+Underneath, every package is done and tested — **714 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -176,7 +176,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
-| `internal/surface` | the capability manifest every command is checked against | 28 |
+| `internal/surface` | the capability manifest every command is checked against | 29 |
 | `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 150 |
 | `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
 | `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |

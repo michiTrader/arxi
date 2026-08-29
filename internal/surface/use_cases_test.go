@@ -28,10 +28,104 @@ func readUseCases(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("cannot read %s: %v\n"+
 			"This file is part of the design, not decoration: it is what proves the "+
-			"45 declared capabilities are sufficient and reachable. If it was renamed, "+
+			"declared capabilities are sufficient and reachable. If it was renamed, "+
 			"update useCaseDoc; if it was deleted, restore it.", useCaseDoc, err)
 	}
 	return string(b)
+}
+
+// countedDocs are every file that states the capability split in prose.
+//
+// TestUseCasesDocumentToolCount guarded only the design document, and the two
+// files here drifted for exactly that reason: they made the same claim with
+// nothing tying it to the registry. When `trigger run` was declared, the design
+// doc turned the build red and was fixed in the same commit, while these two sat
+// at "45 capabilities, 32 tools" — two capabilities and one tool out of date.
+//
+// The numbers themselves are minor. The claim they support is not: the gap
+// between capabilities and tools is a security boundary, and a reader deciding
+// whether to trust it has no way to tell a current count from a stale one.
+var countedDocs = []string{
+	"../../README.md",
+	"../../AGENTS.md",
+}
+
+// TestEveryDocumentStatingTheSplitIsCurrent checks the counts wherever they
+// appear, not just where somebody remembered to write a test.
+//
+// It reads the two numbers out of each document rather than requiring an exact
+// sentence, because the three files word the claim differently and pinning
+// phrasing would make every rewording a test failure. What must not drift is
+// the arithmetic.
+//
+// A document that states neither number is not a failure — most files have no
+// business repeating it. This only catches the ones that took on the obligation
+// by stating it and then let it rot.
+func TestEveryDocumentStatingTheSplitIsCurrent(t *testing.T) {
+	tools := 0
+	for _, c := range Registry {
+		if c.Kind&AgentTool != 0 {
+			tools++
+		}
+	}
+	total := len(Registry)
+
+	// Matches "47 declared capabilities", "declares 47 capabilities", and the
+	// bolded variants, without caring which the author chose.
+	capRe := regexp.MustCompile(`(?:\*\*)?(\d+)(?:\*\*)? declared capabilities|declares (?:\*\*)?(\d+)(?:\*\*)? capabilities`)
+	toolRe := regexp.MustCompile(`(?:\*\*)?(\d+)(?:\*\*)? (?:are )?exposed as (?:agent )?tools|(?:\*\*)?(\d+)(?:\*\*)? are exposed as agent tools`)
+
+	for _, path := range countedDocs {
+		b, err := os.ReadFile(filepath.FromSlash(path))
+		if err != nil {
+			t.Errorf("cannot read %s: %v\n"+
+				"if the file moved, update countedDocs; this test is what keeps "+
+				"its capability counts honest.", path, err)
+			continue
+		}
+		doc := string(b)
+
+		if got, ok := firstNumber(capRe.FindStringSubmatch(doc)); ok && got != total {
+			t.Errorf("%s says %d declared capabilities; the registry has %d.\n"+
+				"why this matters: the gap between capabilities and agent tools is a "+
+				"security boundary, and a stale count is a claim the reader cannot "+
+				"verify.\n"+
+				"what to do: correct the number in %s. It drifted because only "+
+				"docs/design was test-guarded; this test now covers this file too.",
+				path, got, total, path)
+		}
+
+		if got, ok := firstNumber(toolRe.FindStringSubmatch(doc)); ok && got != tools {
+			t.Errorf("%s says %d capabilities are exposed as agent tools; the "+
+				"registry exposes %d.\n"+
+				"why this matters: this is the number an agent's blast radius is read "+
+				"off. Understating it is the dangerous direction.\n"+
+				"what to do: correct the number in %s, and if a capability crossed "+
+				"the line, say why where the exclusions are listed.",
+				path, got, tools, path)
+		}
+	}
+}
+
+// firstNumber returns the first non-empty capture of a regexp match.
+//
+// The patterns above have alternating groups so they can accept more than one
+// phrasing; only one branch matches, so the rest are empty strings.
+func firstNumber(m []string) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	for _, g := range m[1:] {
+		if g == "" {
+			continue
+		}
+		n := 0
+		for _, r := range g {
+			n = n*10 + int(r-'0')
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 // TestEveryCapabilityHasAUseCase fails if a declared capability is not reachable
