@@ -457,6 +457,22 @@ func TestDueReadsNoClockOfItsOwn(t *testing.T) {
 			first.ShouldFire, first.Runs, first.Why,
 			second.ShouldFire, second.Runs, second.Why)
 	}
+
+	// The REASON too, and this half is what the assertion above cannot see.
+	//
+	// Mutation testing deleted the `now = now.UTC()` normalisation and every
+	// test still passed: the decisions are all instant comparisons, which are
+	// zone-independent, so ShouldFire and Runs are identical either way. What
+	// changes is the timestamp printed in Why -- a scheduler on a laptop in
+	// UTC+13 would log "due at 2026-08-29T16:00:00+13:00" for a firing an
+	// operator configured as 03:00, and two machines' logs of the same event
+	// would not be comparable by eye or by grep.
+	if first.Why != second.Why {
+		t.Errorf("the reason changed with the caller's timezone:\n"+
+			"  UTC:    %q\n  UTC+13: %q\n"+
+			"  a trigger's schedule is written in UTC, so the instant it "+
+			"reports must be too", first.Why, second.Why)
+	}
 }
 
 // TestALeapDayIsAnOrdinaryTestHere is the case the arch rule about the wall

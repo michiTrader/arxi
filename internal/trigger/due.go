@@ -107,6 +107,20 @@ func Due(r Record, now time.Time) (Decision, error) {
 		return Decision{Why: "fires on an external event, not a schedule"}, nil
 	}
 
+	// Normalised, and this line is redundant today.
+	//
+	// Mutation testing removed it and nothing failed. I assumed the leak would
+	// show up in the timestamps inside Why and strengthened a test to catch it
+	// -- the mutation survived that too, which was the useful result: the
+	// assumption was wrong. Every instant this function prints comes from
+	// s.Next(), which builds its own UTC time; `now` is only ever COMPARED
+	// against (After, Equal), and those are zone-independent by definition.
+	//
+	// So it is kept as a normalisation of the input at the boundary rather than
+	// as a load-bearing conversion, on the grounds that the next person to add
+	// a `now.Format(...)` or a `now.Day()` below should not have to rediscover
+	// this. That is a judgement, not a test result, and it is written down as
+	// one so nobody later reads the line as proof that something depends on it.
 	now = now.UTC()
 
 	// The first firing.
