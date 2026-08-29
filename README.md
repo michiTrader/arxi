@@ -157,7 +157,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **701 tests, no dependencies**.
+Underneath, every package is done and tested — **713 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -177,12 +177,12 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
 | `internal/surface` | the capability manifest every command is checked against | 28 |
-| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 149 |
+| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 150 |
 | `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
 | `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
 | `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
-| `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 126 |
+| `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 137 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 16 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -322,6 +322,16 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
+**12 of 47 declared capabilities are wired — 25.5%.** That figure is measured,
+not estimated: a probe walks `surface.Registry`, invokes every declared path
+against the built binary, and counts the ones that do not answer *"declared but
+not implemented"*. It is the honest denominator, and it is deliberately
+unflattering — the 35 that remain are mostly `run *`, `agent *`, `state *`,
+`event *` and `inbox *`, all of which want the live executor that `run start`
+is missing. The implemented twelve are `run start` (`--sim`), `blueprint
+validate`, `trigger create` / `list` / `show` / `pause` / `run`, `eval run` /
+`list` / `compare`, `schema` and `serve`.
+
 Missing: the live executor behind `run start` — the loop, the log and the
 reducer are done and driven end to end by `--sim`; what is absent is the thing
 that actually calls a model.
@@ -344,9 +354,46 @@ oversleeps for a week reports six missed firings and applies `--on-missed` to
 them. There is no drift correction and no catch-up queue, because the store
 already is the queue — durably, across restarts.
 
-What is still not wired is the **command that starts it**: nothing in the
-surface says `iash scheduler run`, so the tick has no caller outside its own
-tests.
+`iash trigger run` is the command that starts it. `--once` checks and exits,
+which is what a systemd timer or a cron entry wants; without it the process
+loops on `--interval` until interrupted. `--dry-run --once` reports what would
+fire and starts nothing:
+
+```bash
+$ iash trigger run --dry-run --once
+  would run: schema
+nightly-audit            started      first firing, due at 2026-08-29T02:09:51Z
+
+$ iash trigger run --interval 30s
+watching 1 trigger(s), checking every 30s
+nightly-audit            waiting      not due until 2026-08-29T03:00:00Z
+```
+
+Each firing is a **child process**, not a goroutine. `--then "trigger run"` is
+a legal trigger, and in one process that is a stack overflow rather than a
+visible pile of subprocesses; `cancel-previous` has to be able to stop work
+that is not cooperating, and a goroutine cannot be killed; and a scheduled run
+that panics must not take an unattended scheduler with it.
+
+Two findings from wiring it are worth recording, because both were invisible
+until the binary was actually run twice in a row.
+
+**`--dry-run` was consuming the slot it previewed.** A firing has two effects
+and only one had been faked: the child process was suppressed, and the store
+write was not. `Tick` records `last_fired_at` for every firing it admits — that
+is what makes a slot stop being due — so the preview advanced the schedule and
+the real run a second later answered "not due until". The safest-looking flag
+in the command was the only one that could silently skip a scheduled run. None
+of the scheduler's own 31 tests could have caught it: they use a fake store and
+correctly assert that `Tick` *does* save. The CLI is where the two fakes are
+chosen, so the CLI is the only layer where the omission existed.
+
+**Declaring the capability hung the test suite.** The test that checks no
+declared subcommand is called "unknown" reads the registry instead of
+hand-listing subcommands — the right design, and exactly why it reached
+`trigger run` and invoked it with no arguments, which loops forever on purpose.
+One package sat in `os/exec` until the timeout while the other eleven stayed
+green. A registry-derived test cannot assume the commands it discovers return.
 
 Eval runs now persist. `eval run` writes one file per run, `eval list` shows
 what exists, and `eval compare` reads two of them:
