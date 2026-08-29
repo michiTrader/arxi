@@ -134,8 +134,45 @@ func Due(r Record, now time.Time) (Decision, error) {
 		if first.After(now) {
 			return Decision{Why: "not due until " + first.Format(time.RFC3339)}, nil
 		}
+
+		// The slot being ACTED ON, which is not necessarily the first one.
+		//
+		// This reported `first` until a test asked it to name the firing it
+		// acted on and got 2026-08-01T03:00:00Z for a run happening on the
+		// 2nd. The difference only appears when a never-fired trigger has been
+		// sitting through several slots -- the process was down, or the trigger
+		// was created and the scheduler started days later -- and in exactly
+		// that case a stale timestamp in the log is the thing an operator would
+		// use to conclude the clock is wrong.
+		//
+		// Deliberately NOT a backlog: a trigger that has never fired has missed
+		// nothing (see Missed), so this is one run at the most recent due slot,
+		// whatever --on-missed says. The alternative -- treating the gap since
+		// creation as owed work -- is what would make a trigger created six
+		// years ago start thousands of paid runs the first time a scheduler
+		// sees it.
+		// Bounded by the same cap Missed uses, and for a sharper reason here.
+		//
+		// Walking every slot is correct but linear in the gap: `every:1m`
+		// created six years ago is 3.5 million steps, which measured at ~76ms.
+		// Once is survivable; a scheduler runs this for every trigger on every
+		// tick, so a handful of such records is seconds of spin per minute
+		// forever -- and the answer never changes.
+		//
+		// Past the cap the walk stops and reports the last slot it reached,
+		// which is honest: this branch fires exactly one run regardless, so the
+		// cap can only affect the TIMESTAMP in the reason, never the decision.
+		// A slightly stale instant in a log line is worth a bounded loop.
+		latest := first
+		for i := 0; i < missedCap; i++ {
+			next, err := s.Next(latest)
+			if err != nil || next.After(now) {
+				break
+			}
+			latest = next
+		}
 		return Decision{ShouldFire: true, Runs: 1,
-			Why: "first firing, due at " + first.Format(time.RFC3339)}, nil
+			Why: "first firing, due at " + latest.Format(time.RFC3339)}, nil
 	}
 
 	missed, capped, err := r.Missed(now)
