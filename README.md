@@ -19,18 +19,29 @@ Pure. It does not look at the clock, does not touch the network, does not write
 anything. Everything it wants to happen in the world it **describes** as an
 `Effect` and returns; somebody else runs it.
 
-That restriction is not aesthetic. It is what makes four features be one:
+That restriction is not aesthetic. It is what makes four features be one fold
+over the same reducer, differing only in what is plugged into it:
 
-| feature | what it is |
-|---|---|
-| `iash run` | fold + real executor |
-| `iash run --sim` | fold + fake executor |
-| `iash run replay` | fold over an old log, with no executor |
-| `iash run why` | read the `State` that came out of the fold |
+| feature | what it is | state |
+|---|---|---|
+| `iash run --sim` | fold + fake executor | **works** |
+| `iash why` | read the `State` that came out of the fold | **works** |
+| `iash run start` | fold + real executor | fold works, executor absent |
+| `run replay` | fold over an old log, with no executor | declared, not built |
 
-In a design where the reducer calls the network, `replay` is a second program
-that reimplements the logic of the first. It is always out of date and nobody
-notices until the moment they need it.
+The `state` column was added after this table was caught overclaiming. It listed
+all four as features; `iash run replay` and `iash run why` both answer *"declared
+in the surface but not implemented yet"*, and `Replay` appears nowhere in the
+source except inside a comment. What is real is `iash why` — a different command,
+taking a state file rather than a run id — and the fold itself, which `--sim`
+drives end to end.
+
+The architectural claim survives that correction, and is worth separating from
+the delivery claim: in a design where the reducer calls the network, `replay` is
+a second program that reimplements the logic of the first, always out of date and
+nobody notices until the moment they need it. Here it is a fold with the executor
+left out, which is why it is a small job that has not been done rather than a
+parallel implementation that has to be kept honest.
 
 And the purity is **verified, not promised**: `internal/arch_test.go` runs
 `go list` over the package and fails if the kernel imports `time`, `net`, `os`
