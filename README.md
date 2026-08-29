@@ -146,7 +146,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **625 tests, no dependencies**.
+Underneath, every package is done and tested — **701 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -166,12 +166,13 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
 | `internal/surface` | the capability manifest every command is checked against | 28 |
-| `internal/trigger` | schedules, and what a trigger is allowed to invoke | 106 |
+| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 149 |
 | `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
+| `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
 | `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
 | `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 126 |
-| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 14 |
+| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 16 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
@@ -310,9 +311,31 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-Missing: the live executor behind `run start` (the loop, the log and the
+Missing: the live executor behind `run start` — the loop, the log and the
 reducer are done and driven end to end by `--sim`; what is absent is the thing
-that actually calls a model) and the trigger **scheduler**.
+that actually calls a model.
+
+The trigger **scheduler** exists as of this change, and is worth describing
+precisely because the split is the interesting part. `internal/trigger` decides,
+purely: `Due` says whether a slot has arrived and how many runs are owed after an
+outage, `Admit` says what to do about that given what is already running.
+`internal/scheduler` is the caller that owns a clock, a store and a subprocess,
+and its `Tick(now)` takes the instant as a **parameter** — which is why a
+four-day outage, an execution that outlives three of its own slots, and a run
+that ignores its own cancellation are all ordinary table entries rather than
+tests that wait.
+
+One finding from building it is worth stating, because it is what makes the loop
+small: **the tick interval is a latency knob, not a correctness one.** Dueness is
+derived from `last_fired_at` on every pass, so a slot that is not acted on stays
+due. A scheduler that oversleeps runs the trigger late and says so; one that
+oversleeps for a week reports six missed firings and applies `--on-missed` to
+them. There is no drift correction and no catch-up queue, because the store
+already is the queue — durably, across restarts.
+
+What is still not wired is the **command that starts it**: nothing in the
+surface says `iash scheduler run`, so the tick has no caller outside its own
+tests.
 
 Eval runs now persist. `eval run` writes one file per run, `eval list` shows
 what exists, and `eval compare` reads two of them:
