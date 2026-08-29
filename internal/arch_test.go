@@ -507,3 +507,79 @@ func TestTheEvalStoreDoesNotDecideWhatARunMeans(t *testing.T) {
 		}
 	}
 }
+
+// TestTheSchedulerDoesNotDecideWhenAThingIsDue is the rule that keeps the
+// scheduler thin.
+//
+// internal/trigger answers two questions purely — Due says whether a slot has
+// arrived and how many runs are owed, Admit says what to do about that given
+// what is already running — and internal/scheduler is the caller that owns a
+// clock, a store and a subprocess. The value of that split is entirely in it
+// being one-directional: the moment the scheduler computes dueness itself,
+// there are two implementations of "is it 3am yet", one of which is tested with
+// literal timestamps and one of which is tested by waiting.
+//
+// The specific drift this prevents is a plausible-looking convenience. A
+// scheduler holding a Record and a `now` is one line away from
+// `r.Next(now).Before(now)` inlined into the loop as a cheap pre-filter, or a
+// `strings.HasPrefix(r.On, "cron:")` special case to skip records it thinks
+// cannot be due. Both would work on the day they were written and both would
+// then disagree with Due about a leap day, a paused trigger, or a schedule with
+// no future.
+//
+// So the ban is on the two packages that make a second schedule parser
+// possible. `time` is NOT banned: the scheduler's whole job is to hold a clock.
+func TestTheSchedulerDoesNotDecideWhenAThingIsDue(t *testing.T) {
+	banned := map[string]string{
+		"regexp":  "a schedule is parsed by internal/trigger. A regexp in the scheduler is a second parser for `on`, and it will disagree with the first about exactly the cases nobody tests twice",
+		"strconv": "turning schedule text into numbers is ParseSpec's job. A scheduler that reads `every:15m` for itself has an opinion about what a trigger means, and Due's tests no longer cover the thing that runs",
+	}
+	for _, imp := range list(t, mod+"internal/scheduler").Imports {
+		if why, bad := banned[imp]; bad {
+			t.Errorf("internal/scheduler imports %s.\n  why this is wrong: %s\n"+
+				"  what to do: ask internal/trigger. If the answer it gives is "+
+				"wrong, fix it there, where a four-day outage is a table entry "+
+				"rather than a four-day test.", imp, why)
+		}
+	}
+}
+
+// TestTheSchedulerDoesNotReachPastItsInterfaces.
+//
+// The scheduler declares Store, Runner and Execution and takes them as
+// parameters. It must not import trigstore or exec to get at the real ones,
+// and this is not tidiness — it is the only reason its tests can arrange the
+// cases that matter.
+//
+// With a *trigstore.Store, "the firing started and could not be recorded" needs
+// a read-only directory, which behaves differently as root and is therefore
+// tested nowhere; with the interface it is a struct field. With a real
+// executor, "the work ignored its cancellation and is still spending" needs a
+// process that ignores signals; with the interface it is a fake whose Cancel
+// deliberately does nothing. Those two cases are the worst failures this
+// package has, and both would be comments instead of tests.
+//
+// internal/trigger is permitted and is the point: Due, Admit and Record are
+// what the scheduler is a caller OF.
+func TestTheSchedulerDoesNotReachPastItsInterfaces(t *testing.T) {
+	permitted := map[string]bool{
+		mod + "internal/trigger": true,
+		mod + "internal/surface": true, // inherited through trigger's ParseAction
+		mod + "internal/kernel":  true, // inherited
+	}
+	for _, d := range list(t, mod+"internal/scheduler").Deps {
+		if !strings.HasPrefix(d, mod) || permitted[d] {
+			continue
+		}
+		t.Errorf("internal/scheduler depends on %s.\n"+
+			"  why this is wrong: the scheduler names what it needs as Store, "+
+			"Runner and Execution, and taking the concrete types instead would "+
+			"cost the two tests that matter most — a firing that starts and "+
+			"cannot be recorded (which repeats forever), and work that ignores "+
+			"cancellation while it is still spending. Both are struct fields "+
+			"today; against the real types they are a read-only directory and a "+
+			"process that ignores signals.\n"+
+			"  what to do: widen the interface, and let cmd/iash pass the real "+
+			"implementation in.", d)
+	}
+}
