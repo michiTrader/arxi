@@ -213,9 +213,13 @@ func TestANegativeRunningCountIsRefusedRatherThanClamped(t *testing.T) {
 	// Clamping to zero would start the firing and carry on with a scheduler
 	// that has demonstrably lost track of its own subprocesses; every
 	// subsequent overlap answer would be fiction.
-	_, err := Admit(with(OverlapSkip), fires(), -1)
+	a, err := Admit(with(OverlapSkip), fires(), -1)
 	if err == nil {
 		t.Fatal("a negative in-flight count was accepted")
+	}
+	if a != (Admission{}) {
+		t.Errorf("an error came back with an actionable admission %+v: a caller "+
+			"that logs the error and carries on would act on it", a)
 	}
 	if !strings.Contains(err.Error(), "nightly-audit") {
 		t.Errorf("error does not name the trigger: %v", err)
@@ -230,10 +234,19 @@ func TestAnUnknownOverlapIsRefusedRatherThanSilentlyNeverFiring(t *testing.T) {
 	// is ever added to the vocabulary without being taught to Admit is a loud
 	// error, not a trigger that quietly stops firing.
 	r := with("eventually")
-	_, err := Admit(r, fires(), 1)
+	a, err := Admit(r, fires(), 1)
 	if err == nil {
 		t.Fatal("an unknown overlap policy was accepted, and the trigger would " +
 			"silently never fire")
+	}
+	// Found by mutation testing: returning Admission{Start: 1} beside this
+	// error survived the whole suite, because every test here only asserted
+	// err != nil. A scheduler that logs a failure for one trigger and carries
+	// on to the next -- which is the correct thing for it to do -- would have
+	// started a run off the back of a policy nothing understands.
+	if a != (Admission{}) {
+		t.Errorf("an error came back with an actionable admission %+v: a caller "+
+			"that logs the error and carries on would act on it", a)
 	}
 	if !strings.Contains(err.Error(), "eventually") {
 		t.Errorf("error does not name the unhandled value: %v", err)
