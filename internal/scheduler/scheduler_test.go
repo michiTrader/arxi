@@ -73,15 +73,22 @@ func (e *fakeExec) finish() { close(e.done) }
 
 // fakeRunner records what it was asked to start.
 type fakeRunner struct {
-	started  []trigger.Action
-	recs     []trigger.Record
-	execs    []*fakeExec
-	err      error
+	started []trigger.Action
+	recs    []trigger.Record
+	execs   []*fakeExec
+	err     error
+
+	// attempts counts every call, including the ones that fail. started counts
+	// only the successes, and the DIFFERENCE is what distinguishes "gave up
+	// after a failure" from "retried the rest of the backlog immediately".
+	attempts int
+
 	failFrom int  // fail on the Nth Start onwards; 0 means never
 	nilExec  bool // return (nil, nil): a runner that lies about succeeding
 }
 
 func (r *fakeRunner) Start(rec trigger.Record, a trigger.Action) (Execution, error) {
+	r.attempts++
 	n := len(r.started) + 1
 	if r.err != nil && (r.failFrom == 0 || n >= r.failFrom) {
 		return nil, r.err
@@ -513,7 +520,7 @@ func TestOneBrokenTriggerDoesNotStopTheOthers(t *testing.T) {
 	broken.CreatedAt = "not a timestamp"
 
 	ok := nightly()
-	s, _, rn, reports := harness(t, broken, ok)
+	s, st, rn, reports := harness(t, broken, ok)
 
 	if err := s.Tick(rfc("2026-08-02T03:00:00Z")); err != nil {
 		t.Fatalf("one bad record stopped the whole tick: %v", err)
@@ -529,6 +536,80 @@ func TestOneBrokenTriggerDoesNotStopTheOthers(t *testing.T) {
 	}
 	if !sawErr {
 		t.Error("the broken trigger failed silently")
+	}
+	// Found by mutation testing: dropping the `return` after reporting a Due
+	// failure survived the whole suite, because this test only checked that
+	// SOMETHING was started and that an error was reported. It never checked
+	// that the broken trigger was not itself acted on -- and a record whose
+	// dueness could not be decided must not then be started off the zero
+	// Decision that comes back with the error.
+	for _, rec := range rn.recs {
+		if rec.Name == "broken" {
+			t.Error("a trigger whose dueness could not be decided was started " +
+				"anyway, off the zero Decision returned with the error")
+		}
+	}
+	for _, rec := range st.saved {
+		if rec.Name == "broken" {
+			t.Error("a trigger that could not be decided had its firing recorded, " +
+				"so the failure is now invisible on the next tick")
+		}
+	}
+}
+
+// TestATriggerWithAnUnknownOverlapIsRefusedBeforeItIsAdmitted records a
+// finding rather than a behaviour, and the finding is that Admit's error
+// CANNOT BE REACHED through Tick.
+//
+// I wrote this test to kill a surviving mutation -- deleting the `return`
+// after an Admit failure -- and it would not die. Probing the two layers
+// separately explained why, and the answer was not what the test assumed:
+//
+//	Due err   = trigger "nightly-audit" has overlap "eventually", which is
+//	            not one of skip, queue, parallel, cancel-previous
+//	Admit err = <nil>
+//
+// Due calls Validate first, so a bad policy is refused one layer earlier and
+// tickOne returns on THAT error. And Admit only consults the policy when work
+// is already running; with an idle trigger it returns before the switch. Its
+// other error, a negative in-flight count, is unreachable by construction
+// because the argument is a len().
+//
+// So the mutation is equivalent, and the `return` it deletes is defence in
+// depth rather than a live branch. That is worth keeping -- Due's validation
+// is not Admit's to rely on, and the day someone reorders those two calls the
+// branch becomes load-bearing -- but it is NOT worth a test that contorts the
+// scheduler into reaching it, which is what I tried first and threw away. A
+// test that fakes its way to an unreachable line documents the fake, not the
+// code.
+//
+// What is asserted instead is the layer that really does the refusing.
+func TestATriggerWithAnUnknownOverlapIsRefusedBeforeItIsAdmitted(t *testing.T) {
+	r := nightly()
+	r.Overlap = "eventually"
+
+	st := &fakeStore{recs: []trigger.Record{r}}
+	rn := &fakeRunner{}
+	var reports []Report
+	s, err := New(st, rn, func(rp Report) { reports = append(reports, rp) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Tick(rfc("2026-08-02T03:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	if len(rn.started) != 0 {
+		t.Errorf("started %d executions under a policy nothing understands",
+			len(rn.started))
+	}
+	if st.saveCall != 0 {
+		t.Error("recorded a firing that never happened, hiding the failure")
+	}
+	if len(reports) != 1 || reports[0].Err == nil {
+		t.Fatalf("the undecidable trigger was not reported: %+v", reports)
+	}
+	if !strings.Contains(reports[0].Err.Error(), "eventually") {
+		t.Errorf("the report does not name the bad value: %v", reports[0].Err)
 	}
 }
 
@@ -608,6 +689,22 @@ func TestAPartiallyStartedBacklogRecordsWhatDidStart(t *testing.T) {
 	if len(rn.started) != 2 {
 		t.Fatalf("started %d before failing, want 2", len(rn.started))
 	}
+	// Found by mutation testing: `continue` instead of `break` survived,
+	// because the fake fails from the third Start onwards and so both spellings
+	// end with two started. They are not the same, though. `continue` retries
+	// a failing runner once per remaining owed run -- four owed becomes two
+	// more doomed forks in the same tick, forty owed becomes thirty-eight --
+	// and the thing that has just failed is usually the machine (out of
+	// memory, out of process handles), so retrying it immediately in a tight
+	// loop is the worst available response.
+	//
+	// Asserting the ATTEMPTS rather than the successes is what tells the two
+	// apart: break makes exactly three, continue makes four.
+	if rn.attempts != 3 {
+		t.Errorf("the runner was called %d times for a backlog of 4 that failed "+
+			"on the third: want 3, so a failing runner is not retried once per "+
+			"remaining owed run within the same tick", rn.attempts)
+	}
 	if st.saveCall != 1 {
 		t.Fatalf("the two that did start were not recorded, so they will run "+
 			"again next tick: %d saves", st.saveCall)
@@ -641,6 +738,20 @@ func TestARunnerThatReturnsNoExecutionIsRefused(t *testing.T) {
 
 // ---- bookkeeping -----------------------------------------------------------
 
+// TestRunningIsACopyAndNotTheLiveMap cannot fail today, and is kept anyway.
+//
+// Mutation testing could not kill it, and the honest reason is that the
+// property is currently guaranteed by the TYPES rather than by the code:
+// inflight is map[string][]Execution and Running returns map[string]int, so
+// there is no way to alias one to the other even deliberately. My attempt at a
+// mutation was an equivalent mutant -- it allocated a different fresh map --
+// which is a defect in the mutation, not evidence about the test.
+//
+// It stays because the thing it protects is a refactor, not this code: the
+// moment inflight becomes a map[string]int (which is the obvious
+// simplification once somebody notices Running is the only reader), returning
+// it directly compiles, passes every other test in this file, and hands
+// callers a live handle on the scheduler's only piece of state.
 func TestRunningIsACopyAndNotTheLiveMap(t *testing.T) {
 	s, _, _, _ := harness(t, nightly())
 	if err := s.Tick(rfc("2026-08-02T03:00:00Z")); err != nil {
@@ -700,17 +811,39 @@ func TestTickIsNotAffectedByTheZoneItIsHanded(t *testing.T) {
 	utc := rfc("2026-08-02T03:00:00Z")
 	east := utc.In(time.FixedZone("UTC+13", 13*3600))
 
-	a, _, ra, _ := harness(t, nightly())
+	a, sa, ra, _ := harness(t, nightly())
 	if err := a.Tick(utc); err != nil {
 		t.Fatal(err)
 	}
-	b, _, rb, _ := harness(t, nightly())
+	b, sb, rb, _ := harness(t, nightly())
 	if err := b.Tick(east); err != nil {
 		t.Fatal(err)
 	}
 	if len(ra.started) != len(rb.started) {
 		t.Errorf("same instant, different zones: %d vs %d started",
 			len(ra.started), len(rb.started))
+	}
+
+	// The STORED STRING, not just the decision. This is what the mutation
+	// testing found: with `now = now.UTC()` removed the tick still fires
+	// correctly -- the comparisons are zone-independent -- but it writes
+	// "2026-08-02T16:00:00+13:00" into the trigger file.
+	//
+	// That is a real difference and not a cosmetic one, because LastFiredAt is
+	// TEXT that outlives the process which wrote it. Two machines in different
+	// regions sharing a triggers directory would write the same instant two
+	// ways; `trigger list` would show a LAST column whose meaning depended on
+	// which host last fired it, and anybody diffing the files would see
+	// spurious changes. Unlike the identical-looking line in trigger.Due --
+	// which is genuinely redundant, since every instant Due prints comes from
+	// s.Next() -- this one is load-bearing, and now has a test that says so.
+	if sa.saved[0].LastFiredAt != sb.saved[0].LastFiredAt {
+		t.Errorf("the same instant was recorded two ways: %q vs %q",
+			sa.saved[0].LastFiredAt, sb.saved[0].LastFiredAt)
+	}
+	if !strings.HasSuffix(sb.saved[0].LastFiredAt, "Z") {
+		t.Errorf("LastFiredAt %q carries the host's zone into the stored file",
+			sb.saved[0].LastFiredAt)
 	}
 }
 
