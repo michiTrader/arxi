@@ -158,7 +158,7 @@ func TestUseCasesOnlyInvokeRealCommands(t *testing.T) {
 
 // TestUseCasesDocumentToolCount pins the 32/45 split that §20.12 states in prose.
 //
-// The document argues that the 13 non-tools are a security boundary and explains
+// The document argues that the 14 non-tools are a security boundary and explains
 // each one. If somebody exposes `agent tool policy` as an agent tool, the prose
 // silently becomes false while every other test still passes -- and the false
 // sentence is precisely the one a reader would rely on to trust the boundary.
@@ -176,7 +176,7 @@ func TestUseCasesDocumentToolCount(t *testing.T) {
 	// The two halves are reported separately on purpose: "the registry changed"
 	// and "the prose no longer matches the registry" need different fixes, and a
 	// message that blurs them sends the reader to the wrong file.
-	const statedTools, statedTotal = 33, 46
+	const statedTools, statedTotal = 33, 47
 	const statedPhrase = "**33 are exposed as agent tools**"
 
 	if tools != statedTools || total != statedTotal {

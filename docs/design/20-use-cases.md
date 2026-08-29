@@ -593,6 +593,49 @@ $ iash trigger pause nightly-audit
 `pause`, not delete — the same reasoning as `run pause`. Silencing a noisy
 trigger while investigating should not destroy its configuration and history.
 
+### Something has to be watching the clock
+
+The four commands above are the whole of what a user *configures*, and none of
+them fire anything. `trigger create` writes a file; `trigger list` reads it and
+computes what the next firing *would* be. Until something checks the clock, the
+`NEXT` column is a prediction about a thing that never happens and `LAST` says
+`never` forever.
+
+```
+$ iash trigger run --once
+nightly-audit    started      due at 2026-08-27T03:00:00Z
+weekly-report    not due      next at 2026-08-31T09:00:00Z
+stale-cleanup    skipped      due at 2026-08-27T03:00:00Z; dropped because 1
+                              execution still in flight (overlap: skip)
+```
+
+```
+$ iash trigger run --interval 30s
+```
+
+`trigger run`, not `scheduler run`: the noun already exists, and a second
+top-level verb would present the scheduler as a separate subsystem rather than
+as the thing that makes the other four commands mean anything.
+
+**It is not an agent tool**, and the reason is different from every other
+exclusion in §20.12. Those are withheld for what they do directly. This one is
+withheld for what it does *transitively*: the scheduler starts whatever `--then`
+names, for every stored trigger, unattended, until stopped. An agent permitted to
+start it is an agent permitted to run the union of everything anybody ever
+scheduled — and a human approving "may I run the scheduler?" is not going to
+reconstruct that from the request. `trigger create` is `ask` for a related
+reason; this is the same hole reached from the other side.
+
+`--once` exists because the useful half should be scriptable. A cron entry, a
+systemd timer or a CI step wants one pass and an exit code, not a process to
+supervise — and a single tick is also the only shape of this command that a test
+can drive end to end without waiting on a wall clock.
+
+`--dry-run` reports what *would* fire and starts nothing. The case it is for is
+the one where automation has been silently broken for a month: it prints the
+missed count and the reason for every trigger, which is how an operator finds out
+that "skipped 4 nightly audits" is the actual state of their health dashboard.
+
 ---
 
 ## 20.11 UC-11 — Did the change help? Eval
@@ -669,7 +712,7 @@ message type are three **mechanical projections of one registry entry** —
 synonym anywhere would fork the vocabulary and require a hand-maintained mapping
 forever.
 
-Of 46 declared capabilities, **33 are exposed as agent tools**. The 13 that are
+Of 47 declared capabilities, **33 are exposed as agent tools**. The 14 that are
 not are a security boundary, not an oversight:
 
 | not an agent tool | why an agent must not have it |
@@ -680,6 +723,7 @@ not are a security boundary, not an oversight:
 | `inbox approve`, `inbox reject`, `inbox reply` | these are the human's side of the conversation. An agent that could approve its own inbox item turns `ToolPolicy: ask` into `allow` |
 | `run attach` | a blocking stream that burns a turn while waiting (§20.1) |
 | `design`, `serve` | operator surface: an interactive designer and a socket server |
+| `trigger run` | the only **transitive** exclusion: it starts whatever every stored trigger's `--then` names, unattended. An agent granted this one verb is granted the union of every action anybody ever scheduled, which no human reading the request can reconstruct |
 
 Note two that *are* tools and might look like they should not be. `agent create`
 is exposed, but with `ToolPolicy: ask` — building a sub-team is legitimate and
