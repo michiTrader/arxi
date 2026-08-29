@@ -8,6 +8,7 @@ import (
 
 	"github.com/michiTrader/iash/internal/blueprint"
 	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/iash/internal/surface"
 )
 
 // cmdBlueprintValidate implements `iash blueprint validate <path>`.
@@ -22,14 +23,32 @@ import (
 // forced the worktree). Printing `workspace: worktree` alone invites the user to
 // override it as noise; printing who forced it makes the decision reviewable.
 func cmdBlueprintValidate(args []string) {
+	args, err := expandShort(surface.Lookup("blueprint", "validate"), args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "iash blueprint validate: %v\n", err)
+		os.Exit(2)
+	}
+
 	var path string
 	for _, a := range args {
+		// --path=x and --path x both reach here as long flags after expansion,
+		// so the file can be given either positionally or by name. Accepting
+		// only the position would make -f, which the surface advertises, a flag
+		// that parses and then does nothing.
+		if v, ok := strings.CutPrefix(a, "--path="); ok {
+			path = v
+			continue
+		}
+		if a == "--path" {
+			continue
+		}
 		if !strings.HasPrefix(a, "-") {
 			path = a
 		}
 	}
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "usage: iash blueprint validate <file.yaml>")
+		fmt.Fprintln(os.Stderr, "usage: iash blueprint validate <file.yaml>\n"+
+			"short: -f path")
 		os.Exit(2)
 	}
 

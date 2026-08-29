@@ -127,8 +127,21 @@ var Registry = []Cmd{
 			// for them to know it exists.
 			req(p("budget", "number", "spend ceiling in USD for the whole tree")),
 			def(p("max-turns", "number", "turn ceiling"), "0"),
+			// "auto" is in the enum because it is a real value, not the absence
+			// of one: it means "use whatever the blueprint resolved to", which
+			// is why the binary prints `workspace auto→worktree` instead of just
+			// the answer. It was the declared Default and was missing from the
+			// legal set, so the surface called its own common path illegal —
+			// the protocol validator enforces Enum, so {"workspace": "auto"}
+			// would have been rejected, and the tool schema offered an agent
+			// four values where the CLI accepts five.
+			//
+			// A default outside its own enum is the dangerous direction of that
+			// mismatch. A value nobody types is rejected only when somebody
+			// finally types it; a DEFAULT is rejected on the invocation that
+			// mentions nothing, which is the one every reader assumes is safe.
 			enum(def(p("workspace", "string", "filesystem isolation"), "auto"),
-				"shared", "worktree", "copy", "none"),
+				"auto", "shared", "worktree", "copy", "none"),
 			p("sim", "bool", "run with a fake executor, without spending money"),
 			p("attach", "bool", "follow the output live")}},
 	{Path: []string{"run", "list"}, Desc: "list runs",
@@ -267,11 +280,40 @@ var Registry = []Cmd{
 		Params: []Param{
 			pos(p("name", "string", "trigger name")),
 			req(p("on", "string", "cron:|every:|at:|webhook:|file:|event:")),
-			req(p("then", "string", "run:|emit:|notify:")),
+			// An iash command, with no scheme prefix. This was declared as
+			// "run:|emit:|notify:" and that was a second surface: a
+			// hand-written vocabulary of things a trigger can do, parallel to
+			// the registry it is sitting in. It had already drifted before any
+			// trigger code existed — `notify` is not a command here, has no
+			// entry, and nothing says what it would send or to whom — while
+			// §20.10's own example writes `--then "run start security-team
+			// '...'"` with no prefix at all, because the action a user wants
+			// IS a command.
+			//
+			// Naming the surface instead of copying part of it means every verb
+			// iash gains is triggerable the day it lands, and no rename can
+			// leave a stale prefix behind. Which commands are legal is derived
+			// from Kind&AgentTool: a trigger fires unattended, so it is not a
+			// human, and the commands withheld from non-humans (§20.12) are
+			// withheld for reasons that apply here at least as strongly. See
+			// trigger.ParseAction.
+			req(p("then", "string", "iash command to run, e.g. run start team 'objective'")),
 			// A trigger without a spend ceiling per period is an open
 			// subscription to the provider's bill.
 			req(p("budget", "number", "spend ceiling per period")),
-			req(p("budget-period", "string", "period of the ceiling: day|week|month")),
+			// Declared as an enum, not documented as one in prose. The three
+			// values were written into the description ("day|week|month") and
+			// nowhere the machine could see them, which made the closed set a
+			// suggestion: jsonSchema omits `enum`, so an agent reads a free-form
+			// string, and the protocol validator enforces enums, so it accepted
+			// {"budget_period": "fortnight"} and left the meaning of the ceiling
+			// to whoever implemented it later.
+			//
+			// A ceiling whose period is not understood is not a ceiling. This is
+			// the one parameter on this command where a wrong value is silently
+			// plausible rather than obviously broken.
+			req(enum(p("budget-period", "string", "period of the ceiling"),
+				"day", "week", "month")),
 			enum(def(p("on-missed", "string", "what to do if an execution was missed"), "skip"),
 				"skip", "run-once", "run-all"),
 			enum(def(p("overlap", "string", "what to do if the previous one is still running"), "skip"),
@@ -306,10 +348,75 @@ var Registry = []Cmd{
 	{Path: []string{"eval", "run"}, Desc: "run an evaluation suite",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{pos(p("suite", "string", "suite file")),
-			req(p("budget", "number", "spend ceiling of the suite"))}},
+			req(p("budget", "number", "spend ceiling of the suite")),
+			// --sim, for the same reason `run start` declares it, and it was
+			// MISSING here until the CLI was RUN instead of read. cmd/iash
+			// gates `eval run` on --sim because there is no LLM-backed
+			// Executor, and it reads that flag out of this declaration — so an
+			// undeclared --sim did not make the gate lenient, it made the
+			// command unusable. parseInvocation refused the only flag that
+			// gets past the gate, so every possible invocation exited 2.
+			//
+			// That is the failure mode of deriving the parser from the
+			// registry, and it is the right one to have. A hand-written parser
+			// would have accepted --sim and left the surface lying about what
+			// the command takes: `iash schema` would advertise two parameters
+			// where the CLI has three, and an agent would be told to call a
+			// command it cannot make run. Here the surface and the parser
+			// cannot disagree; they can only both be incomplete, loudly.
+			p("sim", "bool", "run with a fake executor, without spending money"),
+			// --json on a MUTATING command, the one exception in this registry,
+			// so here is the reason.
+			//
+			// WireParams synthesises --json for every non-mutating command.
+			// That rule is a FLOOR — "no reading command may lack it" — not a
+			// ceiling, and the line it draws is receipts from data. `run start`
+			// prints a receipt: an id and a log path, which you follow with
+			// `run show --json` when you want the data.
+			//
+			// `eval run` has no such follow-up, because its output IS the data.
+			// Without this flag the only machine access to a pass rate is a
+			// regex over prose — and a regex over prose is precisely how
+			// "0.65 → 0.80" gets read as an improvement, stripped of the
+			// warning that travelled with it.
+			//
+			// That argument once ended "until eval runs are persisted", and
+			// they now are, so the clause is gone rather than left standing as
+			// a stale caveat. Persistence does NOT make this flag redundant.
+			// The stored file holds the results; the notes — the prefix-bias
+			// warning, the truncation warning — are derived at print time and
+			// are the part a reader most needs and most easily loses. A caller
+			// forced to re-derive them from a stored document is a caller who
+			// will not.
+			p("json", "bool", "emit the run as one JSON document")}},
+	// The two runs are `baseline` and `candidate`, not `a` and `b`. Two reasons,
+	// and the second one is why this was renamed before eval was implemented.
+	//
+	// A comparison has a direction, and `a`/`b` hides it. "Did it get better or
+	// worse" is answered by which argument came first, which nobody remembers, so
+	// half the readings of any regression report are inverted. Naming the roles
+	// makes the direction part of the invocation.
+	//
+	// And single-letter names are a CLI convenience that must not reach the wire:
+	// this command is Protocol-flagged and an AgentTool, so `a` and `b` became
+	// `{"a":"r1","b":"r2"}` in requests and in the log, and properties named `a`
+	// and `b` in the schema an agent reads to decide what to call. Caught by
+	// TestTheWireHasNoShortFlags. Renaming is free today and a breaking change
+	// the day the first eval client exists.
+	// `eval list` is not scope creep beside compare, it is what makes compare
+	// reachable. Run ids are UTC timestamps — e20260828T141503 — because there
+	// is no counter to mint e1 and e2 from, and nobody retypes one of those
+	// from memory. Without a listing, `compare` takes two arguments a user has
+	// no way to discover, and the honest workflow becomes `ls evals/`, which is
+	// a user reading the storage layout because the tool declined to.
+	//
+	// Idempotent and PolicyAllow: it reads files and spends nothing.
+	{Path: []string{"eval", "list"}, Desc: "list evaluation runs",
+		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
 	{Path: []string{"eval", "compare"}, Desc: "compare two evaluation runs",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("a", "string", "run A")), pos(p("b", "string", "run B"))}},
+		Params: []Param{pos(p("baseline", "string", "run to compare against")),
+			pos(p("candidate", "string", "run being judged"))}},
 
 	// ---- meta --------------------------------------------------------------
 	{Path: []string{"design"}, Desc: "open the interactive blueprint designer",
@@ -499,4 +606,125 @@ func Lookup(path ...string) *Cmd {
 		}
 	}
 	return nil
+}
+
+// shortFlags maps a parameter name to its one-letter form, ONCE, for the whole
+// surface. A letter means the same thing in every command that has that
+// parameter, or it does not exist.
+//
+// The obvious implementations are both worse, and for the same reason.
+//
+// Per-command aliases (`run start` declaring `-p` for prompt, `run prompt`
+// declaring `-p` for something else) would be a second surface. It is the same
+// mistake a hand-kept list of protocol types would have been: the registry says
+// one thing, a table somewhere else says another, and the two drift the first
+// time somebody adds a parameter and updates only one of them. Worse here than
+// there, because the drift is invisible — `-p` keeps working, it just stops
+// meaning what the reader learned it meant.
+//
+// Deriving the letter from the first character of the name is worse still. The
+// surface has `budget` and `base-url`, `to` and `tools` and `text` and `type`
+// and `ttl`, `on` and `on-busy` and `on-missed` and `overlap`. Auto-assignment
+// hands the letter to whichever entry the registry happens to list first, so
+// `-b 5` means a spend ceiling today and a provider URL after somebody sorts
+// the file alphabetically. A short flag whose meaning depends on the order of a
+// slice is worse than no short flag at all: the script that used it does not
+// fail, it silently does something else with the number.
+//
+// So: an explicit, global, collision-free assignment, verified by
+// TestShortFlagsAreUnambiguous. Only names that are frequent or long enough to
+// be worth typing get one. A parameter with no entry has no short form, which
+// is the correct default — a letter nobody can guess is not a shorthand, it is
+// a second thing to memorize.
+var shortFlags = map[string]string{
+	// The ones that appear over and over across the surface.
+	"run":    "r", // 13 commands
+	"name":   "n", // 8
+	"budget": "b", // 4
+	"key":    "k", // 3
+	"text":   "t", // 3
+	"model":  "m", // 3
+	"prompt": "p", // the objective of a run
+	"path":   "f", // a file; -p is taken by prompt and -f is what every tool uses
+
+	// Frequent enough on their own commands to be worth it.
+	"json":      "J",
+	"sim":       "S",
+	"workspace": "w",
+	"status":    "s",
+	"reason":    "R",
+	"listen":    "l",
+	"actor":     "a",
+	"suite":     "u",
+	"type":      "T",
+	"event":     "e",
+	"id":        "i",
+	"value":     "v",
+}
+
+// A note on POSITIONAL parameters, because the first version of this map got it
+// wrong and the mistake was instructive.
+//
+// -p (prompt), -f (path) and -r (run) abbreviate parameters declared with pos(),
+// whose identity is arguably their position. The first attempt therefore refused
+// short flags for positionals — and that deleted exactly the useful cases: -r
+// reaches thirteen commands, and -p and -f are the two a person types most.
+//
+// So the rule is the other way round: a declared parameter is ALWAYS reachable
+// by name, and the position is a convenience layered on top. `--actor` is not a
+// spelling invented for the CLI's benefit; it is the name this registry already
+// publishes to the tool schema and the protocol, so accepting it costs nothing
+// and refusing it would be the surface contradicting itself.
+//
+// What that rule creates is an obligation on every parser: if the registry
+// declares a parameter, --<name> must reach it. That is enforced by
+// TestEveryShortFlagReachesItsParameter in cmd/iash rather than trusted, because
+// the failure mode is silent — expandShort produces a long flag the parser drops,
+// and the command runs with a value the user believes they supplied.
+
+// Short returns the one-letter flag for a parameter, or "" if it has none.
+//
+// It takes the CLI spelling (`if-seq`, not `if_seq`) because that is the form
+// the user types and the form Params carries. The wire has no short flags at
+// all: a machine has no fingers to save, and `{"b": 5}` in a log is a puzzle
+// where `{"budget": 5}` is a fact.
+func Short(paramName string) string { return shortFlags[paramName] }
+
+// ShortFlags returns the whole assignment, sorted by letter.
+//
+// Exported so `iash surface` and the help text can print it from the same place
+// the parser reads, rather than from a list somebody keeps up to date by hand.
+func ShortFlags() []Param {
+	out := make([]Param, 0, len(shortFlags))
+	for name := range shortFlags {
+		out = append(out, Param{Name: name, Desc: shortFlags[name]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Desc != out[j].Desc {
+			return out[i].Desc < out[j].Desc
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// LongFor resolves a one-letter flag to the parameter name it abbreviates for a
+// given command, or "" if that command has no such parameter.
+//
+// The command matters. `-r` is `run` everywhere `run` exists, but on a command
+// with no `run` parameter it is not "some other parameter starting with r" — it
+// is an error. Resolving it globally and letting the command ignore what it does
+// not know is how `iash blueprint validate -r foo` would end up silently
+// validating nothing.
+func (c Cmd) LongFor(letter string) string {
+	if letter == "" {
+		return ""
+	}
+	for _, pp := range c.WireParams() {
+		cliName := strings.ReplaceAll(pp.Name, "_", "-")
+		if shortFlags[cliName] == letter {
+			return cliName
+		}
+	}
+	return ""
 }

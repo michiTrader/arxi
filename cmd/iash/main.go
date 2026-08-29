@@ -43,7 +43,7 @@ func main() {
 		cmdSchema()
 		return
 	case "surface":
-		cmdSurface()
+		cmdSurface(args[1:])
 		return
 	case "serve":
 		cmdServe(args[1:])
@@ -61,11 +61,28 @@ func main() {
 			cmdRunStart(args[2:])
 			return
 		}
+	case "trigger":
+		cmdTrigger(args[1:])
+		return
+	case "eval":
+		cmdEval(args[1:])
+		return
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
 	// when the command DOES exist in the surface is the worst possible answer:
 	// it sends the user hunting for a typo they never made.
+	notImplemented(args)
+}
+
+// notImplemented answers for a command this binary does not run yet.
+//
+// Extracted from main's fallback when `trigger` acquired its own subcommand
+// switch, which needed the identical answer for a declared-but-unbuilt trigger
+// subcommand. Copying the block would have made the two drift, and the way they
+// drift is the worse direction: a group that grew its own dispatcher starts
+// reporting "unknown command" for capabilities `iash surface` publishes.
+func notImplemented(args []string) {
 	for n := len(args); n >= 1; n-- {
 		if c := surface.Lookup(args[:n]...); c != nil {
 			fmt.Fprintf(os.Stderr,
@@ -97,6 +114,14 @@ IMPLEMENTED TODAY
   serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
   version                    version of the binary and of the surface
 
+SHORT FLAGS
+  One letter means the same thing on every command that has that parameter:
+  -b is --budget, -p is --prompt, -r is --run, -f is --path, -J is --json.
+  A letter is an error on a command without that parameter, rather than being
+  quietly ignored, because ignoring it discards the value and reports success.
+
+  iash surface --flags       the whole assignment, and what each letter reaches
+
 The rest of the surface is declared and verified by tests, but has no executor
 yet. 'iash surface' lists everything that is going to exist.
 
@@ -117,7 +142,18 @@ func cmdSchema() {
 
 // cmdSurface renders the SAME manifest as cmdSchema, in human format.
 // Two views, one source: if they diverge it is a bug, not a product decision.
-func cmdSurface() {
+func cmdSurface(args []string) {
+	// `--flags` prints the short-flag assignment from the same map the parser
+	// reads. A shorthand nobody can list is not a shorthand: the user has to
+	// find it in the source or guess, and guessing is how they discover that -b
+	// is not what they assumed on this particular command.
+	for _, a := range args {
+		if a == "--flags" || a == "-flags" {
+			printShortFlags()
+			return
+		}
+	}
+
 	m := surface.BuildManifest()
 	fmt.Printf("surface v%d · %d capabilities exposed to agents\n", m.SurfaceVersion, len(m.Tools))
 
@@ -149,6 +185,15 @@ func cmdSurface() {
 // executor is the proof that the reducer is genuinely pure: `run why` needs
 // nothing from the runtime, only the state that came out of the fold.
 func cmdWhy(args []string) {
+	// `why` is the CLI spelling of `run why`, so it inherits that command's
+	// short flags: -J for --json. Looking it up rather than hardcoding "-J" is
+	// what keeps this from becoming a place where the letter could differ.
+	args, err := expandShort(surface.Lookup("run", "why"), args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "iash why: %v\n", err)
+		os.Exit(2)
+	}
+
 	asJSON := false
 	var path string
 	for _, a := range args {
@@ -161,6 +206,7 @@ func cmdWhy(args []string) {
 	if path == "" {
 		fmt.Fprintln(os.Stderr, "usage: iash why <file.json> [--json]\n\n"+
 			"The file can be {\"state\":..., \"config\":...} or a bare State.\n"+
+			"short: -J json\n"+
 			"Try: testdata/scenarios/blocked-on-approval.json")
 		os.Exit(2)
 	}
@@ -212,4 +258,37 @@ func cmdWhy(args []string) {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "iash:", err)
 	os.Exit(1)
+}
+
+// printShortFlags lists the short flags and the commands each one reaches.
+//
+// The commands are computed, not written down. A hand-kept list here would be
+// the third copy of the same fact — after the registry and the parser — and the
+// one nobody updates, so the help would confidently name a command whose
+// parameter had been renamed.
+func printShortFlags() {
+	all := surface.ShortFlags()
+	fmt.Printf("surface v%d · %d short flags, each meaning the same thing everywhere\n\n",
+		surface.SurfaceVersion, len(all))
+
+	for _, pp := range all {
+		letter, name := pp.Desc, pp.Name
+		var users []string
+		for _, c := range surface.Registry {
+			if c.LongFor(letter) != "" {
+				users = append(users, c.CLI())
+			}
+		}
+		where := fmt.Sprintf("%d commands", len(users))
+		if len(users) <= 3 {
+			where = strings.Join(users, ", ")
+		}
+		fmt.Printf("  -%-2s --%-14s %s\n", letter, name, where)
+	}
+
+	fmt.Print("\nA letter is only valid on a command that HAS that parameter: -r is\n" +
+		"--run on the commands that take a run id and an error on the rest,\n" +
+		"because binding it to something else would discard the value silently.\n" +
+		"Booleans can be grouped (-SJ); flags that take a value cannot.\n" +
+		"The NDJSON protocol has no short flags: a machine saves nothing by them.\n")
 }

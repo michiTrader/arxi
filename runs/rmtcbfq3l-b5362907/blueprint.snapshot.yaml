@@ -1,0 +1,24 @@
+# The blueprint from docs/design/20-use-cases.md, runnable.
+#
+# It exists so `iash run start` has something real to drive without the reader
+# writing a file first, and because a blueprint in a doc nobody can execute is a
+# blueprint nobody can check.
+name: feature-team
+
+members:
+  - {name: backend,  role: implementer, tools: [read, write, bash]}
+  - {name: frontend, role: implementer, tools: [read, write]}
+  # Advisory: gives an opinion, never counts toward an advance rule. Without
+  # this trait a reviewer would hold every stage hostage.
+  - {name: security, role: reviewer, tools: [read], advisory: true}
+
+stages:
+  # `all` means both implementers must submit. The timeout escalates rather than
+  # advancing: a stage that quietly moved on would ship half the work.
+  - {name: build,  advance_when: all, timeout_ms: 1800000, on_timeout: escalate}
+  - {name: review, advance_when: any}
+
+watchers:
+  # Quiescence is the expensive failure: the run does not fail, does not finish,
+  # nothing happens. With an observer the run is woken instead of dying.
+  - {agent: security, pattern: run.quiescent, action: notify}
