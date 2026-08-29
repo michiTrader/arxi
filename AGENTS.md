@@ -192,10 +192,18 @@ only. A CLI that ships as a single static binary with no runtime is a feature,
 and every dependency is a claim against it. Justify it against that or leave it
 out.
 
-**Respect the frozen surface.** `internal/surface` declares 45 capabilities;
-32 are exposed as agent tools. That gap is deliberate — some things a human may
+**Respect the frozen surface.** `internal/surface` declares 47 capabilities;
+33 are exposed as agent tools. That gap is deliberate — some things a human may
 do from a terminal an agent must not be able to do to itself. Adding a command
 means implementing something already promised, not inventing a new promise.
+
+The clearest example is `trigger run`, and it is worth knowing because it is the
+only **transitive** exclusion: it is withheld from agents not for what it does
+directly, but because it starts whatever every stored trigger's `--then` names.
+Granting it would grant the union of every scheduled action.
+
+These two numbers are checked by `TestEveryDocumentStatingTheSplitIsCurrent`.
+They were stale for two capabilities before that test existed.
 
 **Verify, do not assume.** Before reporting a number, measure it. Before saying
 tests pass, run them. Counts, file contents and git state have all been wrong

@@ -327,6 +327,32 @@ var Registry = []Cmd{
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{pos(p("name", "string", "name"))}},
 
+	// `trigger run` and NOT `scheduler run`, because the noun already exists.
+	// A second top-level verb would make the scheduler look like a separate
+	// subsystem, when it is the thing that makes the four commands above mean
+	// anything: without it `trigger create` writes a file nobody reads.
+	//
+	// NOT an AgentTool, and this is the load-bearing decision in the entry.
+	// Every other withheld capability (§20.12) is withheld because of what it
+	// does directly; this one is withheld because of what it TRANSITIVELY does.
+	// The scheduler starts whatever `--then` names, for every stored trigger,
+	// unattended, until it is stopped. An agent that can start it can start
+	// everything anybody ever scheduled — so handing an agent this one verb
+	// would quietly hand it the union of every trigger's action, and no human
+	// reading "may I run the scheduler?" is going to reconstruct that.
+	//
+	// It is also the only command here that does not return. `--once` exists
+	// so that the useful half is scriptable (cron, systemd timer, a CI step)
+	// without a process that has to be supervised, and because a single tick is
+	// the only form this can take that is testable end to end in a subprocess
+	// test without a timeout.
+	{Path: []string{"trigger", "run"}, Desc: "run the scheduler: fire triggers as they come due",
+		Kind: CLIOnly, Mutates: true, Since: 1,
+		Params: []Param{
+			def(p("interval", "string", "how often to check for due triggers"), "1m"),
+			p("once", "bool", "check once and exit, instead of looping"),
+			p("dry-run", "bool", "report what would fire without starting anything")}},
+
 	// ---- inbox: the human in the loop --------------------------------------
 	{Path: []string{"inbox"}, Desc: "view pending questions",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
