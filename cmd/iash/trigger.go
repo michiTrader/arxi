@@ -61,6 +61,8 @@ func cmdTrigger(args []string) {
 		cmdTriggerShow(args[1:])
 	case "pause":
 		cmdTriggerPause(args[1:])
+	case "run":
+		cmdTriggerRun(args[1:])
 	default:
 		// `trigger delete` is the specific guess worth answering properly: it
 		// is what a user reaches for, it is declared nowhere, and "unknown

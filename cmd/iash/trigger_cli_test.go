@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/michiTrader/iash/internal/surface"
 )
@@ -332,11 +333,21 @@ func TestADeclaredButUnbuiltSubcommandIsNotCalledUnknown(t *testing.T) {
 		// the missing argument, which is a different message and a fine
 		// outcome. What must never appear is the claim that the subcommand
 		// itself does not exist.
-		got := iash(t, dir, "trigger", sub)
+		//
+		// Bounded, because not every declared command terminates. `trigger
+		// run` without --once loops until interrupted, which is its purpose,
+		// and this loop reaches it precisely because it reads the registry
+		// instead of hand-listing subcommands. Before the bound, declaring
+		// that capability hung the whole cmd/iash package for the full test
+		// timeout and reported FAIL with a goroutine dump and no test name.
+		//
+		// A second is plenty: every refusal here is printed before any work
+		// starts, so the message this test reads is already out.
+		out := iashBounded(t, dir, time.Second, "trigger", sub)
 		checked++
-		if strings.Contains(got.out, "is not a trigger command") {
+		if strings.Contains(out, "is not a trigger command") {
 			t.Errorf("trigger %s is declared in the registry but the CLI calls it unknown:\n%s",
-				sub, got.out)
+				sub, out)
 		}
 	}
 	if checked == 0 {
