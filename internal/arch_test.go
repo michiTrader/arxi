@@ -583,3 +583,84 @@ func TestTheSchedulerDoesNotReachPastItsInterfaces(t *testing.T) {
 			"implementation in.", d)
 	}
 }
+
+// TestTheModelRuleDoesNotReadTheDiskOrTheNetwork (rule 17).
+//
+// internal/model decides which models may be called: it must exist, be
+// unambiguous, and be enabled. That rule is the gate the live executor consults
+// before spending money, and the reason it lives in a package that cannot reach
+// a filesystem is that the cases worth testing are the edges — two providers
+// offering the same id, a model an operator disabled, a key pasted where a
+// variable name belongs — and every one of them becomes a directory fixture the
+// moment the package can read one.
+//
+// net/http is banned for a sharper reason than purity. This package holds the
+// endpoint and the name of the variable holding the credential. If it could
+// also make requests, the obvious next commit puts the request here too, and
+// the one place in the tree that must never hold a secret becomes the place
+// that sends it.
+func TestTheModelRuleDoesNotReadTheDiskOrTheNetwork(t *testing.T) {
+	banned := map[string]string{
+		"os":       "reading env or files here means the answer to \"may this model be called\" depends on the machine, so a blueprint that resolves on one laptop fails on another with nothing in the log to say why",
+		"net":      "this package decides what may be called; something else does the calling",
+		"net/http": "this package holds the endpoint and the name of the variable holding the key. Give it a client and the request follows, and the one place that must never touch a secret becomes the place that sends it",
+		"time":     "nothing here resolves against the clock: AddedAt is stamped by the caller precisely so this package stays off it",
+		"os/exec":  "resolving a model is not running a process",
+	}
+	for _, imp := range list(t, mod+"internal/model").Imports {
+		if why, bad := banned[imp]; bad {
+			t.Errorf("internal/model imports %s.\n  why this is wrong: %s\n"+
+				"  what to do: put it in internal/modelstore, which exists for "+
+				"exactly this and is where the bytes already live.", imp, why)
+		}
+	}
+}
+
+// TestTheModelStoreIsTheOnlyPlaceProvidersTouchTheDisk (rule 18).
+//
+// Two obligations in one test, because they fail together.
+//
+// internal/model must not depend on modelstore: the pure package deciding what
+// a model IS cannot depend on where it is kept, or the dependency inverts and
+// the rule becomes untestable without a directory.
+//
+// And cmd/iash must not read or write providers/*.json itself. That is the
+// obligation with teeth: the store writes the file 0600 and atomically, refuses
+// an api_key field on the way in, and refuses a record whose name disagrees
+// with its filename. A command that opened the file directly would get none of
+// those, and the failure would be a world-readable map to a credential — which
+// looks exactly like a working file.
+func TestTheModelStoreIsTheOnlyPlaceProvidersTouchTheDisk(t *testing.T) {
+	for _, d := range list(t, mod+"internal/model").Deps {
+		if d == mod+"internal/modelstore" {
+			t.Errorf("internal/model depends on internal/modelstore.\n" +
+				"  why this is wrong: the package that decides which models may " +
+				"be called would then need a directory to be tested, and the " +
+				"edges worth testing (an ambiguous id, a disabled model, a key " +
+				"pasted where a variable name belongs) become fixtures.\n" +
+				"  what to do: the dependency goes the other way. modelstore " +
+				"imports model.")
+		}
+	}
+
+	// The CLI is allowed — required, in fact — to import the store. What it must
+	// not do is bypass it, and the compiler cannot see that, so the check is on
+	// the source.
+	out, err := exec.Command("grep", "-rn", "providers/", "../cmd/iash").Output()
+	if err != nil && len(out) == 0 {
+		return // grep exits 1 with no matches, which is the passing case
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" || strings.Contains(line, "//") {
+			continue // a comment naming the directory is documentation
+		}
+		t.Errorf("cmd/iash names the providers directory directly:\n  %s\n"+
+			"  why this is wrong: modelstore writes that file 0600 and "+
+			"atomically, refuses an api_key field on the way in, and refuses a "+
+			"record whose name disagrees with its filename. A command that "+
+			"opens it directly gets none of that, and the result is a "+
+			"world-readable map to a credential that looks like a working "+
+			"file.\n"+
+			"  what to do: use modelstore.DefaultDir and the Store methods.", line)
+	}
+}

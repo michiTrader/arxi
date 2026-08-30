@@ -100,7 +100,10 @@ surface` shows all of them; `iash schema` emits the manifest an agent consumes.
 What runs today:
 
 ```
-iash run start <bp> <prompt> --budget N --sim   run a blueprint to completion
+iash run start <bp> <prompt> --budget N         run a blueprint, calling real models
+iash run start ... --sim                        the same run with no model calls
+iash provider add <name> --base-url URL         register a provider
+iash model list | enable | disable              see and gate what may be called
 iash serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
 iash schema                     emit the surface manifest (JSON)
 iash surface                    see the whole surface, human readable
@@ -157,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **714 tests, no dependencies**.
+Underneath, every package is done and tested — **819 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -175,15 +178,18 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 41 |
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
-| `internal/blueprint` | YAML loading, validation, and freezing by digest | 59 |
+| `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
 | `internal/surface` | the capability manifest every command is checked against | 29 |
 | `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 150 |
 | `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
 | `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
 | `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
-| `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 137 |
-| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 16 |
+| `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
+| `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
+| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 14 |
+| `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 157 |
+| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
@@ -237,13 +243,41 @@ the effect a stage is waiting for, the second silently pays for the same turns
 twice. The cursor is also why the loop writes it *after* the step succeeds and
 not before: lagging costs a re-executed turn, leading costs the whole run, quietly.
 
-Without `--sim` the command **refuses**, and says why: there is no LLM-backed
-`Executor` in this build, so a real run would print a plausible run id, a
-plausible cost and a plausible result for work nobody did. `--sim` drives the
-same reducer, the same log and the same loop; only the executor and the clock
-are fake, so the run you get is the run you would get minus the model calls.
-That is also what makes `replay` and `run why` work on a simulated log: the log
-is the truth, and nothing in the reducer knows which executor produced it.
+Without `--sim` the command now runs for real: it resolves each member's model
+against the registered providers, calls the endpoint over HTTP, and charges the
+budget from the token counts the provider reports. `--sim` drives the same
+reducer, the same log and the same loop; only the executor, the clock and the
+timekeeper differ, so the run you get is the run you would get minus the model
+calls. That is also what makes `replay` and `run why` work on a simulated log:
+the log is the truth, and nothing in the reducer knows which executor produced
+it.
+
+`--model` sets the default for members that declare none. It has no default of
+its own, deliberately — a default here would be a spend decision taken inside the
+binary, and upgrading `iash` could then change what an unchanged command costs.
+
+```
+$ iash provider add local --base-url http://127.0.0.1:11434/v1
+provider local registered (http://127.0.0.1:11434/v1, no credential)
+  see what it offers: iash model list
+
+$ iash run start ./bp.yaml "fix the failing test in ./pkg/auth" --budget 5.00
+run rmtg75ex6-ac02323d started (budget 5.00 USD, workspace auto→none)
+run rmtg75ex6-ac02323d failed (seq 6, stopped by reaching a terminal status)
+  stage:  build
+  turns:  1
+  spent:  0.0000 of 5.0000 USD in the tree
+```
+
+That transcript is a real run against a real HTTP server, and two details in it
+are the point. **`no credential`**: a loopback provider is assigned no key
+variable at all, which was found by running the binary rather than reading it —
+`provider add local` used to assign `$LOCAL_API_KEY`, and the run then refused
+because it was empty, making the one provider that can be exercised with no key
+and no bill the only one that could not be used without inventing a meaningless
+secret. **`spent 0.0000`**: `llama3.1` is priced at zero *knowingly*, which is
+not the same as being unpriced, and the code keeps those two apart because
+collapsing them silently disables `--budget`.
 
 `serve` is the same surface with a different mouth. One request per line, one
 response per line, NDJSON, in order:
@@ -322,19 +356,133 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**12 of 47 declared capabilities are wired — 25.5%.** That figure is measured,
+**16 of 47 declared capabilities are wired — 34.0%.** That figure is measured,
 not estimated: a probe walks `surface.Registry`, invokes every declared path
 against the built binary, and counts the ones that do not answer *"declared but
 not implemented"*. It is the honest denominator, and it is deliberately
-unflattering — the 35 that remain are mostly `run *`, `agent *`, `state *`,
-`event *` and `inbox *`, all of which want the live executor that `run start`
-is missing. The implemented twelve are `run start` (`--sim`), `blueprint
-validate`, `trigger create` / `list` / `show` / `pause` / `run`, `eval run` /
-`list` / `compare`, `schema` and `serve`.
+unflattering — the 31 that remain are mostly `run *`, `agent *`, `state *`,
+`event *` and `inbox *`, which now want the tool runner and the inbox rather than
+the executor. The implemented sixteen are `provider add`, `model list` / `enable`
+/ `disable`, `run start`, `blueprint validate`, `trigger create` / `list` /
+`show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema emit` and
+`serve`.
 
-Missing: the live executor behind `run start` — the loop, the log and the
-reducer are done and driven end to end by `--sim`; what is absent is the thing
-that actually calls a model.
+The count did not move when the live executor landed, and that is the honest
+result: `run start` already counted as wired when only `--sim` worked, so making
+it real improved the *thing* without improving the *number*. A percentage that
+had gone up here would have been measuring the wrong property.
+
+The probe was itself wrong once, in the flattering direction, which is worth
+recording. It truncated the three-word `agent tool policy` to `agent tool` — a
+path that does not exist, so `--help` answered *"does not exist in the surface"*
+rather than *"not implemented yet"*, and the command counted as done. It read
+36.2%. A probe that miscounts in the direction you would like is worse than no
+probe, so it now handles three-word paths and refuses to count any path the
+surface rejects.
+
+The probe has to bound each invocation, and that is worth writing down because
+it cost two minutes of wall clock to rediscover: `trigger run` loops by design
+and `serve` blocks on stdin, so a walk that simply waits for each command hangs
+on the first one. It kills the **process group**, since a child that outlives
+the probe outlives the directory it was writing into.
+
+**Providers and models are wired as of this change**, and they come before the
+executor rather than after it for a reason that is not sequencing preference: a
+run needs an endpoint, a credential and a model id, and until now none of the
+three could exist. `docs/design` §20.1 puts `provider add`, `model list` and
+`model enable` exactly there — the first three commands a new user types, ahead
+of the first run.
+
+The rule about which models may be called lives in `internal/model` and is the
+gate the executor will consult before spending money. It refuses three things,
+each of which is a distinct way a run could otherwise cost money and produce
+nothing: a model that does not exist (with a suggestion, bounded to three edits
+so it never claims a Claude id and a GPT id are interchangeable), a model that
+**two providers offer** (refused rather than resolved by sort order — picking one
+means that registering a provider months later silently reroutes every existing
+agent to a different price), and a model an operator **disabled**, since
+`model disable` is listed in §20.11 as a cost decision and a resolver that
+ignored it would make the command decorative.
+
+**The key is never stored.** A provider holds the *name* of an environment
+variable, and `--api-key-env sk-ant-…` — one keystroke of misunderstanding from
+the correct command — is refused by shape rather than by prefix, because prefix
+matching alone passes every vendor that does not use one and the cost of a miss
+is a published secret. The check runs *before* the file is created: an error
+printed after the write is not protection. The stored file is `0600`, not `0644`,
+because it is a map to a credential, and an `api_key` field added by hand is
+refused on read rather than ignored.
+
+Plain `http` is accepted **only** to loopback. Anywhere else the API key would
+cross the network in clear text; loopback is the one case with no network to read
+it off, and it is also the only provider that can be exercised end to end with no
+credential and no bill. A host that merely *begins* with `localhost` is remote,
+because `localhost.evil.com` resolves to whatever its owner points it at.
+
+**The live executor exists as of this change**, so `run start` without `--sim`
+calls a real model over HTTP and charges what it costs. `internal/provider` owns
+it, and it is a separate package for a reason worth stating: an architecture test
+holds `internal/exec` to exactly one internal dependency, the kernel, and a
+thing that speaks HTTP and resolves models cannot live there without breaking
+it. Go satisfies interfaces structurally, so the CLI hands one in and the runner
+never learns which kind it got.
+
+**Sim and live differ in exactly three objects** — the clock, the timekeeper and
+the executor — and share the reducer, the log, the loop and the effect ordering.
+That is the whole reason `--sim` is worth trusting, and it is also why the
+timekeeper is not hardcoded: `VirtualTime` *jumps* to the next deadline while
+`RealTime` *waits* for it, so a live run wired to the virtual one would skip
+every timeout it exists to honour.
+
+Because a simulated log is meant to be indistinguishable in every other respect,
+the `simulated` field on `run.started` carries the entire distinction. It was a
+hardcoded `true`, and the bug was found by reading the log of a real run — one
+that had really called a real server — and finding it describe itself as a
+simulation. Nothing failed; the costs were right and the summary was accurate.
+Only the durable artefact lied, which is the copy that outlives the terminal.
+
+**A turn is refused before it spends, in three ways, and each is a distinct way
+money could otherwise buy nothing.** A member with no model and no `--model`
+default is refused *before the run directory is created*, so a refusal leaves no
+debris to clean up. A model nobody has priced is refused rather than billed at
+zero: an unknown price is not a price of zero, and reporting it as zero would
+leave `--budget 5.00` enforced against a total that never moves — not a wrong
+number but a disabled safety mechanism, discovered on the invoice. And a model an
+operator **disabled** is refused, which required resolving through `model.Resolve`
+rather than the store's `Owner`: `Owner` deliberately finds disabled models,
+because `model enable` has to act on one, so a run built on it would make `model
+disable` decorative while looking entirely correct.
+
+**Prices live in the binary, not in the provider file.** A price is a fact about
+the world that changes without asking us; the provider file records what the
+operator chose. A past run is unaffected either way, because it wrote the dollars
+it actually spent into its own log. They are stated per **million** tokens, the
+unit vendors publish, and input and output are separate fields because output
+costs four to five times more everywhere — one blended rate misprices `--budget`
+by a multiple, in a direction that depends on whether a turn mostly reads or
+mostly writes.
+
+**The prompt is assembled in the order that keeps the provider's prefix cache
+warm**: identity, situation, memory, shared, causes — most stable to most
+volatile. Stable sections go in the *system* message, because a cache keys on a
+byte-identical prefix; volatile ones go in the *user* message. Putting causes
+early turns a cache hit into a full-price prompt on every single turn.
+`stream` stays off, since streaming delivers the usage block last and a cost
+that arrives after the turn cannot be charged as the turn happens, and
+`max_tokens` is always sent, because an unbounded reply is an unbounded bill and
+the budget is only charged once the response is already back.
+
+A **domain** failure — the provider answered and refused — comes back as events,
+because it happened and the log is the record. A **returned error** means the
+failure could not be turned into a fact at all: the transport broke, or the
+context was cancelled. The distinction is load-bearing rather than tidy.
+Emitting `agent.activated` and *then* returning an error would leave a member the
+reducer believes is thinking, holding a turn that can never close.
+
+Missing still: the tool runner and the inbox. `CallTool` and `AskHuman` on the
+live executor **refuse** rather than fake, which is why the run above goes quiet
+instead of finishing — submitting work is a tool call. A fake result here would
+be indistinguishable in the log from a real one, and the log is the truth.
 
 The trigger **scheduler** exists as of this change, and is worth describing
 precisely because the split is the interesting part. `internal/trigger` decides,
@@ -560,8 +708,14 @@ what is left below a reserve: an agent handed less than one turn's budget does
 not fail cleanly, it produces a truncated answer that still gets judged and
 counts as a genuine `FAIL`.
 
-`--sim` is required — there is no LLM-backed executor in this build — and it
-**loads each case's blueprint**. That check is most of why `--sim` is worth
+`--sim` is required. `run start` calls real models now, but `eval` is not yet
+wired to the same executor: every case is still answered by the simulator, so a
+"real" eval run would spend nothing and report a pass rate anyway. The gate stays
+for that reason rather than from inertia, and it is more necessary than before,
+not less: a user who has just watched `run start` call a live model has every
+reason to assume `eval run` does too.
+
+It also **loads each case's blueprint**. That check is most of why `--sim` is worth
 running at all. The simulated answer does not depend on the blueprint, so
 skipping the load would change no output on the happy path; a suite naming a
 blueprint that does not exist would then judge every case, satisfy every

@@ -1,16 +1,29 @@
 // Command iash is the binary.
 //
 // Today it implements schema, surface, why, blueprint validate, run start
-// (--sim only) and serve; for everything else it answers "declared but not
-// implemented" with the exact name of the capability. That is on purpose: the
-// surface is frozen and verified by tests BEFORE the executor exists, so adding
-// a new command is implementing something that was already promised, not
-// inventing a new promise.
+// (live, calling real models, or --sim), serve, the trigger group, the eval
+// group (--sim only), provider add and the
+// model group; for everything else it answers "declared but not implemented"
+// with the exact name of the capability. That is on purpose: the surface is
+// frozen and verified by tests BEFORE the executor exists, so adding a new
+// command is implementing something that was already promised, not inventing a
+// new promise.
 //
-// This paragraph has already been wrong once — it claimed three commands after
-// six existed. A doc comment that overstates what is missing is the kind of stale
+// The measured figure, rather than this list, is the one to trust: 16 of 47
+// declared capabilities are wired. See the README, where a probe that walks the
+// registry against the built binary produces it.
+//
+// This paragraph has already been wrong twice. It claimed three commands after
+// six existed, and it said `run start` was --sim only after the live executor
+// had landed. A doc comment that overstates what is missing is the kind of stale
 // documentation that costs a reader nothing and a contributor everything: they
 // reimplement what is already in the tree.
+//
+// Note that the measured figure did NOT move when the executor landed, because
+// `run start` already counted as wired when only --sim worked. The number and
+// this list answer different questions, which is why both are here: the count
+// says how much of the surface is reachable, and this says what reaching it
+// actually does.
 package main
 
 import (
@@ -66,6 +79,12 @@ func main() {
 		return
 	case "eval":
 		cmdEval(args[1:])
+		return
+	case "provider":
+		cmdProvider(args[1:])
+		return
+	case "model":
+		cmdModel(args[1:])
 		return
 	}
 

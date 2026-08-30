@@ -15,6 +15,9 @@ import (
 	"github.com/michiTrader/iash/internal/exec"
 	"github.com/michiTrader/iash/internal/kernel"
 	"github.com/michiTrader/iash/internal/logstore"
+	"github.com/michiTrader/iash/internal/model"
+	"github.com/michiTrader/iash/internal/modelstore"
+	"github.com/michiTrader/iash/internal/provider"
 	"github.com/michiTrader/iash/internal/surface"
 )
 
@@ -28,6 +31,7 @@ type startFlags struct {
 	budgetSet  bool
 	maxTurns   int
 	workspace  string
+	model      string
 	sim        bool
 	runID      string
 	dir        string
@@ -41,11 +45,15 @@ type startFlags struct {
 // what should happen next is answered by kernel.Decide, so `run`, `--sim` and
 // `replay` cannot drift apart.
 //
-// Only `--sim` runs today. There is no LLM-backed Executor in the tree yet, so
-// the real path is refused explicitly rather than approximated: a `run start`
-// that silently simulated would print a plausible run, a plausible cost and a
-// plausible result for work nobody did, and the user would have no way to tell.
-// Saying so costs a line of output and is the only honest option.
+// Both paths run today. `--sim` swaps in exec.Fake and a virtual clock; without
+// it the run uses provider.Executor against a real endpoint and a real clock.
+//
+// The two differ in exactly two objects, and that is deliberate. Everything that
+// decides anything -- the reducer, the log, the loop, the effect ordering -- is
+// shared, so a simulation exercises the code a real run will take rather than a
+// parallel implementation of it. The alternative, a `--sim` with its own path,
+// drifts silently and is then trusted for exactly the runs nobody wants to pay
+// to test.
 func cmdRunStart(args []string) {
 	// Short flags are expanded before parsing, from the surface's own assignment,
 	// so this parser only ever sees long names. See expandShort in flags.go.
@@ -77,18 +85,19 @@ func cmdRunStart(args []string) {
 		cfg.Workspace = f.workspace
 	}
 
+	// A live run needs a model for every member BEFORE the run directory exists,
+	// and the check happens here for that reason. Discovering halfway through
+	// that one member has no model leaves a half-written run whose log records a
+	// start that never produced anything, and the operator has to clean it up.
+	//
+	// Nothing is resolved against the provider store yet -- that is the
+	// executor's job, and doing it twice would let the two answers differ. This
+	// only refuses the case no resolution could fix.
 	if !f.sim {
-		// Refused, not faked. See the doc comment above.
-		fmt.Fprintf(os.Stderr,
-			"iash run start has no live executor yet: there is no LLM-backed "+
-				"Executor in this build, so a real run would spend nothing and "+
-				"produce nothing while looking exactly like one that worked.\n\n"+
-				"  what works today: iash run start %s %q --budget %.2f --sim\n\n"+
-				"--sim drives the SAME reducer, the same log and the same loop as a "+
-				"real run; only the executor is fake. So the run you get is the run "+
-				"you would get, minus the model calls and the bill.\n",
-			f.actor, f.prompt, f.budget)
-		os.Exit(2)
+		if err := checkEveryMemberHasAModel(cfg, f.model); err != nil {
+			fmt.Fprintf(os.Stderr, "iash run start: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	dir := f.dir
@@ -118,20 +127,51 @@ func cmdRunStart(args []string) {
 	}
 	defer store.Close()
 
+	// The clock and the executor are the ONLY two things that differ between a
+	// simulation and a real run. Everything downstream -- the reducer, the log,
+	// the loop, the effect ordering -- is the same code, which is what makes
+	// --sim worth trusting.
+	//
 	// The virtual clock is what makes --sim finish in milliseconds instead of
 	// waiting out a 30-minute stage timeout. It is also why Now is derived from
 	// it rather than from the wall: two simulations of identical input must
-	// produce identical logs, or `run diff` has nothing to compare.
-	clock := exec.NewVirtualClock()
-	fake := exec.NewFake()
+	// produce identical logs, or `run diff` has nothing to compare. A real run
+	// takes the opposite trade deliberately: its timestamps are wall time,
+	// because a log that says a turn happened at t=0 is useless for explaining
+	// an incident that happened at 3am.
+	// Timekeeper and not the raw Clock, because the LOOP needs the difference:
+	// VirtualTime jumps to the next deadline, RealTime waits for it. Both already
+	// exist in internal/exec, which is the design anticipating this exact moment.
+	var (
+		clock    exec.Clock
+		timekeep exec.Timekeeper
+		executor exec.Executor
+		now      func() string
+	)
+	if f.sim {
+		vc := exec.NewVirtualClock()
+		clock, timekeep, executor = vc, exec.VirtualTime{C: vc}, exec.NewFake()
+		now = func() string {
+			return time.UnixMilli(vc.NowMs()).UTC().Format(time.RFC3339Nano)
+		}
+	} else {
+		rc := exec.NewRealClock()
+		clock, timekeep = rc, exec.RealTime{C: rc}
+		executor = &provider.Executor{
+			Resolver:     providerResolver{openProviders()},
+			DefaultModel: f.model,
+			Members:      cfg.Members,
+			Prompt:       f.prompt,
+		}
+		now = func() string { return nowFunc().UTC().Format(time.RFC3339Nano) }
+	}
+
 	runner := &exec.Runner{
 		Log:      store,
 		Clock:    clock,
-		Executor: fake,
+		Executor: executor,
 		Config:   cfg,
-		Now: func() string {
-			return time.UnixMilli(clock.NowMs()).UTC().Format(time.RFC3339Nano)
-		},
+		Now:      now,
 	}
 
 	// run.started is APPENDED, not handed to the loop. The loop reads it back out
@@ -151,7 +191,23 @@ func cmdRunStart(args []string) {
 			"max_turns":     float64(f.maxTurns),
 			"prompt":        f.prompt,
 			"workspace":     cfg.Workspace,
-			"simulated":     true,
+
+			// simulated records WHICH executor produced this log, and it is
+			// f.sim rather than a constant. It was a hardcoded true, correct
+			// while --sim was the only mode and false the moment the live
+			// executor landed -- found by reading the log of a real run that
+			// had really cost money and really called a real server, and that
+			// described itself as a simulation.
+			//
+			// This field is the one thing in the log that a reader cannot
+			// recover from anything else in it. Everything else -- the costs,
+			// the turns, the replies -- looks identical either way, by design:
+			// --sim drives the same reducer through the same loop, and that is
+			// what makes it worth trusting. So the log is the only place the
+			// distinction can live, and a log that mislabels a real run as a
+			// simulation is worse than one that omits the field, because it
+			// invites exactly the conclusion a reader would otherwise check.
+			"simulated": f.sim,
 		},
 	}
 	if _, err := store.Append([]kernel.Event{started}); err != nil {
@@ -164,7 +220,7 @@ func cmdRunStart(args []string) {
 	loop := &exec.Loop{
 		Runner: runner,
 		Log:    store,
-		Time:   exec.VirtualTime{C: clock},
+		Time:   timekeep,
 		Config: cfg,
 	}
 
@@ -249,6 +305,72 @@ func workspaceNote(requested, resolved string) string {
 	return resolved
 }
 
+// providerResolver adapts the provider store to what the live executor needs.
+//
+// It calls model.Resolve and NOT store.Owner, and the difference is the whole
+// reason this type exists. Owner deliberately finds a DISABLED model, because
+// `model enable` has to act on one. A run must do the opposite: a disabled model
+// is an operator's cost decision (§20.11 lists `model disable` as exactly that),
+// and honouring it is the difference between the command meaning something and
+// being decorative.
+//
+// Resolve is also what refuses an AMBIGUOUS ref rather than picking by sort
+// order -- which matters here more than anywhere, because the wrong pick is a
+// different bill.
+type providerResolver struct{ store *modelstore.Store }
+
+func (r providerResolver) Resolve(ref string) (model.Resolution, error) {
+	ps, err := r.store.List()
+	if err != nil {
+		return model.Resolution{}, err
+	}
+	return model.Resolve(ps, ref)
+}
+
+// checkEveryMemberHasAModel refuses a live run that could not name a model for
+// one of its members.
+//
+// It runs BEFORE the run directory is created, because the alternative is a
+// half-written run: a log recording a start, a frozen blueprint, and a first
+// turn that fails on a configuration mistake the user could have been told about
+// for free. A refusal that costs nothing is worth more than a failure that
+// leaves debris.
+//
+// Existence is deliberately NOT checked here. Whether a model is registered and
+// enabled is the executor's question, and asking it in two places lets the two
+// answers disagree -- the classic version of that bug is a pre-flight check that
+// passes and a run that then fails, which teaches the user to distrust the
+// check. This refuses only what no amount of resolution could fix: a member with
+// no model named anywhere.
+func checkEveryMemberHasAModel(cfg kernel.Config, def string) error {
+	if def != "" {
+		return nil
+	}
+	var missing []string
+	for _, m := range cfg.Members {
+		if m.Model == "" {
+			missing = append(missing, m.Name)
+		}
+	}
+	// A blueprint with no members at all is a single-actor run, and the actor
+	// still needs a model to think with.
+	if len(cfg.Members) == 0 {
+		return fmt.Errorf("a live run needs a model, and none was given.\n" +
+			"  fix: iash run start ... --model <id>\n" +
+			"  see: iash model list, for the models this machine has enabled")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("these members name no model and the run has no default: %s\n"+
+			"  fix: give each a `model:` in the blueprint, or start the run with --model <id>\n"+
+			"  see: iash model list, for the models this machine has enabled\n"+
+			"  note: no default is invented here on purpose -- it would be a spend "+
+			"decision taken in the binary, and upgrading iash could then change what "+
+			"an unchanged command costs",
+			strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 func parseStartFlags(args []string) (startFlags, error) {
 	f := startFlags{workspace: "auto"}
 	var positional []string
@@ -323,6 +445,12 @@ func parseStartFlags(args []string) (startFlags, error) {
 				return f, fmt.Errorf("--max-turns %q is not a whole number", v)
 			}
 			f.maxTurns = n
+		case "--model":
+			v, err := next()
+			if err != nil {
+				return f, err
+			}
+			f.model = v
 		case "--workspace":
 			v, err := next()
 			if err != nil {

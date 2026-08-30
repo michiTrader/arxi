@@ -104,18 +104,24 @@ func cmdEvalRun(args []string) {
 		os.Exit(1)
 	}
 
-	// --sim is required for the same reason `run start` requires it, and the
-	// reason is worth repeating here because eval makes it worse. There is no
-	// LLM-backed Executor in this build, so a "real" eval run would spend
-	// nothing, produce nothing, and report a pass rate. A wrong number that
-	// looks like a measurement is the specific output this whole package is
-	// built to avoid, and printing one from our own missing executor would be
-	// the least defensible way to produce it.
+	// --sim is still required, and the REASON has changed even though the gate
+	// has not. It used to be that no LLM-backed Executor existed anywhere in
+	// the build; one now does, and `run start` uses it. What eval still lacks is
+	// its own wiring to it: simCases below is the only case runner, and it
+	// answers from the objective rather than from a model.
+	//
+	// The gate stays because removing it would be the worst possible way to
+	// close that gap. A "real" eval run today would spend nothing, produce
+	// nothing, and report a pass rate anyway -- a wrong number wearing the
+	// clothes of a measurement, which is the specific output this whole package
+	// exists to prevent. It would be doubly indefensible now, because the user
+	// has every reason to believe a live executor means a live eval.
 	if vals["sim"] != "true" {
 		fmt.Fprintf(os.Stderr,
-			"iash eval run has no live executor yet: there is no LLM-backed "+
-				"Executor in this build, so a real run would spend nothing and "+
-				"produce nothing while reporting a pass rate.\n\n"+
+			"iash eval run is not wired to the live executor yet: `run start` "+
+				"calls real models, but every eval case is still answered by the "+
+				"simulator, so a real run would spend nothing and produce "+
+				"nothing while reporting a pass rate.\n\n"+
 				"  what works today: iash eval run %s --budget %.2f --sim\n\n"+
 				"--sim runs the same fold, the same budget arithmetic and the "+
 				"same judging; only the executor is fake. The pass rate it "+
@@ -161,12 +167,16 @@ func cmdEvalRun(args []string) {
 	}
 
 	// Marked simulated BEFORE it is stored, and this is the only line in the
-	// CLI that sets the field. Every run this build can produce is simulated,
-	// because the --sim gate above is impassable otherwise — so it would be
-	// equally correct today to hardcode true in the Runner. It is set from the
-	// flag instead, so that the day a live executor lands the flag is already
-	// the thing that decides, rather than a constant somebody has to remember
-	// to find.
+	// CLI that sets the field. Every eval run this build can produce is still
+	// simulated, because the --sim gate above is impassable otherwise — so it
+	// would be equally correct today to hardcode true here. It is set from the
+	// flag instead, so that the day eval is wired to the live executor the flag
+	// is already the thing that decides.
+	//
+	// That day arrived for `run start` and the constant there was NOT found:
+	// run.started logged `"simulated": true` on real runs that had really called
+	// a real server, and it took reading the log of one to notice. This line is
+	// what that mistake looks like when it is avoided in advance.
 	sum.Simulated = vals["sim"] == "true"
 
 	// Stored before it is printed, and that order is deliberate. A run that
