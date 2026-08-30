@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // expandShort rewrites short flags into their long form before any command's
@@ -109,7 +109,7 @@ func expandGroup(c *surface.Cmd, body string) ([]string, error) {
 		if long == "" {
 			return nil, fmt.Errorf("-%s: %s has no short flag -%s. Grouped "+
 				"flags like -%s are expanded letter by letter, so every letter "+
-				"has to be a flag of this command.\nSee the short forms: iash surface --flags",
+				"has to be a flag of this command.\nSee the short forms: arxi surface --flags",
 				body, c.CLI(), l, body)
 		}
 		if !isBool(c, long) {
@@ -168,5 +168,5 @@ func unknownShort(c *surface.Cmd, letter string) error {
 			letter, owner, c.CLI(), owner, list)
 	}
 	return fmt.Errorf("-%s is not a short flag in this surface.\n%s\n"+
-		"See all of them: iash surface --flags", letter, list)
+		"See all of them: arxi surface --flags", letter, list)
 }

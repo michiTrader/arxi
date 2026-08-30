@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/eval"
+	"github.com/michiTrader/arxi/internal/eval"
 )
 
 // run builds a storable summary. Each test varies only what it is about.

@@ -9,12 +9,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/michiTrader/iash/internal/scheduler"
-	"github.com/michiTrader/iash/internal/surface"
-	"github.com/michiTrader/iash/internal/trigger"
+	"github.com/michiTrader/arxi/internal/scheduler"
+	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
-// `iash trigger run` — the caller the tick never had.
+// `arxi trigger run` — the caller the tick never had.
 //
 // internal/trigger decides WHEN (Due), internal/trigger decides WHETHER
 // (Admit), internal/scheduler decides WHAT HAPPENS (Tick). All three were built
@@ -68,7 +68,7 @@ type selfRunner struct {
 // reports success is worse than one that crashes.
 //
 // The seam that WOULD need care is a future flag that changes triggerDir
-// without changing the working directory (`iash -C <dir>`, say). There is none
+// without changing the working directory (`arxi -C <dir>`, say). There is none
 // today, and TestChildrenInheritTheTriggerDirectory is what fails on the day
 // one arrives.
 
@@ -87,7 +87,7 @@ func (r selfRunner) Start(rec trigger.Record, a trigger.Action) (scheduler.Execu
 	cmd.Stderr = os.Stderr
 
 	// Its own process group, so Cancel can signal the whole tree. Without
-	// this, killing `iash run start` would leave anything IT spawned running
+	// this, killing `arxi run start` would leave anything IT spawned running
 	// and unparented — which is how a "cancelled" run keeps spending.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -194,18 +194,18 @@ func (finished) Done() <-chan struct{} {
 }
 func (finished) Cancel() {}
 
-// cmdTriggerRun is `iash trigger run`.
+// cmdTriggerRun is `arxi trigger run`.
 func cmdTriggerRun(args []string) {
 	c := surface.Lookup("trigger", "run")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger run: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger run: %v\n", err)
 		os.Exit(2)
 	}
 
 	interval, err := time.ParseDuration(vals["interval"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger run: --interval %q is not a "+
+		fmt.Fprintf(os.Stderr, "arxi trigger run: --interval %q is not a "+
 			"duration: %v\n  examples: 30s, 1m, 15m\n", vals["interval"], err)
 		os.Exit(2)
 	}
@@ -214,7 +214,7 @@ func cmdTriggerRun(args []string) {
 		// reads the trigger directory as fast as the disk allows, and the user
 		// who typed it meant something else. Clamping to a default would hide
 		// the typo behind behaviour that looks correct.
-		fmt.Fprintf(os.Stderr, "iash trigger run: --interval must be positive, "+
+		fmt.Fprintf(os.Stderr, "arxi trigger run: --interval must be positive, "+
 			"got %s.\n  a zero interval is a spin loop, not a fast scheduler; "+
 			"for a single pass use --once\n", interval)
 		os.Exit(2)
@@ -228,9 +228,9 @@ func cmdTriggerRun(args []string) {
 	// function tested it after the --once branch had already ticked, so the
 	// only path that reached the message was the one where it was pointless.
 	if dry && !once {
-		fmt.Fprintln(os.Stderr, "iash trigger run: --dry-run loops forever "+
+		fmt.Fprintln(os.Stderr, "arxi trigger run: --dry-run loops forever "+
 			"printing the same report, because nothing it reports ever runs.\n"+
-			"  use: iash trigger run --dry-run --once")
+			"  use: arxi trigger run --dry-run --once")
 		os.Exit(2)
 	}
 
@@ -246,7 +246,7 @@ func cmdTriggerRun(args []string) {
 		if err != nil {
 			// Exit 1, not 2: nothing the user typed is wrong. The environment
 			// cannot tell us what we are, and every firing needs it.
-			fmt.Fprintf(os.Stderr, "iash trigger run: cannot find my own "+
+			fmt.Fprintf(os.Stderr, "arxi trigger run: cannot find my own "+
 				"binary, which is what runs each trigger's --then: %v\n", err)
 			os.Exit(1)
 		}
@@ -255,13 +255,13 @@ func cmdTriggerRun(args []string) {
 
 	sched, err := scheduler.New(store, runner, printReport)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger run: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger run: %v\n", err)
 		os.Exit(1)
 	}
 
 	if once {
 		if err := sched.Tick(nowFunc()); err != nil {
-			fmt.Fprintf(os.Stderr, "iash trigger run: %v\n", err)
+			fmt.Fprintf(os.Stderr, "arxi trigger run: %v\n", err)
 			os.Exit(1)
 		}
 		return

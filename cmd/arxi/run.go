@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/michiTrader/iash/internal/blueprint"
-	"github.com/michiTrader/iash/internal/exec"
-	"github.com/michiTrader/iash/internal/kernel"
-	"github.com/michiTrader/iash/internal/logstore"
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/logstore"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // startFlags is what `run start` was invoked with, after parsing but before any
@@ -33,7 +33,7 @@ type startFlags struct {
 	dir        string
 }
 
-// cmdRunStart implements `iash run start <actor> <prompt> --budget N`.
+// cmdRunStart implements `arxi run start <actor> <prompt> --budget N`.
 //
 // This is the command that joins the four packages: blueprint loads the actor,
 // logstore holds the events, kernel decides, exec executes. It contains no
@@ -51,14 +51,14 @@ func cmdRunStart(args []string) {
 	// so this parser only ever sees long names. See expandShort in flags.go.
 	args, err := expandShort(surface.Lookup("run", "start"), args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash run start: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi run start: %v\n", err)
 		os.Exit(2)
 	}
 
 	f, err := parseStartFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash run start: %v\n\n"+
-			"usage: iash run start <actor> <prompt> --budget <usd> [--max-turns N]\n"+
+		fmt.Fprintf(os.Stderr, "arxi run start: %v\n\n"+
+			"usage: arxi run start <actor> <prompt> --budget <usd> [--max-turns N]\n"+
 			"                      [--workspace shared|worktree|copy|none] [--sim]\n"+
 			"short: -a actor  -p prompt  -b budget  -w workspace  -S sim\n", err)
 		os.Exit(2)
@@ -80,10 +80,10 @@ func cmdRunStart(args []string) {
 	if !f.sim {
 		// Refused, not faked. See the doc comment above.
 		fmt.Fprintf(os.Stderr,
-			"iash run start has no live executor yet: there is no LLM-backed "+
+			"arxi run start has no live executor yet: there is no LLM-backed "+
 				"Executor in this build, so a real run would spend nothing and "+
 				"produce nothing while looking exactly like one that worked.\n\n"+
-				"  what works today: iash run start %s %q --budget %.2f --sim\n\n"+
+				"  what works today: arxi run start %s %q --budget %.2f --sim\n\n"+
 				"--sim drives the SAME reducer, the same log and the same loop as a "+
 				"real run; only the executor is fake. So the run you get is the run "+
 				"you would get, minus the model calls and the bill.\n",
@@ -176,7 +176,7 @@ func cmdRunStart(args []string) {
 	printRunSummary(f.runID, dir, out)
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\niash: the run stopped early: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -216,7 +216,7 @@ func printRunSummary(runID, dir string, out exec.Outcome) {
 	}
 
 	if !out.State.Status.Terminal() {
-		fmt.Printf("\nwhy is it not finished?  iash run why %s\n", runID)
+		fmt.Printf("\nwhy is it not finished?  arxi run why %s\n", runID)
 	}
 }
 

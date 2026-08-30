@@ -74,7 +74,7 @@ fi
 
 # -------------------------------------------------------------- verify health
 step "build and test"
-go build -o /tmp/iash ./cmd/iash
+go build -o /tmp/arxi ./cmd/arxi
 ok "build"
 
 fmt_out="$(gofmt -l .)"
@@ -84,17 +84,17 @@ ok "gofmt"
 go vet ./... 2>/dev/null || die "go vet failed"
 ok "vet"
 
-if go test -count=1 ./... >/tmp/iash-test.log 2>&1; then
-	ok "tests pass ($(grep -c '^ok' /tmp/iash-test.log) packages)"
+if go test -count=1 ./... >/tmp/arxi-test.log 2>&1; then
+	ok "tests pass ($(grep -c '^ok' /tmp/arxi-test.log) packages)"
 else
-	tail -30 /tmp/iash-test.log
-	die "tests failed — see /tmp/iash-test.log"
+	tail -30 /tmp/arxi-test.log
+	die "tests failed — see /tmp/arxi-test.log"
 fi
 
 step "ready"
 cat <<'EOF'
-    binary:  /tmp/iash
-    try:     /tmp/iash why testdata/scenarios/blocked-on-approval.json
+    binary:  /tmp/arxi
+    try:     /tmp/arxi why testdata/scenarios/blocked-on-approval.json
 
     If `go` is not found in a new shell:  export PATH=$PATH:/usr/local/go/bin
 EOF

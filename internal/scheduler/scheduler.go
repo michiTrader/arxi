@@ -44,7 +44,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/michiTrader/iash/internal/trigger"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
 // Store is the part of trigstore this package needs.

@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 const (
@@ -32,7 +32,7 @@ const (
 	eventsFileName = "events.ndjson"
 
 	// lockFileName enforces the single-writer rule of ADR-0002. It is a file
-	// and not a mutex because the constraint is between processes: two `iash`
+	// and not a mutex because the constraint is between processes: two `arxi`
 	// invocations on the same run directory are the realistic way duplicate
 	// `seq` gets created, and an in-process mutex cannot see them.
 	lockFileName = "writer.lock"

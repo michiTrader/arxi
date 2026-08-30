@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // memLog is an in-memory Log. It assigns Seq, because that is the property of

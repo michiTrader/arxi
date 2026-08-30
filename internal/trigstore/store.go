@@ -7,7 +7,7 @@
 // one the kernel follows — the pure package decides what a trigger IS, and a
 // package one layer out decides where the bytes live.
 //
-// The alternative was to put these functions in cmd/iash next to the flag
+// The alternative was to put these functions in cmd/arxi next to the flag
 // parsing. That fails the first time anything other than the CLI needs to read
 // a trigger, which is the scheduler — the very next step. Persistence reachable
 // only from a main package is persistence that gets copy-pasted.
@@ -38,7 +38,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/trigger"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
 // DefaultDir is where triggers live, relative to the working directory.
@@ -105,8 +105,8 @@ func (s *Store) Create(r trigger.Record) error {
 		if n == r.Name {
 			return fmt.Errorf("trigger %q already exists (%s).\n"+
 				"  `trigger create` will not replace a schedule that is already "+
-				"running: inspect it with `iash trigger show %s`, and stop it with "+
-				"`iash trigger pause %s`", r.Name, s.Path(n), n, n)
+				"running: inspect it with `arxi trigger show %s`, and stop it with "+
+				"`arxi trigger pause %s`", r.Name, s.Path(n), n, n)
 		}
 		return fmt.Errorf("trigger %q collides with the existing %q (%s).\n"+
 			"  trigger names become filenames, and on macOS and Windows those two "+
@@ -129,7 +129,7 @@ func (s *Store) Save(r trigger.Record) error {
 	if _, err := os.Stat(s.Path(r.Name)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("trigger %q does not exist, so there is nothing to "+
-				"update.\n  see what does: iash trigger list", r.Name)
+				"update.\n  see what does: arxi trigger list", r.Name)
 		}
 		return fmt.Errorf("trigstore: stat %s: %w", s.Path(r.Name), err)
 	}
@@ -185,7 +185,7 @@ func (s *Store) Load(name string) (trigger.Record, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return trigger.Record{}, fmt.Errorf("trigger %q does not exist.\n"+
-				"  see what does: iash trigger list", name)
+				"  see what does: arxi trigger list", name)
 		}
 		return trigger.Record{}, fmt.Errorf("trigstore: read %s: %w", path, err)
 	}
@@ -208,7 +208,7 @@ func decode(path string, body []byte) (trigger.Record, error) {
 
 	if err := dec.Decode(&r); err != nil {
 		return trigger.Record{}, fmt.Errorf("%s is not a readable trigger: %w\n"+
-			"  this file is written by `iash trigger create`; if it was edited by "+
+			"  this file is written by `arxi trigger create`; if it was edited by "+
 			"hand, compare it with another one in the same directory", path, err)
 	}
 	if err := r.Validate(); err != nil {
@@ -220,7 +220,7 @@ func decode(path string, body []byte) (trigger.Record, error) {
 	// the field's name, leaving the original file behind, still firing.
 	if want := strings.TrimSuffix(filepath.Base(path), ext); r.Name != want {
 		return trigger.Record{}, fmt.Errorf("%s holds a trigger named %q.\n"+
-			"  the filename is what `iash trigger show` and `iash trigger pause` "+
+			"  the filename is what `arxi trigger show` and `arxi trigger pause` "+
 			"look up, so this trigger answers to %q and reports itself as %q; "+
 			"pausing it would write a new file and leave this one firing",
 			path, r.Name, want, r.Name)

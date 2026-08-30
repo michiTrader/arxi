@@ -2,7 +2,7 @@
 
 ## 20.0 What this document is for
 
-`iash surface` lists the 46 declared capabilities. A list is not a design: it
+`arxi surface` lists the 46 declared capabilities. A list is not a design: it
 tells you what exists and nothing about whether the set is *coherent*. Two
 questions a list cannot answer:
 
@@ -42,15 +42,15 @@ The smallest complete path, and the one that decides whether the tool feels
 usable. A new user has an API key and a task.
 
 ```
-$ iash provider add anthropic --api-key-env ANTHROPIC_API_KEY
+$ arxi provider add anthropic --api-key-env ANTHROPIC_API_KEY
 provider anthropic registered (key from $ANTHROPIC_API_KEY)
 
-$ iash model list
+$ arxi model list
 NAME                     PROVIDER    STATUS
 claude-sonnet-4-6        anthropic   enabled
 claude-opus-4-1          anthropic   disabled
 
-$ iash model enable claude-opus-4-1
+$ arxi model enable claude-opus-4-1
 model claude-opus-4-1 enabled
 ```
 
@@ -60,10 +60,10 @@ every user on the machine. Accepting `--api-key` would make the insecure path th
 short one.
 
 ```
-$ iash agent create reviewer --model claude-sonnet-4-6 --tools read,grep
+$ arxi agent create reviewer --model claude-sonnet-4-6 --tools read,grep
 agent reviewer created (tools: read, grep — policy: allow)
 
-$ iash run start reviewer "review the diff in HEAD and list real risks" --budget 2.00
+$ arxi run start reviewer "review the diff in HEAD and list real risks" --budget 2.00
 run r1 started (budget 2.00 USD, workspace auto→none)
 ```
 
@@ -78,21 +78,21 @@ isolation is needed for an agent that cannot write. Compare §20.4, where one
 `write` changes that decision.
 
 ```
-$ iash run list
+$ arxi run list
 ID   ACTOR      STATUS     SPENT   STAGE
 r1   reviewer   running    0.31    —
 
-$ iash run show r1
+$ arxi run show r1
 run r1: running (seq 12)
   reviewer: thinking (turn 3)
   budget: 0.3100 of 2.0000 USD spent in the tree
 
-$ iash run attach r1
+$ arxi run attach r1
 [r1 seq 13] tool.call read src/auth.go
 [r1 seq 14] llm.response 0.0900 USD
 [r1 seq 15] run.result
 
-$ iash run result r1
+$ arxi run result r1
 3 risks found: (1) token comparison is not constant-time ...
 ```
 
@@ -108,7 +108,7 @@ The first time the tool is not merely convenient. The agent needs `bash`, which
 nobody authorized.
 
 ```
-$ iash agent create backend --model claude-sonnet-4-6 --tools read,write,bash
+$ arxi agent create backend --model claude-sonnet-4-6 --tools read,write,bash
 agent backend created (tools: read, write — bash: ask)
 ```
 
@@ -123,12 +123,12 @@ first time you learn what an agent may do is when it asks, or worse, when it doe
 not:
 
 ```
-$ iash agent list
+$ arxi agent list
 NAME       MODEL                TOOLS              ADVISORY
 reviewer   claude-sonnet-4-6    read, grep         no
 backend    claude-sonnet-4-6    read, write, bash  no
 
-$ iash agent show backend
+$ arxi agent show backend
 agent backend
   model:    claude-sonnet-4-6
   tools:    read (allow), write (allow), bash (ask)
@@ -141,14 +141,14 @@ a table that tried to show three policies per row would be unreadable, and the
 column that matters at a glance is which agents can write at all.
 
 ```
-$ iash run start backend "fix the failing test in ./pkg/auth" --budget 5.00
+$ arxi run start backend "fix the failing test in ./pkg/auth" --budget 5.00
 run r1 started
 
-$ iash inbox
+$ arxi inbox
 ID        RUN  AGENT    KIND      QUESTION
 inbox-1   r1   backend  approval  run bash: go test ./pkg/auth/...
 
-$ iash inbox approve inbox-1
+$ arxi inbox approve inbox-1
 approved. backend unblocked (r1 seq 6)
 ```
 
@@ -160,8 +160,8 @@ unforeseen tool costs a whole run.
 Two other replies exist, and they are different acts:
 
 ```
-$ iash inbox reject inbox-1 --reason "do not run the suite, it hits staging"
-$ iash inbox reply  inbox-1 "use the -short flag"
+$ arxi inbox reject inbox-1 --reason "do not run the suite, it hits staging"
+$ arxi inbox reply  inbox-1 "use the -short flag"
 ```
 
 `reject` refuses a request and carries a reason that reaches the agent as
@@ -172,7 +172,7 @@ guess whether "no" meant *not allowed* or *not that way*.
 If this approval will recur every turn, fix the policy instead of the symptom:
 
 ```
-$ iash agent tool policy --agent backend --allow bash
+$ arxi agent tool policy --agent backend --allow bash
 ```
 
 That is exactly the second remedy `run why` prints in §20.3. The commands the
@@ -187,7 +187,7 @@ The use case the whole project exists for. This section is **real output**, not 
 specification:
 
 ```
-$ iash why testdata/scenarios/blocked-on-approval.json
+$ arxi why testdata/scenarios/blocked-on-approval.json
 run r1: running
 └─ backend: waiting (approval) since seq 5
    └─ waits for approval of the tool "bash" (inbox inbox-1)
@@ -195,8 +195,8 @@ run r1: running
 └─ budget: 0.4200 of 5.0000 USD spent in the tree
 
 possible remedies:
-  $ iash inbox approve inbox-1
-  $ iash agent tool policy --agent backend --allow bash
+  $ arxi inbox approve inbox-1
+  $ arxi agent tool policy --agent backend --allow bash
 ```
 
 Two properties of that output are load-bearing.
@@ -217,14 +217,14 @@ needs nothing from the runtime.
 Now the harder case — the run nobody flagged, because nothing failed:
 
 ```
-$ iash run why r2
+$ arxi run why r2
 run r2: running
 └─ nobody is working and nobody can start: the run is quiescent
    └─ stage review advances with quorum:3 and it is not met; everyone who
       could has already submitted: the rule is unsatisfiable with this blueprint
 
 possible remedies:
-  $ iash blueprint validate ./team.yaml
+  $ arxi blueprint validate ./team.yaml
 ```
 
 Three members, one `advisory`, `quorum:3`. Advisory members never count toward
@@ -261,7 +261,7 @@ interaction:
 ```
 
 ```
-$ iash blueprint validate ./team.yaml
+$ arxi blueprint validate ./team.yaml
 blueprint feature-team is valid (2 stages, 3 members)
   workspace: worktree  (resolved: backend and frontend can write)
   stage build:  advance_when=all      on_timeout=escalate
@@ -289,10 +289,10 @@ Printing the resolved values is what makes these defaults reviewable instead of
 folklore. A default you cannot see is indistinguishable from a bug when it fires.
 
 ```
-$ iash run start feature-team "implement rate limiting on /api/login" --budget 20.00 --workspace worktree
+$ arxi run start feature-team "implement rate limiting on /api/login" --budget 20.00 --workspace worktree
 run r1 started (3 members, stage build)
 
-$ iash run show r1
+$ arxi run show r1
 run r1: running (seq 34), stage build
   backend:  thinking (turn 4)
   frontend: submitted
@@ -314,7 +314,7 @@ The objective was right and incomplete. The user learns something while the team
 is mid-flight.
 
 ```
-$ iash run steer r1 "rate-limit by API key, not by IP — we are behind a CDN"
+$ arxi run steer r1 "rate-limit by API key, not by IP — we are behind a CDN"
 steered → coordinator (queued: backend is busy)
 ```
 
@@ -329,7 +329,7 @@ the one field left in `Interaction` after `turn_source` was retired.
 `run prompt` is the sibling verb and the distinction is real:
 
 ```
-$ iash run prompt r1 "also add a metrics counter" --to backend
+$ arxi run prompt r1 "also add a metrics counter" --to backend
 ```
 
 `steer` **corrects the course** of work in flight; `prompt` **injects a new
@@ -343,7 +343,7 @@ later show whether a change of direction or a new requirement caused a turn.
 For a script rather than a human, the write must be conditional:
 
 ```
-$ iash run steer r1 "use a sliding window" --if-seq 41
+$ arxi run steer r1 "use a sliding window" --if-seq 41
 rejected: run r1 is at seq 47, not 41. re-read and retry.
 ```
 
@@ -365,29 +365,29 @@ nobody can audit or defend.
 The ceiling exists to be hit; what matters is what happens then.
 
 ```
-$ iash run pause r1
+$ arxi run pause r1
 run r1 paused at seq 52 (2 turns finished, none interrupted)
 
-$ iash run unpause r1
+$ arxi run unpause r1
 run r1 resumed
 ```
 
 Now the ceiling:
 
 ```
-$ iash run show r1
+$ arxi run show r1
 run r1: paused (seq 61)
   backend: waiting (budget)
   budget: 20.0000 of 20.0000 USD spent in the tree
 
-$ iash run why r1
+$ arxi run why r1
 run r1: paused
 └─ paused by explicit request
 └─ backend: waiting (budget) since seq 60
    └─ the budget of the tree ran out
 
 possible remedies:
-  $ iash run unpause r1 --budget <higher>
+  $ arxi run unpause r1 --budget <higher>
 ```
 
 **Block and ask, do not kill.** The work already done is worth money already
@@ -402,7 +402,7 @@ figure for one run alone is a misleading fraction (§20.7).
 Cancelling is the other outcome, and it takes a reason:
 
 ```
-$ iash run cancel r1 --reason "requirement changed, rate limiting is deferred"
+$ arxi run cancel r1 --reason "requirement changed, rate limiting is deferred"
 run r1 cancelled at seq 61
 ```
 
@@ -418,7 +418,7 @@ An agent decides the task is too big and delegates. This is the scenario where a
 naive budget design silently fails.
 
 ```
-> iash_run_start {"actor": "researcher", "prompt": "survey rate limiting
+> arxi_run_start {"actor": "researcher", "prompt": "survey rate limiting
   algorithms", "budget": 3.00}
 run r2 started (parent r1, spawn_depth 1)
 ```
@@ -428,7 +428,7 @@ delegation is an inbox question, not an automatic spend. An agent that can spawn
 children unattended can multiply the bill without any human in the loop.
 
 ```
-$ iash run tree r1
+$ arxi run tree r1
 r1  feature-team   running     14.20 / 20.00 USD
 └─ r2  researcher  succeeded    2.90
    └─ r3  fetcher   succeeded    0.60
@@ -447,7 +447,7 @@ figure is a property of the tree, so there has to be a view whose subject *is* t
 tree.
 
 ```
-$ iash run result r2
+$ arxi run result r2
 sliding window over Redis is the best fit: ...
 ```
 
@@ -466,8 +466,8 @@ non-destructive and needed constantly, so requiring approval would make
 coordination the most expensive thing in the run.
 
 ```
-> iash_state_set {"key": "api_contract", "value": "POST /login {key, ts}"}
-> iash_state_get {"key": "api_contract"}
+> arxi_state_set {"key": "api_contract", "value": "POST /login {key, ts}"}
+> arxi_state_get {"key": "api_contract"}
 POST /login {key, ts}
 ```
 
@@ -476,7 +476,7 @@ Two agents doing read-modify-write on one key is exactly the lost-update race,
 and the fix is a version token, not a lock.
 
 ```
-> iash_state_lock {"key": "migrations/", "ttl": "10m"}
+> arxi_state_lock {"key": "migrations/", "ttl": "10m"}
 lock acquired (holder: backend, expires in 10m)
 ```
 
@@ -488,7 +488,7 @@ filesystem isolation. That is why `workspace: worktree` is a separate default
 (§20.4). The lock coordinates intent; the filesystem provides separation.
 
 ```
-> iash_event_emit {"type": "custom.contract_frozen", "payload": "{\"v\":2}"}
+> arxi_event_emit {"type": "custom.contract_frozen", "payload": "{\"v\":2}"}
 ```
 
 Agents can emit **only** in `custom.*`. If they could emit `stage.advanced`, they
@@ -497,12 +497,12 @@ the quorum that was supposed to constrain it. The namespace restriction is the
 whole enforcement.
 
 ```
-$ iash event log r1 --type stage.* --since-seq 40
+$ arxi event log r1 --type stage.* --since-seq 40
 seq 41  stage.submitted   frontend
 seq 44  stage.advanced    build → review
 seq 45  stage.entered     review
 
-$ iash event trace e44
+$ arxi event trace e44
 e44 stage.advanced (depth 2)
 └─ caused_by e41 stage.submitted (frontend)
    └─ caused_by e12 run.prompt (human)
@@ -521,7 +521,7 @@ appearing before `stage.entered` is the semantic ordering that forces
 A run from last week produced something wrong. Nothing is live any more.
 
 ```
-$ iash run replay r1 --until-seq 44
+$ arxi run replay r1 --until-seq 44
 [replay] seq 44 stage.advanced build → review
 state at seq 44: stage review, backend idle, frontend submitted
   spend: 0.0000 USD (replay does not execute effects)
@@ -538,7 +538,7 @@ would not error; it would just be confidently wrong, which is the failure mode a
 debugging tool can least afford.
 
 ```
-$ iash run fork r1 --at-seq 44 --budget 8.00
+$ arxi run fork r1 --at-seq 44 --budget 8.00
 run r4 forked from r1 at seq 44 (blueprint: ./team.yaml, re-read)
 ```
 
@@ -555,7 +555,7 @@ unsatisfiable `quorum:3` of §20.3 once the blueprint has been fixed.
 The team runs nightly. Nobody is watching, which changes every default.
 
 ```
-$ iash trigger create nightly-audit \
+$ arxi trigger create nightly-audit \
     --on "cron:0 3 * * *" \
     --then "run start security-team 'audit dependencies for new CVEs'" \
     --budget 5.00 --budget-period day \
@@ -582,12 +582,12 @@ naming the concept after only one of its two modes would make the event-driven
 half look like an afterthought.
 
 ```
-$ iash trigger list
+$ arxi trigger list
 NAME            ON              STATUS   LAST      NEXT
 nightly-audit   cron:0 3 * * *  active   ok        2026-08-27 03:00Z
 
-$ iash trigger show nightly-audit
-$ iash trigger pause nightly-audit
+$ arxi trigger show nightly-audit
+$ arxi trigger pause nightly-audit
 ```
 
 `pause`, not delete — the same reasoning as `run pause`. Silencing a noisy
@@ -602,7 +602,7 @@ computes what the next firing *would* be. Until something checks the clock, the
 `never` forever.
 
 ```
-$ iash trigger run --once
+$ arxi trigger run --once
 nightly-audit    started      due at 2026-08-27T03:00:00Z
 weekly-report    not due      next at 2026-08-31T09:00:00Z
 stale-cleanup    skipped      due at 2026-08-27T03:00:00Z; dropped because 1
@@ -610,7 +610,7 @@ stale-cleanup    skipped      due at 2026-08-27T03:00:00Z; dropped because 1
 ```
 
 ```
-$ iash trigger run --interval 30s
+$ arxi trigger run --interval 30s
 ```
 
 `trigger run`, not `scheduler run`: the noun already exists, and a second
@@ -643,21 +643,21 @@ that "skipped 4 nightly audits" is the actual state of their health dashboard.
 Prompt changes get judged by anecdote unless something measures them.
 
 ```
-$ iash eval run ./suites/review-quality.yaml --budget 12.00
+$ arxi eval run ./suites/review-quality.yaml --budget 12.00
 eval e20260828T223546: 20 cases, 20 judged, 11.30 USD of 12.00
   pass rate: 0.65 (13 passed, 7 failed)
   stored:    evals/e20260828T223546.json
 
 ... edit the prompt, run it again ...
 
-$ iash eval list
+$ arxi eval list
 ID                  SUITE           PASS  JUDGED  COST   NOTE
 e20260828T224101-2  review-quality  0.80  20/20   14.04
 e20260828T223546    review-quality  0.65  20/20   11.30
 
-compare two: iash eval compare e20260828T223546 e20260828T224101-2
+compare two: arxi eval compare e20260828T223546 e20260828T224101-2
 
-$ iash eval compare e20260828T223546 e20260828T224101-2
+$ arxi eval compare e20260828T223546 e20260828T224101-2
                    e20260828T223546  e20260828T224101-2     delta
 pass rate                      0.65                0.80     +0.15
 mean cost USD                 0.565               0.702    +0.137
@@ -698,13 +698,13 @@ Everything above was a human at a terminal. An agent reaches the same
 capabilities through one declaration:
 
 ```
-$ iash schema
-{"surface_version": 1, "tools": [{"name": "iash_run_why", ...}]}
+$ arxi schema
+{"surface_version": 1, "tools": [{"name": "arxi_run_why", ...}]}
 
-$ iash serve --listen unix:///tmp/iash.sock
+$ arxi serve --listen unix:///tmp/arxi.sock
 ```
 
-`run why` on the CLI, `iash_run_why` as a tool name, and `run.why` as a protocol
+`run why` on the CLI, `arxi_run_why` as a tool name, and `run.why` as a protocol
 message type are three **mechanical projections of one registry entry** —
 `strings.Join(c.Path, ".")` and friends, not a translation table
 (`TestOneSingleSurface`). That is why the verb is `cancel` and not `abort`

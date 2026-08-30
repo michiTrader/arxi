@@ -922,7 +922,7 @@ func TestAnOpenTurnCountsAsBusy(t *testing.T) {
 // ------------------------------------------------------------------ run why
 
 // Protects that `run why` does not only explain but gives the exact command. The
-// difference between "it is blocked" and "run `iash inbox approve inbox-1`" is
+// difference between "it is blocked" and "run `arxi inbox approve inbox-1`" is
 // the entire usefulness of the command.
 func TestRunWhyExplainsAndRemediates(t *testing.T) {
 	c := bp()
@@ -941,7 +941,7 @@ func TestRunWhyExplainsAndRemediates(t *testing.T) {
 	if len(w.Fix) == 0 {
 		t.Fatal("why explained the problem but did not give the command that fixes it")
 	}
-	if !strings.Contains(strings.Join(w.Fix, "\n"), "iash inbox approve") {
+	if !strings.Contains(strings.Join(w.Fix, "\n"), "arxi inbox approve") {
 		t.Errorf("the remedy is not executable: %v", w.Fix)
 	}
 }

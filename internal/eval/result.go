@@ -673,7 +673,7 @@ func DecodeRun(raw []byte) (*RunSummary, error) {
 
 	if err := dec.Decode(&s); err != nil {
 		return nil, fmt.Errorf("this is not a readable eval run: %w\n"+
-			"  these files are written by `iash eval run`; if this one was "+
+			"  these files are written by `arxi eval run`; if this one was "+
 			"edited by hand, compare it with another run in the same directory", err)
 	}
 	if err := s.Validate(); err != nil {

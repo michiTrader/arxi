@@ -1,19 +1,19 @@
-// Package surface declares ALL of iash's capability exactly once.
+// Package surface declares ALL of arxi's capability exactly once.
 //
 // The central idea: the CLI, the tools the agents see and the NDJSON protocol
 // messages are not three things that have to be kept in sync. They are three
 // projections of this list.
 //
-//	Cmd{Path: []string{"run","start"}}  ->  CLI:      iash run start
-//	                                    ->  tool:     iash_run_start
+//	Cmd{Path: []string{"run","start"}}  ->  CLI:      arxi run start
+//	                                    ->  tool:     arxi_run_start
 //	                                    ->  protocol: run.start
 //
 // The cost of adding a capability is one entry here. The cost of forgetting to
 // expose it somewhere is zero, because there is no "somewhere": there is a
 // mechanical derivation and tests that verify there are no exceptions.
 //
-// This is what makes it possible for an iash agent to use iash. An agent that
-// can read `iash schema` can discover what the system knows how to do without
+// This is what makes it possible for an arxi agent to use arxi. An agent that
+// can read `arxi schema` can discover what the system knows how to do without
 // anybody writing it a prompt with the list.
 package surface
 
@@ -78,8 +78,8 @@ type Cmd struct {
 	DeprecatedIn int
 }
 
-// Name is the name as a tool: iash_run_start.
-func (c Cmd) Name() string { return "iash_" + strings.Join(c.Path, "_") }
+// Name is the name as a tool: arxi_run_start.
+func (c Cmd) Name() string { return "arxi_" + strings.Join(c.Path, "_") }
 
 // CLI is the invocation as CLI: run start.
 func (c Cmd) CLI() string { return strings.Join(c.Path, " ") }
@@ -280,7 +280,7 @@ var Registry = []Cmd{
 		Params: []Param{
 			pos(p("name", "string", "trigger name")),
 			req(p("on", "string", "cron:|every:|at:|webhook:|file:|event:")),
-			// An iash command, with no scheme prefix. This was declared as
+			// An arxi command, with no scheme prefix. This was declared as
 			// "run:|emit:|notify:" and that was a second surface: a
 			// hand-written vocabulary of things a trigger can do, parallel to
 			// the registry it is sitting in. It had already drifted before any
@@ -291,13 +291,13 @@ var Registry = []Cmd{
 			// IS a command.
 			//
 			// Naming the surface instead of copying part of it means every verb
-			// iash gains is triggerable the day it lands, and no rename can
+			// arxi gains is triggerable the day it lands, and no rename can
 			// leave a stale prefix behind. Which commands are legal is derived
 			// from Kind&AgentTool: a trigger fires unattended, so it is not a
 			// human, and the commands withheld from non-humans (§20.12) are
 			// withheld for reasons that apply here at least as strongly. See
 			// trigger.ParseAction.
-			req(p("then", "string", "iash command to run, e.g. run start team 'objective'")),
+			req(p("then", "string", "arxi command to run, e.g. run start team 'objective'")),
 			// A trigger without a spend ceiling per period is an open
 			// subscription to the provider's bill.
 			req(p("budget", "number", "spend ceiling per period")),
@@ -376,7 +376,7 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("suite", "string", "suite file")),
 			req(p("budget", "number", "spend ceiling of the suite")),
 			// --sim, for the same reason `run start` declares it, and it was
-			// MISSING here until the CLI was RUN instead of read. cmd/iash
+			// MISSING here until the CLI was RUN instead of read. cmd/arxi
 			// gates `eval run` on --sim because there is no LLM-backed
 			// Executor, and it reads that flag out of this declaration — so an
 			// undeclared --sim did not make the gate lenient, it made the
@@ -386,7 +386,7 @@ var Registry = []Cmd{
 			// That is the failure mode of deriving the parser from the
 			// registry, and it is the right one to have. A hand-written parser
 			// would have accepted --sim and left the surface lying about what
-			// the command takes: `iash schema` would advertise two parameters
+			// the command takes: `arxi schema` would advertise two parameters
 			// where the CLI has three, and an agent would be told to call a
 			// command it cannot make run. Here the surface and the parser
 			// cannot disagree; they can only both be incomplete, loudly.
@@ -574,7 +574,7 @@ func jsonSchema(c Cmd) map[string]any {
 //
 // This is DERIVED from the Kind flag and never hand-listed. A server with its
 // own list of accepted types is a second surface: the day somebody adds a
-// registry entry with Kind|Protocol, `iash schema` advertises a message type the
+// registry entry with Kind|Protocol, `arxi schema` advertises a message type the
 // server answers "unknown type" to, and the client is being lied to by the only
 // document it was told to trust. Deriving it means the cost of exposing a new
 // capability over the wire stays one entry in Registry.
@@ -704,7 +704,7 @@ var shortFlags = map[string]string{
 //
 // What that rule creates is an obligation on every parser: if the registry
 // declares a parameter, --<name> must reach it. That is enforced by
-// TestEveryShortFlagReachesItsParameter in cmd/iash rather than trusted, because
+// TestEveryShortFlagReachesItsParameter in cmd/arxi rather than trusted, because
 // the failure mode is silent — expandShort produces a long flag the parser drops,
 // and the command runs with a value the user believes they supplied.
 
@@ -718,7 +718,7 @@ func Short(paramName string) string { return shortFlags[paramName] }
 
 // ShortFlags returns the whole assignment, sorted by letter.
 //
-// Exported so `iash surface` and the help text can print it from the same place
+// Exported so `arxi surface` and the help text can print it from the same place
 // the parser reads, rather than from a list somebody keeps up to date by hand.
 func ShortFlags() []Param {
 	out := make([]Param, 0, len(shortFlags))
@@ -740,7 +740,7 @@ func ShortFlags() []Param {
 // The command matters. `-r` is `run` everywhere `run` exists, but on a command
 // with no `run` parameter it is not "some other parameter starting with r" — it
 // is an error. Resolving it globally and letting the command ignore what it does
-// not know is how `iash blueprint validate -r foo` would end up silently
+// not know is how `arxi blueprint validate -r foo` would end up silently
 // validating nothing.
 func (c Cmd) LongFor(letter string) string {
 	if letter == "" {

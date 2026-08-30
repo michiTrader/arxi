@@ -9,7 +9,7 @@ import (
 
 // The fold over cases.
 //
-// `iash eval run ./suites/review-quality.yaml --budget 12.00` is twenty runs,
+// `arxi eval run ./suites/review-quality.yaml --budget 12.00` is twenty runs,
 // not one, and almost everything difficult about it follows from that: twenty
 // runs share one ceiling, any of them can fail without the others being wrong,
 // and the suite can run out of money before it runs out of cases.

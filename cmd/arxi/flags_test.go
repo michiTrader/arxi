@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // exp is expandShort with the command looked up by path, so the tests read like
@@ -25,7 +25,7 @@ func TestAShortFlagBecomesItsLongForm(t *testing.T) {
 	got, err := exp(t, "run start", "-p", "add rate limiting", "-b", "2.00", "-S")
 	if err != nil {
 		t.Fatalf("expanding documented short flags failed: %v. Every letter here "+
-			"is printed by `iash surface --flags`, so if one is rejected the help "+
+			"is printed by `arxi surface --flags`, so if one is rejected the help "+
 			"is advertising flags the parser does not accept", err)
 	}
 	want := []string{"--prompt", "add rate limiting", "--budget", "2.00", "--sim"}

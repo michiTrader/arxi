@@ -1,6 +1,6 @@
 # The blueprint from docs/design/20-use-cases.md, runnable.
 #
-# It exists so `iash run start` has something real to drive without the reader
+# It exists so `arxi run start` has something real to drive without the reader
 # writing a file first, and because a blueprint in a doc nobody can execute is a
 # blueprint nobody can check.
 name: feature-team

@@ -1,4 +1,4 @@
-# iash
+# arxi
 
 Agent systems you can actually debug.
 
@@ -24,15 +24,15 @@ over the same reducer, differing only in what is plugged into it:
 
 | feature | what it is | state |
 |---|---|---|
-| `iash run --sim` | fold + fake executor | **works** |
-| `iash why` | read the `State` that came out of the fold | **works** |
-| `iash run start` | fold + real executor | fold works, executor absent |
+| `arxi run --sim` | fold + fake executor | **works** |
+| `arxi why` | read the `State` that came out of the fold | **works** |
+| `arxi run start` | fold + real executor | fold works, executor absent |
 | `run replay` | fold over an old log, with no executor | declared, not built |
 
 The `state` column was added after this table was caught overclaiming. It listed
-all four as features; `iash run replay` and `iash run why` both answer *"declared
+all four as features; `arxi run replay` and `arxi run why` both answer *"declared
 in the surface but not implemented yet"*, and `Replay` appears nowhere in the
-source except inside a comment. What is real is `iash why` — a different command,
+source except inside a comment. What is real is `arxi why` — a different command,
 taking a state file rather than a run id — and the fold itself, which `--sim`
 drives end to end.
 
@@ -51,7 +51,7 @@ or `math/rand`.
 
 **It detects silence.** The most expensive failure mode is not the one that
 screams: it is the run that does not fail, does not finish and does not advance.
-`iash` detects it and emits `run.quiescent` with a diagnosis that names the
+`arxi` detects it and emits `run.quiescent` with a diagnosis that names the
 advance rule that is not met — including the hard case, where everybody
 submitted and the rule is still unsatisfiable (ADR-0004).
 
@@ -60,15 +60,15 @@ references (`blocked_ref`) and produces executable remedies. There is no `case`
 per blueprint:
 
 ```
-$ iash why runs/r1/state.json
+$ arxi why runs/r1/state.json
 run r1: running
 └─ backend: waiting (approval) since seq 5
    └─ waits for approval of the tool "bash" (inbox inbox-1)
 └─ budget: 0.4200 of 5.0000 USD spent in the tree
 
 possible remedies:
-  $ iash inbox approve inbox-1
-  $ iash agent tool policy --agent backend --allow bash
+  $ arxi inbox approve inbox-1
+  $ arxi agent tool policy --agent backend --allow bash
 ```
 
 **The defaults are security decisions.** If any member can write files, the
@@ -88,32 +88,32 @@ sync:
 
 | declaration | CLI | tool | protocol |
 |---|---|---|---|
-| `["run","start"]` | `run start` | `iash_run_start` | `run.start` |
+| `["run","start"]` | `run start` | `arxi_run_start` | `run.start` |
 
 There are **47 declared capabilities**, of which **33 are exposed as tools** to
 the agents. The difference is not an oversight: there are things a human can do
-from the terminal that an agent should not be able to do to itself. `iash
-surface` shows all of them; `iash schema` emits the manifest an agent consumes.
+from the terminal that an agent should not be able to do to itself. `arxi
+surface` shows all of them; `arxi schema` emits the manifest an agent consumes.
 
 ## Status
 
 What runs today:
 
 ```
-iash run start <bp> <prompt> --budget N --sim   run a blueprint to completion
-iash serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
-iash schema                     emit the surface manifest (JSON)
-iash surface                    see the whole surface, human readable
-iash why <file>                 explain why a run is not advancing
-iash blueprint validate <file>  check a blueprint and print the resolved config
-iash version                    version of the binary and of the surface
+arxi run start <bp> <prompt> --budget N --sim   run a blueprint to completion
+arxi serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
+arxi schema                     emit the surface manifest (JSON)
+arxi surface                    see the whole surface, human readable
+arxi why <file>                 explain why a run is not advancing
+arxi blueprint validate <file>  check a blueprint and print the resolved config
+arxi version                    version of the binary and of the surface
 ```
 
 Short flags exist, and they are the surface's, not each command's:
 
 ```
-$ iash run start -a ./examples/feature-team.yaml -p "add rate limiting" -b 2.00 -S
-$ iash surface --flags        # the whole assignment, and what each letter reaches
+$ arxi run start -a ./examples/feature-team.yaml -p "add rate limiting" -b 2.00 -S
+$ arxi surface --flags        # the whole assignment, and what each letter reaches
   -b  --budget         4 commands
   -r  --run            13 commands
   -p  --prompt         run start
@@ -143,7 +143,7 @@ value while the command reported success. The refusal says so rather than
 guessing:
 
 ```
-$ iash blueprint validate -r r1
+$ arxi blueprint validate -r r1
 -r is --run elsewhere in the surface, but blueprint validate has no run
 parameter, so there is nothing for it to abbreviate here.
 it accepts: -f (--path), -J (--json)
@@ -182,14 +182,14 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
 | `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
-| `cmd/iash` | the CLI, the short flags and the NDJSON protocol server | 137 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 137 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 16 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
 
 ```
-$ iash blueprint validate ./examples/feature-team.yaml
+$ arxi blueprint validate ./examples/feature-team.yaml
 blueprint feature-team is valid (2 stages, 3 members)
   workspace: worktree  (resolved: backend and frontend can write)
   stage build: advance_when=all on_timeout=escalate timeout=30m
@@ -220,7 +220,7 @@ blueprint, appends `run.started`, and then folds the log forward one step at a
 time until the run reaches a terminal status or goes quiet:
 
 ```
-$ iash run start ./examples/feature-team.yaml "add rate limiting" --budget 2.00 --sim
+$ arxi run start ./examples/feature-team.yaml "add rate limiting" --budget 2.00 --sim
 run rmtbqzimz-f393e8d7 started (budget 2.00 USD, workspace auto→worktree)
 run rmtbqzimz-f393e8d7 succeeded (seq 21, stopped by reaching a terminal status)
   stage:  review
@@ -249,7 +249,7 @@ is the truth, and nothing in the reducer knows which executor produced it.
 response per line, NDJSON, in order:
 
 ```
-$ iash serve
+$ arxi serve
 {"type":"hello","version":"0.0.1-spec","surface_version":1,"types":["agent.create",...],"implemented":["blueprint.validate","schema"]}
 {"id":"1","type":"blueprint.validate","params":{"path":"./examples/feature-team.yaml"}}
 {"id":"1","ok":true,"result":{"name":"feature-team","sha":"44c08e284a9c...","workspace":"worktree", ...}}
@@ -285,7 +285,7 @@ an upgrade helps":
 Collapse those into one code and every client picks one wrong behaviour for
 both: retry a typo forever, or abandon a capability that ships next week. A
 capability deliberately held off the wire says so too — `design` answers "is a
-real capability (`iash design`) and is not exposed to the protocol. That is
+real capability (`arxi design`) and is not exposed to the protocol. That is
 deliberate, not missing", because "unknown" would send the reader looking for a
 misspelling that isn't there.
 
@@ -305,7 +305,7 @@ one looks harmless.
 
 The dispatchable set is not a list inside the server. It is `ProtocolCommands()`,
 filtering the registry on `Kind&Protocol`. A hand-kept list would be a second
-surface, and the first time someone flags a new capability `Protocol`, `iash
+surface, and the first time someone flags a new capability `Protocol`, `arxi
 schema` would advertise a type the server answers `unknown_type` to — the client
 lied to by the one document it was told to trust.
 
@@ -354,17 +354,17 @@ oversleeps for a week reports six missed firings and applies `--on-missed` to
 them. There is no drift correction and no catch-up queue, because the store
 already is the queue — durably, across restarts.
 
-`iash trigger run` is the command that starts it. `--once` checks and exits,
+`arxi trigger run` is the command that starts it. `--once` checks and exits,
 which is what a systemd timer or a cron entry wants; without it the process
 loops on `--interval` until interrupted. `--dry-run --once` reports what would
 fire and starts nothing:
 
 ```bash
-$ iash trigger run --dry-run --once
+$ arxi trigger run --dry-run --once
   would run: schema
 nightly-audit            started      first firing, due at 2026-08-29T02:09:51Z
 
-$ iash trigger run --interval 30s
+$ arxi trigger run --interval 30s
 watching 1 trigger(s), checking every 30s
 nightly-audit            waiting      not due until 2026-08-29T03:00:00Z
 ```
@@ -399,17 +399,17 @@ Eval runs now persist. `eval run` writes one file per run, `eval list` shows
 what exists, and `eval compare` reads two of them:
 
 ```bash
-$ iash eval run --suite ./suites/review-quality.yaml --budget 1.00 --sim
+$ arxi eval run --suite ./suites/review-quality.yaml --budget 1.00 --sim
 eval e20260828T223546: 2 cases, 2 judged, 0.02 USD of 1.00
   pass rate: 1.00 (2 passed, 0 failed)
   stored:    evals/e20260828T223546.json
 
-$ iash eval list
+$ arxi eval list
 ID                  SUITE           PASS  JUDGED  COST  NOTE
 e20260828T223546-2  review-quality  1.00  2/2     0.02  sim
 e20260828T223546    review-quality  1.00  2/2     0.02  sim
 
-compare two: iash eval compare e20260828T223546 e20260828T223546-2
+compare two: arxi eval compare e20260828T223546 e20260828T223546-2
 ```
 
 Three things in that output are deliberate. The `sim` note is a stored field, so
@@ -425,16 +425,16 @@ breaks.
 
 Triggers are **most of the way done, and it is worth being precise about which
 part is not**. Schedules parse, firings compute, the action boundary is
-enforced, triggers persist, and `iash trigger create/list/show/pause` works:
+enforced, triggers persist, and `arxi trigger create/list/show/pause` works:
 
 ```bash
-$ iash trigger create nightly-audit \
+$ arxi trigger create nightly-audit \
     --on "cron:0 3 * * *" \
     --then "run start security-team 'audit dependencies for new CVEs'" \
     --budget 5.00 --budget-period day
 trigger nightly-audit created (next: 2026-08-29 03:00Z)
 
-$ iash trigger list
+$ arxi trigger list
 NAME           ON              STATUS  LAST   NEXT
 nightly-audit  cron:0 3 * * *  active  never  2026-08-29 03:00Z
 ```
@@ -475,7 +475,7 @@ error to point at.
 happens) is **refused at create time**, not stored. Stored, it would sit in
 `trigger list` marked active and never once run.
 
-`--then` takes **an iash command**, with no prefix:
+`--then` takes **an arxi command**, with no prefix:
 
 ```
 --then "run start security-team 'audit dependencies for new CVEs'"
@@ -484,8 +484,8 @@ happens) is **refused at create time**, not stored. Stored, it would sit in
 There is no action vocabulary, and that is the point. It was declared as
 `run:|emit:|notify:` — a hand-written list of things a trigger may do, sitting
 inside the file whose whole purpose is that there is only one such list — and it
-had already drifted: **`notify` is not a command in iash**. Naming the surface
-instead of copying part of it means every verb iash gains is triggerable the day
+had already drifted: **`notify` is not a command in arxi**. Naming the surface
+instead of copying part of it means every verb arxi gains is triggerable the day
 it lands.
 
 Which commands are legal is derived from the same flag that decides what an
@@ -508,7 +508,7 @@ cases executes them against a budget, and the result is reported together with
 what it is a measurement *of*:
 
 ```
-$ iash eval run ./suites/review-quality.yaml --budget 12.00 --sim
+$ arxi eval run ./suites/review-quality.yaml --budget 12.00 --sim
 note: one sample per case over 3 judged cases: a difference smaller than about
 0.50 between two runs of this suite is not distinguishable from noise
 
@@ -525,7 +525,7 @@ Run the same suite against a budget that cannot finish it, and the report change
 shape rather than just its numbers:
 
 ```
-$ iash eval run ./suites/review-quality.yaml --budget 0.02 --sim
+$ arxi eval run ./suites/review-quality.yaml --budget 0.02 --sim
 note: the budget ran out after 2 of 3 cases, so 1 case(s) never ran
 (rejects-hardcoded-secret) — the cases that DID run are the first ones in the
 file, not a sample of the suite, so this pass rate is over a prefix and carries
@@ -569,7 +569,7 @@ blueprint that does not exist would then judge every case, satisfy every
 author would find out after paying for nineteen real runs.
 
 ```
-$ iash eval run ./suites/typo.yaml --budget 12.00 --sim
+$ arxi eval run ./suites/typo.yaml --budget 12.00 --sim
 note: 2 case(s) errored and produced no judgeable answer; they are in the cost
 total (money was spent) and out of the pass rate (a harness failure is not a
 worse prompt)
@@ -655,7 +655,7 @@ real, certainty manufactured by the formula out of four samples.
 Requires Go 1.22.
 
 ```bash
-go build -o iash ./cmd/iash
+go build -o arxi ./cmd/arxi
 go test ./...
 ```
 
@@ -694,7 +694,7 @@ alternative was discarded and **which test enforces the decision**.
 internal/kernel/    the pure reducer: Decide, State, Event, Effect, Explain
 internal/surface/   the surface declared once, and its three projections
 internal/arch_test  the architectural boundaries, verified with go list
-cmd/iash/           the CLI
+cmd/arxi/           the CLI
 spec/               event contracts
 docs/design/        the execution model and the use cases
 docs/adr/           one file per decision that cannot change quietly

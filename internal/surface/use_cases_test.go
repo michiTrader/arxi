@@ -139,7 +139,7 @@ func TestEveryCapabilityHasAUseCase(t *testing.T) {
 
 	var missing []string
 	for _, c := range Registry {
-		// Accept the CLI form ("run why") or the tool form ("iash_run_why"):
+		// Accept the CLI form ("run why") or the tool form ("arxi_run_why"):
 		// the agent-facing sections legitimately use the tool name, and both
 		// are projections of the same Path (TestOneSingleSurface).
 		if strings.Contains(doc, c.CLI()) || strings.Contains(doc, c.Name()) {
@@ -162,17 +162,17 @@ func TestEveryCapabilityHasAUseCase(t *testing.T) {
 }
 
 // cliCommandRE finds the command invocations in the document: shell lines
-// starting with "$ iash" and agent lines starting with "> iash_".
+// starting with "$ arxi" and agent lines starting with "> arxi_".
 var (
-	cliCommandRE  = regexp.MustCompile(`(?m)^\$ iash ([a-z][a-z0-9 -]*)`)
-	toolCommandRE = regexp.MustCompile(`(?m)^> (iash_[a-z_]+)`)
+	cliCommandRE  = regexp.MustCompile(`(?m)^\$ arxi ([a-z][a-z0-9 -]*)`)
+	toolCommandRE = regexp.MustCompile(`(?m)^> (arxi_[a-z_]+)`)
 )
 
 // TestUseCasesOnlyInvokeRealCommands fails if the document demonstrates a verb
 // that does not exist.
 //
 // This is the stricter direction and the one that protects the reader. A
-// scenario that shows `iash run abort` teaches a command that will never work,
+// scenario that shows `arxi run abort` teaches a command that will never work,
 // and the reader blames themselves before blaming the doc. It is also how the
 // vocabulary stays single: if somebody renames `cancel` to `abort` in Registry,
 // this test names every example that has to change.
@@ -218,13 +218,13 @@ func TestUseCasesOnlyInvokeRealCommands(t *testing.T) {
 		if len(words) == 0 {
 			continue
 		}
-		// `iash why` and `iash version` are implemented-today shortcuts, not
+		// `arxi why` and `arxi version` are implemented-today shortcuts, not
 		// registry paths; main.go handles them directly.
 		if words[0] == "why" || words[0] == "version" || words[0] == "help" {
 			continue
 		}
 		if !resolves(words) {
-			bad = append(bad, "$ iash "+strings.Join(words, " "))
+			bad = append(bad, "$ arxi "+strings.Join(words, " "))
 		}
 	}
 

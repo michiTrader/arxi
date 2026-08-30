@@ -36,10 +36,10 @@ The four features stop being four programs:
 
 | feature | what it is |
 |---|---|
-| `iash run` | fold + real executor |
-| `iash run --sim` | fold + fake executor |
-| `iash run replay` | fold, with no executor |
-| `iash run why` | read the `State` that came out of the fold |
+| `arxi run` | fold + real executor |
+| `arxi run --sim` | fold + fake executor |
+| `arxi run replay` | fold, with no executor |
+| `arxi run why` | read the `State` that came out of the fold |
 
 The decision logic exists **once**. There is no way for `replay` to drift away
 from `run`, because there are not two implementations that could diverge.

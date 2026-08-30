@@ -97,8 +97,8 @@
       }
     ],
     "fix": [
-      "iash inbox approve inbox-1",
-      "iash agent tool policy --agent backend --allow bash"
+      "arxi inbox approve inbox-1",
+      "arxi agent tool policy --agent backend --allow bash"
     ]
   }
 }

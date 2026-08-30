@@ -18,7 +18,7 @@ self-contained.
 
 ## Task
 
-Translate the entire `iash` repository (`github.com/michiTrader/iash`, Go 1.22)
+Translate the entire `arxi` repository (`github.com/michiTrader/arxi`, Go 1.22)
 from Spanish to English. This is a **dedicated, mechanical migration pass**: not
 behavior changes, not refactors, not design improvements, not "while I'm here"
 fixes. Translation only.
@@ -28,7 +28,7 @@ satisfy. The end state is a fully English repository with zero Spanish content.
 
 ## Context you need before starting
 
-`iash` is an agent orchestration system built on one pure reducer:
+`arxi` is an agent orchestration system built on one pure reducer:
 
 ```go
 Decide(State, Event, Config) -> (State', []Effect)
@@ -54,7 +54,7 @@ steps at the bottom and commit after each.
 Verify the baseline before changing anything:
 
 ```bash
-go build -o /tmp/iash ./cmd/iash
+go build -o /tmp/arxi ./cmd/arxi
 go test -count=1 ./...
 ```
 
@@ -162,7 +162,7 @@ forbidden by `AGENTS.md`.
 
 ### 5. User-facing strings
 
-CLI usage text in `cmd/iash/main.go`, all capability descriptions in
+CLI usage text in `cmd/arxi/main.go`, all capability descriptions in
 `internal/surface/surface.go`, the `Why` output lines in
 `internal/kernel/why.go`, and the reducer's diagnostic strings in
 `internal/kernel/decide.go`.
@@ -190,7 +190,7 @@ English), `docs/adr/*.md` (all 7 plus its README), `docs/design/10-execution.md`
 `spec/events.md`.
 
 **Rename `docs/design/10-execution.md` → `docs/design/10-execution.md`** and
-update every reference to it. It is cited in at least: `cmd/iash/main.go` usage
+update every reference to it. It is cited in at least: `cmd/arxi/main.go` usage
 text, `internal/arch_test.go` failure message, `README.md`, and several ADRs.
 Grep for `10-ejecucion` to catch them all (the file is now `10-execution.md`).
 
@@ -224,7 +224,7 @@ They are already English and must stay byte-identical:
   `"succeeded"`, `"failed"`
 - Config values: `"worktree"`, `"escalate"`, `"coalesce"`, `"all"`, `"quorum:N"`,
   `"queue"`, `"steer"`, `"reject"`
-- Surface paths and derived names: `run start` / `iash_run_start` / `run.start`
+- Surface paths and derived names: `run start` / `arxi_run_start` / `run.start`
 
 Changing any of these is a **breaking protocol change**, not a translation.
 
@@ -273,7 +273,7 @@ Work package by package so each step is independently verifiable:
 5. `internal/kernel/decide_test.go` — test names, messages, helper renames
 6. `internal/surface/surface.go` + `surface_test.go`
 7. `internal/arch_test.go` — includes the doc path in its failure message
-8. `cmd/iash/main.go` — comments + usage text
+8. `cmd/arxi/main.go` — comments + usage text
 9. Docs: README, ADRs (with `git mv`), design doc (with `git mv`), spec
 10. Regenerate the golden, verify the diff
 
@@ -288,10 +288,10 @@ git add -A && git commit -m "i18n: translate <area> to English" && git push
 
 ## Acceptance criteria
 
-- [ ] `go build ./cmd/iash` succeeds
+- [ ] `go build ./cmd/arxi` succeeds
 - [ ] `go vet ./...` clean, `gofmt -l .` prints nothing
 - [ ] `go test -count=1 ./...` — all 45 tests pass in all three packages
-- [ ] `iash why testdata/scenarios/blocked-on-approval.json` prints an English
+- [ ] `arxi why testdata/scenarios/blocked-on-approval.json` prints an English
       wait tree with English remediation commands
 - [ ] Zero Spanish remains. Verify:
       `grep -rniE "[áéíóúñ¿¡]" --include=*.go --include=*.md .` returns nothing,

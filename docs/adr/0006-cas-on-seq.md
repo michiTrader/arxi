@@ -33,7 +33,7 @@ specified.
 Concurrency is resolved with **compare-and-swap on `seq`**:
 
 ```
-iash run prompt <run> "..." --if-seq 40
+arxi run prompt <run> "..." --if-seq 40
 ```
 
 It applies only if the run is at exactly `seq 40`. If another event arrived in

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // Fake is the executor that `--sim` and every test use instead of calling a

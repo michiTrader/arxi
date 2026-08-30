@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/michiTrader/iash/internal/trigger"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
 // ---- fakes -----------------------------------------------------------------

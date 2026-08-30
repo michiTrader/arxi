@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // The trigger CLI, exercised as a process.
@@ -29,7 +29,7 @@ import (
 // unobservable until the thing it changes was named: the exit code. That is the
 // distinction a CI job acts on, so it is worth a test.
 //
-// The price is a `go build` per run, paid once and cached in iashBin. Spending
+// The price is a `go build` per run, paid once and cached in arxiBin. Spending
 // it buys the only assertions that can exist about exit codes, about stderr on
 // the failure paths, and about whether a refused create left anything behind.
 //
@@ -43,7 +43,7 @@ import (
 //     that, so the value is already UTC when it arrives. The call is a guard
 //     against that upstream changing, and a guard whose invariant currently
 //     holds elsewhere cannot be observed from here. Testing it would mean
-//     asserting on a fact about internal/trigger from cmd/iash, which is the
+//     asserting on a fact about internal/trigger from cmd/arxi, which is the
 //     wrong package to state it in — internal/trigger already does.
 //
 //   - Deleting the declared-but-unbuilt fallback changes nothing, because all
@@ -61,7 +61,7 @@ import (
 
 var (
 	binDir  string // lives for the whole package run; see TestMain
-	iashBin string // the built binary, or "" until the first subprocess test
+	arxiBin string // the built binary, or "" until the first subprocess test
 )
 
 // TestMain owns the binary's lifetime.
@@ -74,9 +74,9 @@ var (
 // only scope that is.
 //
 // The directory is created here and the build stays lazy: a run of `go test
-// ./cmd/iash/` that touches none of these tests should not pay for a compile.
+// ./cmd/arxi/` that touches none of these tests should not pay for a compile.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "iash-cli-test")
+	dir, err := os.MkdirTemp("", "arxi-cli-test")
 	if err != nil {
 		panic("creating a directory for the test binary: " + err.Error())
 	}
@@ -92,15 +92,15 @@ func TestMain(m *testing.M) {
 // anything that wraps the process can substitute its own.
 func buildIash(t *testing.T) string {
 	t.Helper()
-	if iashBin != "" {
-		return iashBin
+	if arxiBin != "" {
+		return arxiBin
 	}
-	bin := filepath.Join(binDir, "iash")
+	bin := filepath.Join(binDir, "arxi")
 	out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput()
 	if err != nil {
-		t.Fatalf("building iash: %v\n%s", err, out)
+		t.Fatalf("building arxi: %v\n%s", err, out)
 	}
-	iashBin = bin
+	arxiBin = bin
 	return bin
 }
 
@@ -109,13 +109,13 @@ type result struct {
 	code int
 }
 
-// iash runs the binary in dir and reports what a caller sees.
+// arxi runs the binary in dir and reports what a caller sees.
 //
 // CombinedOutput and not separate streams: every assertion here is about
 // whether an explanation reached the user, and a test that asserted on stderr
 // alone would pass if a diagnostic were printed to stdout — which is a real bug
 // for anybody piping the output, but not the bug these tests are about.
-func iash(t *testing.T, dir string, args ...string) result {
+func arxi(t *testing.T, dir string, args ...string) result {
 	t.Helper()
 	cmd := exec.Command(buildIash(t), args...)
 	cmd.Dir = dir
@@ -124,7 +124,7 @@ func iash(t *testing.T, dir string, args ...string) result {
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
-		t.Fatalf("running iash %v: %v", args, err)
+		t.Fatalf("running arxi %v: %v", args, err)
 	}
 	return result{out: string(out), code: code}
 }
@@ -160,7 +160,7 @@ func declaredTriggerSubcommands() []string {
 func TestTheDocumentedSessionWorksEndToEnd(t *testing.T) {
 	dir := workdir(t)
 
-	got := iash(t, dir, "trigger", "create", "nightly-audit",
+	got := arxi(t, dir, "trigger", "create", "nightly-audit",
 		"--on", "cron:0 3 * * *",
 		"--then", "run start security-team 'audit dependencies for new CVEs'",
 		"--budget", "5.00", "--budget-period", "day",
@@ -177,7 +177,7 @@ func TestTheDocumentedSessionWorksEndToEnd(t *testing.T) {
 		t.Errorf("after create: %v", err)
 	}
 
-	got = iash(t, dir, "trigger", "list")
+	got = arxi(t, dir, "trigger", "list")
 	if got.code != 0 {
 		t.Fatalf("list failed with %d:\n%s", got.code, got.out)
 	}
@@ -190,7 +190,7 @@ func TestTheDocumentedSessionWorksEndToEnd(t *testing.T) {
 		}
 	}
 
-	got = iash(t, dir, "trigger", "show", "nightly-audit")
+	got = arxi(t, dir, "trigger", "show", "nightly-audit")
 	if got.code != 0 {
 		t.Fatalf("show failed with %d:\n%s", got.code, got.out)
 	}
@@ -203,7 +203,7 @@ func TestTheDocumentedSessionWorksEndToEnd(t *testing.T) {
 		}
 	}
 
-	got = iash(t, dir, "trigger", "pause", "nightly-audit")
+	got = arxi(t, dir, "trigger", "pause", "nightly-audit")
 	if got.code != 0 {
 		t.Fatalf("pause failed with %d:\n%s", got.code, got.out)
 	}
@@ -212,7 +212,7 @@ func TestTheDocumentedSessionWorksEndToEnd(t *testing.T) {
 	}
 
 	// Pausing twice reports rather than pretending to have just done it.
-	got = iash(t, dir, "trigger", "pause", "nightly-audit")
+	got = arxi(t, dir, "trigger", "pause", "nightly-audit")
 	if got.code != 0 {
 		t.Fatalf("second pause failed with %d:\n%s", got.code, got.out)
 	}
@@ -221,7 +221,7 @@ func TestTheDocumentedSessionWorksEndToEnd(t *testing.T) {
 	}
 
 	// And a paused trigger's NEXT is not a timestamp.
-	got = iash(t, dir, "trigger", "list")
+	got = arxi(t, dir, "trigger", "list")
 	if !strings.Contains(got.out, "(paused)") {
 		t.Errorf("after pausing, list said:\n%s\nwant the NEXT column to say (paused)", got.out)
 	}
@@ -254,7 +254,7 @@ func TestARefusedCreateWritesNothing(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := workdir(t)
-			got := iash(t, dir, tc.args...)
+			got := arxi(t, dir, tc.args...)
 			if got.code != 2 {
 				t.Errorf("exit %d, want 2 (%s):\n%s", got.code, tc.why, got.out)
 			}
@@ -278,7 +278,7 @@ func TestARefusedCreateWritesNothing(t *testing.T) {
 // every unit test in internal/trigger would still pass.
 func TestACommandWithheldFromAgentsIsRefusedAtCreateTime(t *testing.T) {
 	dir := workdir(t)
-	got := iash(t, dir, "trigger", "create", "self-approve",
+	got := arxi(t, dir, "trigger", "create", "self-approve",
 		"--on", "cron:0 3 * * *",
 		"--then", "inbox approve abc123",
 		"--budget", "1", "--budget-period", "day")
@@ -301,11 +301,11 @@ func TestACommandWithheldFromAgentsIsRefusedAtCreateTime(t *testing.T) {
 func TestDeleteIsAnsweredWithPauseAndTheReason(t *testing.T) {
 	dir := workdir(t)
 	for _, verb := range []string{"delete", "rm", "remove"} {
-		got := iash(t, dir, "trigger", verb, "nightly")
+		got := arxi(t, dir, "trigger", verb, "nightly")
 		if got.code != 2 {
 			t.Errorf("trigger %s exited %d, want 2:\n%s", verb, got.code, got.out)
 		}
-		if !strings.Contains(got.out, "iash trigger pause") {
+		if !strings.Contains(got.out, "arxi trigger pause") {
 			t.Errorf("trigger %s does not point at pause:\n%s", verb, got.out)
 		}
 		if strings.Contains(got.out, "is not a trigger command") {
@@ -338,12 +338,12 @@ func TestADeclaredButUnbuiltSubcommandIsNotCalledUnknown(t *testing.T) {
 		// run` without --once loops until interrupted, which is its purpose,
 		// and this loop reaches it precisely because it reads the registry
 		// instead of hand-listing subcommands. Before the bound, declaring
-		// that capability hung the whole cmd/iash package for the full test
+		// that capability hung the whole cmd/arxi package for the full test
 		// timeout and reported FAIL with a goroutine dump and no test name.
 		//
 		// A second is plenty: every refusal here is printed before any work
 		// starts, so the message this test reads is already out.
-		out := iashBounded(t, dir, time.Second, "trigger", sub)
+		out := arxiBounded(t, dir, time.Second, "trigger", sub)
 		checked++
 		if strings.Contains(out, "is not a trigger command") {
 			t.Errorf("trigger %s is declared in the registry but the CLI calls it unknown:\n%s",
@@ -364,7 +364,7 @@ func TestTheTableAlignsAroundTheLongestName(t *testing.T) {
 	dir := workdir(t)
 	names := []string{"a", "nightly-audit-with-a-very-long-name"}
 	for _, n := range names {
-		got := iash(t, dir, "trigger", "create", n,
+		got := arxi(t, dir, "trigger", "create", n,
 			"--on", "cron:0 3 * * *", "--then", "run start t 'x'",
 			"--budget", "1", "--budget-period", "day")
 		if got.code != 0 {
@@ -372,7 +372,7 @@ func TestTheTableAlignsAroundTheLongestName(t *testing.T) {
 		}
 	}
 
-	got := iash(t, dir, "trigger", "list")
+	got := arxi(t, dir, "trigger", "list")
 	if got.code != 0 {
 		t.Fatalf("list: %d\n%s", got.code, got.out)
 	}
@@ -402,7 +402,7 @@ func TestTheTableAlignsAroundTheLongestName(t *testing.T) {
 // scheduled — is exactly what the blank table fails to state.
 func TestAnEmptyListSaysThereAreNoTriggers(t *testing.T) {
 	dir := workdir(t)
-	got := iash(t, dir, "trigger", "list")
+	got := arxi(t, dir, "trigger", "list")
 	if got.code != 0 {
 		t.Fatalf("exit %d on an empty store:\n%s", got.code, got.out)
 	}
@@ -420,7 +420,7 @@ func TestAnEmptyListSaysThereAreNoTriggers(t *testing.T) {
 	}
 	// And it says how to make one, because the state is almost always the
 	// state a first-time user is in.
-	if !strings.Contains(got.out, "iash trigger create") {
+	if !strings.Contains(got.out, "arxi trigger create") {
 		t.Errorf("an empty list does not say how to create one:\n%s", got.out)
 	}
 }
@@ -438,12 +438,12 @@ func TestAnEmptyListSaysThereAreNoTriggers(t *testing.T) {
 func TestShowAnnouncesTheAmbiguousDayRuleToAPerson(t *testing.T) {
 	dir := workdir(t)
 
-	if got := iash(t, dir, "trigger", "create", "both-days",
+	if got := arxi(t, dir, "trigger", "create", "both-days",
 		"--on", "cron:0 3 1 * 1", "--then", "run start t 'x'",
 		"--budget", "1", "--budget-period", "day"); got.code != 0 {
 		t.Fatalf("create: %d\n%s", got.code, got.out)
 	}
-	got := iash(t, dir, "trigger", "show", "both-days")
+	got := arxi(t, dir, "trigger", "show", "both-days")
 	if got.code != 0 {
 		t.Fatalf("show: %d\n%s", got.code, got.out)
 	}
@@ -455,12 +455,12 @@ func TestShowAnnouncesTheAmbiguousDayRuleToAPerson(t *testing.T) {
 	// And it is not printed on schedules where it does not apply: a warning
 	// that appears on every trigger is a warning nobody reads, which is the
 	// same as not printing it on the one that needs it.
-	if got := iash(t, dir, "trigger", "create", "plain",
+	if got := arxi(t, dir, "trigger", "create", "plain",
 		"--on", "cron:0 3 * * *", "--then", "run start t 'x'",
 		"--budget", "1", "--budget-period", "day"); got.code != 0 {
 		t.Fatalf("create: %d\n%s", got.code, got.out)
 	}
-	got = iash(t, dir, "trigger", "show", "plain")
+	got = arxi(t, dir, "trigger", "show", "plain")
 	if strings.Contains(got.out, "EITHER") {
 		t.Errorf("an unambiguous schedule carried the day-rule note:\n%s", got.out)
 	}
@@ -481,7 +481,7 @@ func TestShowAnnouncesTheAmbiguousDayRuleToAPerson(t *testing.T) {
 func TestShowReportsMissedFiringsAndThePolicyTogether(t *testing.T) {
 	dir := workdir(t)
 
-	if got := iash(t, dir, "trigger", "create", "overslept",
+	if got := arxi(t, dir, "trigger", "create", "overslept",
 		"--on", "cron:0 3 * * *", "--then", "run start t 'x'",
 		"--budget", "1", "--budget-period", "day",
 		"--on-missed", "run-once"); got.code != 0 {
@@ -507,7 +507,7 @@ func TestShowReportsMissedFiringsAndThePolicyTogether(t *testing.T) {
 		t.Fatalf("writing the patched trigger: %v", err)
 	}
 
-	got := iash(t, dir, "trigger", "show", "overslept")
+	got := arxi(t, dir, "trigger", "show", "overslept")
 	if got.code != 0 {
 		t.Fatalf("show: %d\n%s", got.code, got.out)
 	}
@@ -539,7 +539,7 @@ func TestExitCodesSeparateMisuseFromFailure(t *testing.T) {
 
 	// A trigger to load, so the "missing" cases are missing for the right
 	// reason.
-	if got := iash(t, dir, "trigger", "create", "exists",
+	if got := arxi(t, dir, "trigger", "create", "exists",
 		"--on", "cron:0 3 * * *", "--then", "run start t 'x'",
 		"--budget", "1", "--budget-period", "day"); got.code != 0 {
 		t.Fatalf("setup create: %d\n%s", got.code, got.out)
@@ -564,7 +564,7 @@ func TestExitCodesSeparateMisuseFromFailure(t *testing.T) {
 	}
 	for _, tc := range misuse {
 		t.Run("misuse: "+tc.name, func(t *testing.T) {
-			if got := iash(t, dir, tc.args...); got.code != 2 {
+			if got := arxi(t, dir, tc.args...); got.code != 2 {
 				t.Errorf("exit %d, want 2 (misuse):\n%s", got.code, got.out)
 			}
 		})
@@ -582,7 +582,7 @@ func TestExitCodesSeparateMisuseFromFailure(t *testing.T) {
 	}
 	for _, tc := range failure {
 		t.Run("failure: "+tc.name, func(t *testing.T) {
-			if got := iash(t, dir, tc.args...); got.code != 1 {
+			if got := arxi(t, dir, tc.args...); got.code != 1 {
 				t.Errorf("exit %d, want 1 (operational failure):\n%s", got.code, got.out)
 			}
 		})

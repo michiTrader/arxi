@@ -2,7 +2,7 @@
 
 ## 10.1 A single function decides
 
-All of iash turns around one function:
+All of arxi turns around one function:
 
 ```go
 Decide(State, Event, Config) -> (State', []Effect)
@@ -17,10 +17,10 @@ feature instead of four programs that have to be kept in sync:
 
 | feature | what it is |
 |---|---|
-| `iash run` | fold + real executor |
-| `iash run --sim` | fold + fake executor |
-| `iash run replay` | fold over an old log, with no executor |
-| `iash run why` | read the `State` that came out of the fold |
+| `arxi run` | fold + real executor |
+| `arxi run --sim` | fold + fake executor |
+| `arxi run replay` | fold over an old log, with no executor |
+| `arxi run why` | read the `State` that came out of the fold |
 
 In a design where the reducer calls the network, `replay` is a separate program
 that reimplements the logic of the main one. It is always out of date and nobody
