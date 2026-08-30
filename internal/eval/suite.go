@@ -18,7 +18,7 @@
 //     delta when it is a change of question.
 //
 // Both are handled here, and both are the reason this is a package and not a
-// pair of helpers in cmd/iash.
+// pair of helpers in cmd/arxi.
 //
 // # The limitation this package does not hide
 //
@@ -43,7 +43,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/blueprint"
 )
 
 // Suite is a validated evaluation suite.

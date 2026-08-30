@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // Blueprint is a loaded blueprint: the raw bytes, their digest, and the config

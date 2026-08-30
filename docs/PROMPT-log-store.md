@@ -12,7 +12,7 @@ look fine in review and fail once a month in production.
 ## Task
 
 Implement a new package `internal/logstore` in the Go repository
-`github.com/michiTrader/iash` (Go 1.22). It is the append-only event log: the
+`github.com/michiTrader/arxi` (Go 1.22). It is the append-only event log: the
 component that owns durability and sequence-number assignment.
 
 **Read `AGENTS.md` first.** It is binding. The two rules that will shape your
@@ -30,7 +30,7 @@ you are implementing it), `docs/adr/0006-cas-on-seq.md`, `spec/events.md`, and
 
 ## Context: what this system is, in one paragraph
 
-`iash` orchestrates teams of LLM agents. Its whole design rests on one pure
+`arxi` orchestrates teams of LLM agents. Its whole design rests on one pure
 function in `internal/kernel`:
 
 ```go
@@ -66,7 +66,7 @@ disk.
 - Any change to `internal/kernel`. It is finished, 45 tests pass, and it is the
   one package that must stay pure. If you believe you need to change it, stop
   and say so in your final message with the reason — do not change it.
-- CLI wiring in `cmd/iash`.
+- CLI wiring in `cmd/arxi`.
 
 If you find yourself needing something from `internal/exec` to finish, that is a
 signal the boundary is wrong. Say so rather than inventing an interface for it.

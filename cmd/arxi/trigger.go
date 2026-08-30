@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/michiTrader/iash/internal/surface"
-	"github.com/michiTrader/iash/internal/trigger"
-	"github.com/michiTrader/iash/internal/trigstore"
+	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/trigger"
+	"github.com/michiTrader/arxi/internal/trigstore"
 )
 
 // The `trigger` commands: create, list, show, pause.
@@ -24,7 +24,7 @@ import (
 // four required, two enumerated, and every one of those facts is ALREADY stated
 // in the registry. Writing the switch by hand would mean stating them twice, and
 // the second copy is the one nobody updates: a flag added to the registry would
-// be advertised by `iash surface`, offered to agents in the tool schema, and
+// be advertised by `arxi surface`, offered to agents in the tool schema, and
 // then dropped on the floor here — parsed as unknown or, worse, accepted and
 // ignored.
 //
@@ -68,8 +68,8 @@ func cmdTrigger(args []string) {
 		// is what a user reaches for, it is declared nowhere, and "unknown
 		// subcommand" would leave them believing they typed it wrong.
 		if args[0] == "delete" || args[0] == "rm" || args[0] == "remove" {
-			fmt.Fprintln(os.Stderr, "iash trigger has no delete.\n"+
-				"  use `iash trigger pause NAME`: silencing a noisy trigger while "+
+			fmt.Fprintln(os.Stderr, "arxi trigger has no delete.\n"+
+				"  use `arxi trigger pause NAME`: silencing a noisy trigger while "+
 				"you investigate should not destroy its configuration and its "+
 				"history, and the reason it was stopped is usually the thing you "+
 				"want to read later (docs/design/20-use-cases.md §20.10)")
@@ -78,13 +78,13 @@ func cmdTrigger(args []string) {
 		// A trigger subcommand that IS declared but has no implementation here
 		// must fall through to main's "declared but not implemented" answer,
 		// not be called unknown. Saying "not a trigger command" about something
-		// `iash surface` lists sends the user hunting for a typo they never
+		// `arxi surface` lists sends the user hunting for a typo they never
 		// made — the precise failure main.go's fallback exists to prevent, and
 		// which this switch would reintroduce for whatever is declared next.
 		if surface.Lookup("trigger", args[0]) != nil {
 			notImplemented(append([]string{"trigger"}, args...))
 		}
-		fmt.Fprintf(os.Stderr, "iash trigger: %q is not a trigger command.\n", args[0])
+		fmt.Fprintf(os.Stderr, "arxi trigger: %q is not a trigger command.\n", args[0])
 		triggerUsage()
 		os.Exit(2)
 	}
@@ -92,12 +92,12 @@ func cmdTrigger(args []string) {
 
 func triggerUsage() {
 	fmt.Fprint(os.Stderr, `usage:
-  iash trigger create NAME --on SPEC --then CMD --budget N --budget-period P
-  iash trigger list [--json]
-  iash trigger show NAME [--json]
-  iash trigger pause NAME
+  arxi trigger create NAME --on SPEC --then CMD --budget N --budget-period P
+  arxi trigger list [--json]
+  arxi trigger show NAME [--json]
+  arxi trigger pause NAME
 
-  iash trigger create --help    every flag, with its legal values
+  arxi trigger create --help    every flag, with its legal values
 `)
 }
 
@@ -105,7 +105,7 @@ func triggerUsage() {
 func openStore() *trigstore.Store {
 	s, err := trigstore.Open(triggerDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger: %v\n", err)
 		os.Exit(1)
 	}
 	return s
@@ -115,13 +115,13 @@ func cmdTriggerCreate(args []string) {
 	c := surface.Lookup("trigger", "create")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger create: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger create: %v\n", err)
 		os.Exit(2)
 	}
 
 	budget, err := strconv.ParseFloat(vals["budget"], 64)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger create: --budget %q is not a "+
+		fmt.Fprintf(os.Stderr, "arxi trigger create: --budget %q is not a "+
 			"number.\n  it is a spend ceiling in whole currency units, e.g. "+
 			"--budget 5.00\n", vals["budget"])
 		os.Exit(2)
@@ -146,12 +146,12 @@ func cmdTriggerCreate(args []string) {
 	// same typo arrives as "the trigger store refused this", and a CI job that
 	// separates the two would file a broken-storage report for a bad schedule.
 	if err := r.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger create: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger create: %v\n", err)
 		os.Exit(2)
 	}
 
 	if err := openStore().Create(r); err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger create: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger create: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -166,13 +166,13 @@ func cmdTriggerList(args []string) {
 	c := surface.Lookup("trigger", "list")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger list: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger list: %v\n", err)
 		os.Exit(2)
 	}
 
 	rs, err := openStore().List()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger list: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger list: %v\n", err)
 		os.Exit(1)
 	}
 	now := nowFunc()
@@ -187,7 +187,7 @@ func cmdTriggerList(args []string) {
 	// nothing is scheduled — is precisely what a blank table fails to state.
 	if len(rs) == 0 {
 		fmt.Printf("no triggers in %s/\n", triggerDir)
-		fmt.Println("  create one: iash trigger create NAME --on \"cron:0 3 * * *\" " +
+		fmt.Println("  create one: arxi trigger create NAME --on \"cron:0 3 * * *\" " +
 			"--then \"run start team 'objective'\" --budget 5.00 --budget-period day")
 		return
 	}
@@ -226,13 +226,13 @@ func cmdTriggerShow(args []string) {
 	c := surface.Lookup("trigger", "show")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger show: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger show: %v\n", err)
 		os.Exit(2)
 	}
 
 	r, err := openStore().Load(vals["name"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger show: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger show: %v\n", err)
 		os.Exit(1)
 	}
 	now := nowFunc()
@@ -283,14 +283,14 @@ func cmdTriggerPause(args []string) {
 	c := surface.Lookup("trigger", "pause")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger pause: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger pause: %v\n", err)
 		os.Exit(2)
 	}
 
 	st := openStore()
 	r, err := st.Load(vals["name"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger pause: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger pause: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -305,7 +305,7 @@ func cmdTriggerPause(args []string) {
 
 	r.Status = trigger.StatusPaused
 	if err := st.Save(r); err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger pause: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger pause: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("trigger %s paused (it will not fire; resume is not implemented yet)\n",
@@ -430,7 +430,7 @@ func listPayload(rs []trigger.Record, now time.Time) map[string]any {
 func emitJSON(v any) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash trigger: encoding JSON: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi trigger: encoding JSON: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(string(b))
@@ -697,7 +697,7 @@ func minInt(a, b int) int {
 // INSTEAD of the source. Built from c.Params, it cannot describe a flag the
 // parser does not accept, or omit one it does.
 func printDeclaredHelp(c *surface.Cmd) {
-	fmt.Printf("iash %s — %s\n\n", c.CLI(), c.Desc)
+	fmt.Printf("arxi %s — %s\n\n", c.CLI(), c.Desc)
 	for _, pp := range c.Params {
 		kind := "  --" + pp.Name
 		if pp.Positional {

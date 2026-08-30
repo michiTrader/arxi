@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Why is the output of `iash run why`.
+// Why is the output of `arxi run why`.
 //
 // The value of this command is not printing the state nicely: it is that the
 // answer to "why is nothing happening?" is DERIVED from the wait graph, not from
@@ -43,7 +43,7 @@ func Explain(s State, c Config) Why {
 	}
 	if s.Status == StatusPaused {
 		add(0, "run %s: paused by explicit request", s.RunID)
-		w.Fix = append(w.Fix, "iash run unpause "+s.RunID)
+		w.Fix = append(w.Fix, "arxi run unpause "+s.RunID)
 		return w
 	}
 
@@ -86,8 +86,8 @@ func Explain(s State, c Config) Why {
 			add(2, "the advance rule of %q is not met and nobody is left to meet it", st.Name)
 		}
 		w.Fix = append(w.Fix,
-			"iash run prompt "+s.RunID+" \"...\"   # inject a new cause",
-			"iash run why "+s.RunID+" --json     # the full diagnosis",
+			"arxi run prompt "+s.RunID+" \"...\"   # inject a new cause",
+			"arxi run why "+s.RunID+" --json     # the full diagnosis",
 		)
 	}
 
@@ -128,15 +128,15 @@ func walkCause(m Member) []whyLeaf {
 		id, tool := get("inbox_id"), get("tool")
 		return []whyLeaf{
 			{text: fmt.Sprintf("waits for approval of the tool %q (inbox %s)", tool, id),
-				fix: "iash inbox approve " + id},
+				fix: "arxi inbox approve " + id},
 			{text: "to avoid being asked about this tool again:",
-				fix: fmt.Sprintf("iash agent tool policy --agent %s --allow %s", m.Name, tool)},
+				fix: fmt.Sprintf("arxi agent tool policy --agent %s --allow %s", m.Name, tool)},
 		}
 	case "lock":
 		key, holder := get("key"), get("holder")
 		return []whyLeaf{
 			{text: fmt.Sprintf("waits for the lock %q held by %s", key, holder),
-				fix: "iash state unlock " + key},
+				fix: "arxi state unlock " + key},
 		}
 	case "peer":
 		return []whyLeaf{
@@ -145,7 +145,7 @@ func walkCause(m Member) []whyLeaf {
 	case "budget":
 		return []whyLeaf{
 			{text: "the budget of the tree ran out",
-				fix: "iash run unpause <run> --budget <higher>"},
+				fix: "arxi run unpause <run> --budget <higher>"},
 		}
 	case "timer":
 		return []whyLeaf{
@@ -158,7 +158,7 @@ func walkCause(m Member) []whyLeaf {
 	case "workspace":
 		return []whyLeaf{
 			{text: fmt.Sprintf("waits for the workspace %q (write conflict)", get("path")),
-				fix: "iash run show <run> --workspace"},
+				fix: "arxi run show <run> --workspace"},
 		}
 	}
 	return []whyLeaf{{

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // Action is a parsed `--then` value: what the trigger does when it fires.
@@ -75,7 +75,7 @@ func ParseAction(then string) (Action, error) {
 		return Action{}, fmt.Errorf("--then is empty: the trigger would fire on " +
 			"schedule and do nothing, which is indistinguishable from a trigger " +
 			"that is broken.\n" +
-			"  what to write: an iash command, e.g.\n" +
+			"  what to write: an arxi command, e.g.\n" +
 			"    --then \"run start security-team 'audit dependencies for new CVEs'\"")
 	}
 
@@ -86,10 +86,10 @@ func ParseAction(then string) (Action, error) {
 	if head := strings.Fields(then)[0]; strings.Contains(head, ":") {
 		return Action{}, fmt.Errorf("--then %q starts with %q, and --then takes no "+
 			"scheme prefix.\n"+
-			"  what to write: the iash command itself, e.g. --then \"run start "+
+			"  what to write: the arxi command itself, e.g. --then \"run start "+
 			"team 'objective'\"\n"+
 			"  why there is no vocabulary here: the action IS a command from the "+
-			"same surface as everything else, so every verb iash gains is "+
+			"same surface as everything else, so every verb arxi gains is "+
 			"triggerable with no prefix to add and none to go stale",
 			then, head)
 	}
@@ -122,7 +122,7 @@ func ParseAction(then string) (Action, error) {
 		return Action{Raw: then, Path: append([]string{}, path...), Args: append([]string{}, fields[n:]...)}, nil
 	}
 
-	return Action{}, fmt.Errorf("--then %q does not name an iash command.\n"+
+	return Action{}, fmt.Errorf("--then %q does not name an arxi command.\n"+
 		"  triggerable commands: %s\n"+
 		"  this is refused at create time rather than stored, because a trigger "+
 		"whose action nothing implements sits in `trigger list` marked active and "+

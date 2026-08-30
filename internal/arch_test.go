@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-const mod = "github.com/michiTrader/iash/"
+const mod = "github.com/michiTrader/arxi/"
 
 type pkgInfo struct {
 	ImportPath string
@@ -167,7 +167,7 @@ func TestExecutorDependsOnlyOnTheKernel(t *testing.T) {
 			"into the run loop.\n"+
 			"  what to do: add the methods you need to an interface inside "+
 			"internal/exec and let the concrete type satisfy it at the wiring "+
-			"site in cmd/iash.", d)
+			"site in cmd/arxi.", d)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestTheScheduleParserDependsOnDeclarationsAndNotOnTheRuntime(t *testing.T) 
 			"because it is a DECLARATION: %s is runtime, and a schedule that "+
 			"needs the runtime to parse cannot be validated before it is "+
 			"installed.\n"+
-			"  what to do: return the parsed Spec and Action, and let cmd/iash "+
+			"  what to do: return the parsed Spec and Action, and let cmd/arxi "+
 			"join them to whatever runs them.", d, d)
 	}
 }
@@ -304,7 +304,7 @@ func TestTheScheduleParserDependsOnDeclarationsAndNotOnTheRuntime(t *testing.T) 
 // triggers are readable without a running system is that `trigger list` is what
 // a user types when they suspect nothing is running.
 //
-// The alternative was to put these functions in cmd/iash beside the flag
+// The alternative was to put these functions in cmd/arxi beside the flag
 // parsing, which passes every architecture test by not being a package. It fails
 // the first time anything other than the CLI needs to read a trigger, which is
 // the scheduler — the very next step. Persistence reachable only from a main
@@ -324,7 +324,7 @@ func TestTheTriggerStoreIsTheOnlyPlaceTriggersTouchTheDisk(t *testing.T) {
 			"log, a clock or a run, because `trigger list` is exactly what a user "+
 			"types when they suspect nothing is running.\n"+
 			"  what to do: keep the store reading and writing trigger.Record, and "+
-			"let cmd/iash join it to whatever executes the actions.", d)
+			"let cmd/arxi join it to whatever executes the actions.", d)
 	}
 }
 
@@ -402,7 +402,7 @@ func TestEvalDoesNotDependOnTheExecutorItMeasures(t *testing.T) {
 			"BY it, and a run that evaluates its own output is the obvious "+
 			"next feature.\n"+
 			"  what to do: widen CaseRunner if the fold needs more, and let "+
-			"cmd/iash join eval to whatever executes a case.", d)
+			"cmd/arxi join eval to whatever executes a case.", d)
 	}
 }
 
@@ -472,7 +472,7 @@ func TestTheEvalStoreIsTheOnlyPlaceRunsTouchTheDisk(t *testing.T) {
 			"executor, a log or a clock, because `eval compare` is how a decision "+
 			"made last month gets defended — on whatever machine is asking.\n"+
 			"  what to do: keep the store reading and writing eval.RunSummary, "+
-			"and let cmd/iash join it to whatever produced the runs.", d)
+			"and let cmd/arxi join it to whatever produced the runs.", d)
 	}
 }
 
@@ -579,7 +579,7 @@ func TestTheSchedulerDoesNotReachPastItsInterfaces(t *testing.T) {
 			"cancellation while it is still spending. Both are struct fields "+
 			"today; against the real types they are a read-only directory and a "+
 			"process that ignores signals.\n"+
-			"  what to do: widen the interface, and let cmd/iash pass the real "+
+			"  what to do: widen the interface, and let cmd/arxi pass the real "+
 			"implementation in.", d)
 	}
 }

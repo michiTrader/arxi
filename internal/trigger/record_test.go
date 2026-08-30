@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // nightly is the record form of the §20.10 invocation. Every test that needs a

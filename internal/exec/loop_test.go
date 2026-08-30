@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // ------------------------------------------------------------------ helpers
@@ -530,7 +530,7 @@ func TestLoopBudgetExhaustionBlocksAndAsks(t *testing.T) {
 	// on to spend 40.00 against a 5.00 budget: budget.exceeded was in the log, a
 	// human had been asked, and the reducer then entered the next stage and
 	// opened four more paid turns because StatusBlocked was a label no spawn site
-	// consulted. Asserting on the log and the inbox measures whether iash NOTICED
+	// consulted. Asserting on the log and the inbox measures whether arxi NOTICED
 	// the breach; only the spend measures whether it did anything about it.
 	//
 	// The bound is not the budget itself. Cost is known when a turn ends, so the

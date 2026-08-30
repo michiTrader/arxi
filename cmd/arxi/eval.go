@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/michiTrader/iash/internal/blueprint"
-	"github.com/michiTrader/iash/internal/eval"
-	"github.com/michiTrader/iash/internal/evalstore"
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/eval"
+	"github.com/michiTrader/arxi/internal/evalstore"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // The eval CLI.
@@ -50,14 +50,14 @@ func cmdEval(args []string) {
 		if surface.Lookup("eval", args[0]) != nil {
 			notImplemented(append([]string{"eval"}, args...))
 		}
-		fmt.Fprintf(os.Stderr, "iash eval: %q is not an eval command.\n", args[0])
+		fmt.Fprintf(os.Stderr, "arxi eval: %q is not an eval command.\n", args[0])
 		evalUsage()
 		os.Exit(2)
 	}
 }
 
 func evalUsage() {
-	fmt.Fprint(os.Stderr, `usage: iash eval <command>
+	fmt.Fprint(os.Stderr, `usage: arxi eval <command>
 
   run <suite.yaml> --budget <usd>   run a suite (a 20-case suite is 20 runs)
   list                              the runs that have been stored, newest first
@@ -73,15 +73,15 @@ func cmdEvalRun(args []string) {
 	c := surface.Lookup("eval", "run")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval run: %v\n\n"+
-			"usage: iash eval run <suite.yaml> --budget <usd> [--sim]\n"+
+		fmt.Fprintf(os.Stderr, "arxi eval run: %v\n\n"+
+			"usage: arxi eval run <suite.yaml> --budget <usd> [--sim]\n"+
 			"short: -b budget  -S sim\n", err)
 		os.Exit(2)
 	}
 
 	budget, err := strconv.ParseFloat(vals["budget"], 64)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval run: --budget %q is not a number\n", vals["budget"])
+		fmt.Fprintf(os.Stderr, "arxi eval run: --budget %q is not a number\n", vals["budget"])
 		os.Exit(2)
 	}
 
@@ -113,10 +113,10 @@ func cmdEvalRun(args []string) {
 	// the least defensible way to produce it.
 	if vals["sim"] != "true" {
 		fmt.Fprintf(os.Stderr,
-			"iash eval run has no live executor yet: there is no LLM-backed "+
+			"arxi eval run has no live executor yet: there is no LLM-backed "+
 				"Executor in this build, so a real run would spend nothing and "+
 				"produce nothing while reporting a pass rate.\n\n"+
-				"  what works today: iash eval run %s --budget %.2f --sim\n\n"+
+				"  what works today: arxi eval run %s --budget %.2f --sim\n\n"+
 				"--sim runs the same fold, the same budget arithmetic and the "+
 				"same judging; only the executor is fake. The pass rate it "+
 				"reports measures the simulator, and it says so.\n",
@@ -137,7 +137,7 @@ func cmdEvalRun(args []string) {
 	store := openEvalStore()
 	runID, idErr := store.FreeID("e" + time.Now().UTC().Format("20060102T150405"))
 	if idErr != nil {
-		fmt.Fprintf(os.Stderr, "iash eval run: %v\n", idErr)
+		fmt.Fprintf(os.Stderr, "arxi eval run: %v\n", idErr)
 		os.Exit(1)
 	}
 
@@ -156,7 +156,7 @@ func cmdEvalRun(args []string) {
 
 	sum, err := r.Run(context.Background())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval run: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval run: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -261,19 +261,19 @@ func cmdEvalCompare(args []string) {
 	c := surface.Lookup("eval", "compare")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval compare: %v\n\n"+
-			"usage: iash eval compare <baseline> <candidate>\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval compare: %v\n\n"+
+			"usage: arxi eval compare <baseline> <candidate>\n", err)
 		os.Exit(2)
 	}
 
 	base, err := loadEvalRun(vals["baseline"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval compare: baseline: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval compare: baseline: %v\n", err)
 		os.Exit(1)
 	}
 	cand, err := loadEvalRun(vals["candidate"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval compare: candidate: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval compare: candidate: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -522,7 +522,7 @@ type simCases struct {
 	// are resolved against it.
 	//
 	// They used to resolve against the process's working directory, which made
-	// a suite runnable from exactly one place. `iash eval run
+	// a suite runnable from exactly one place. `arxi eval run
 	// --suite ./suites/review-quality.yaml` failed for a suite saying
 	// `blueprint: bp.yaml` next to it, and succeeded for one saying
 	// `blueprint: suites/bp.yaml` -- so the path in the file had to be written
@@ -628,7 +628,7 @@ var evalDir = evalstore.DefaultDir
 func openEvalStore() *evalstore.Store {
 	s, err := evalstore.Open(evalDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval: %v\n", err)
 		os.Exit(1)
 	}
 	return s
@@ -660,13 +660,13 @@ func cmdEvalList(args []string) {
 	c := surface.Lookup("eval", "list")
 	vals, err := parseInvocation(c, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval list: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval list: %v\n", err)
 		os.Exit(2)
 	}
 
 	runs, err := openEvalStore().List()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash eval list: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi eval list: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -683,7 +683,7 @@ func cmdEvalList(args []string) {
 	// output that makes a user wonder whether the command worked.
 	if len(runs) == 0 {
 		fmt.Printf("no eval runs in %s/\n", evalDir)
-		fmt.Println("  run a suite: iash eval run SUITE.yaml --budget 1.00 --sim")
+		fmt.Println("  run a suite: arxi eval run SUITE.yaml --budget 1.00 --sim")
 		return
 	}
 
@@ -748,7 +748,7 @@ func cmdEvalList(args []string) {
 		fmt.Printf("\nrun the suite again to have something to compare against.\n")
 		return
 	}
-	fmt.Printf("\ncompare two: iash eval compare %s %s\n",
+	fmt.Printf("\ncompare two: arxi eval compare %s %s\n",
 		runs[len(runs)-1].ID, runs[0].ID)
 }
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Decide is the only function that decides anything in iash.
+// Decide is the only function that decides anything in arxi.
 //
 //	Decide(State, Event, Config) -> (State', []Effect)
 //

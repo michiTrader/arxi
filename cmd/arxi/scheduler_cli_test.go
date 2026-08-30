@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// `iash trigger run`, exercised as a process.
+// `arxi trigger run`, exercised as a process.
 //
-// These use the harness in trigger_cli_test.go (TestMain, iash, workdir) for
+// These use the harness in trigger_cli_test.go (TestMain, arxi, workdir) for
 // the reason recorded there: cmdTriggerRun calls os.Exit on every refusal, and
 // os.Exit in an in-process test kills the test binary. Exit codes and the
 // difference between misuse and failure cannot be asserted any other way.
@@ -34,7 +34,7 @@ import (
 // requirement means the next person rediscovers it the same way.
 func mkTrigger(t *testing.T, dir, name, on, then string) {
 	t.Helper()
-	r := iash(t, dir, "trigger", "create", "--name", name, "--on", on,
+	r := arxi(t, dir, "trigger", "create", "--name", name, "--on", on,
 		"--then", then, "--budget", "5.00", "--budget-period", "day")
 	if r.code != 0 {
 		t.Fatalf("creating trigger %q: exit %d\n%s", name, r.code, r.out)
@@ -89,11 +89,11 @@ func mkDueTrigger(t *testing.T, dir, name, then string) {
 	}
 }
 
-// iashBounded runs the binary and kills it if it does not finish in time.
+// arxiBounded runs the binary and kills it if it does not finish in time.
 //
 // # Why the harness needed this
 //
-// `iash` waits for the child forever, which was safe while every command in the
+// `arxi` waits for the child forever, which was safe while every command in the
 // registry terminated on its own. `trigger run` does not: without --once it
 // loops until interrupted, which is its entire purpose.
 //
@@ -101,7 +101,7 @@ func mkDueTrigger(t *testing.T, dir, name, then string) {
 // It walks the registry and invokes each declared trigger subcommand with no
 // arguments, deliberately refusing to hand-list them — which is the right
 // design, and is exactly why it reached `trigger run` the moment the capability
-// was declared. The whole `cmd/iash` package then sat in os/exec copying a
+// was declared. The whole `cmd/arxi` package then sat in os/exec copying a
 // child's output until the test timeout, while every other package stayed
 // green. `go test ./...` reported FAIL with a goroutine dump and no test name.
 //
@@ -113,8 +113,8 @@ func mkDueTrigger(t *testing.T, dir, name, then string) {
 //
 // A killed child is not an error here. The exit code is meaningless once the
 // signal decides it, so only the output is returned, and callers that care
-// about exit codes should use iash instead.
-func iashBounded(t *testing.T, dir string, d time.Duration, args ...string) string {
+// about exit codes should use arxi instead.
+func arxiBounded(t *testing.T, dir string, d time.Duration, args ...string) string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), d)
@@ -164,7 +164,7 @@ func eventually(t *testing.T, cond func() bool) bool {
 // to pin was visible precisely there.
 func lastCell(t *testing.T, dir, name string) string {
 	t.Helper()
-	r := iash(t, dir, "trigger", "list")
+	r := arxi(t, dir, "trigger", "list")
 	if r.code != 0 {
 		t.Fatalf("trigger list: exit %d\n%s", r.code, r.out)
 	}
@@ -197,7 +197,7 @@ func TestDryRunDoesNotConsumeTheSlotItPreviews(t *testing.T) {
 
 	before := lastCell(t, dir, "preview")
 
-	dry := iash(t, dir, "trigger", "run", "--dry-run", "--once")
+	dry := arxi(t, dir, "trigger", "run", "--dry-run", "--once")
 	if dry.code != 0 {
 		t.Fatalf("dry run: exit %d\n%s", dry.code, dry.out)
 	}
@@ -211,7 +211,7 @@ func TestDryRunDoesNotConsumeTheSlotItPreviews(t *testing.T) {
 	}
 
 	// The slot must still be there to fire.
-	real1 := iash(t, dir, "trigger", "run", "--once")
+	real1 := arxi(t, dir, "trigger", "run", "--once")
 	if real1.code != 0 {
 		t.Fatalf("real run: exit %d\n%s", real1.code, real1.out)
 	}
@@ -233,7 +233,7 @@ func TestDryRunStartsNothing(t *testing.T) {
 		"trigger create --name spawned --on every:1h --then schema "+
 			"--budget 1.00 --budget-period day")
 
-	r := iash(t, dir, "trigger", "run", "--dry-run", "--once")
+	r := arxi(t, dir, "trigger", "run", "--dry-run", "--once")
 	if r.code != 0 {
 		t.Fatalf("dry run: exit %d\n%s", r.code, r.out)
 	}
@@ -256,7 +256,7 @@ func TestARealRunStartsTheChild(t *testing.T) {
 		"trigger create --name spawned --on every:1h --then schema "+
 			"--budget 1.00 --budget-period day")
 
-	r := iash(t, dir, "trigger", "run", "--once")
+	r := arxi(t, dir, "trigger", "run", "--once")
 	if r.code != 0 {
 		t.Fatalf("run --once: exit %d\n%s", r.code, r.out)
 	}
@@ -287,7 +287,7 @@ func TestChildrenInheritTheTriggerDirectory(t *testing.T) {
 		"trigger create --name inherited --on every:1h --then schema "+
 			"--budget 1.00 --budget-period day")
 
-	if r := iash(t, dir, "trigger", "run", "--once"); r.code != 0 {
+	if r := arxi(t, dir, "trigger", "run", "--once"); r.code != 0 {
 		t.Fatalf("run --once: exit %d\n%s", r.code, r.out)
 	}
 
@@ -309,7 +309,7 @@ func TestDryRunWithoutOnceIsRefused(t *testing.T) {
 	dir := workdir(t)
 	mkTrigger(t, dir, "any", "every:1h", "schema")
 
-	r := iash(t, dir, "trigger", "run", "--dry-run")
+	r := arxi(t, dir, "trigger", "run", "--dry-run")
 	if r.code != 2 {
 		t.Errorf("--dry-run without --once: exit %d, want 2 (misuse)\n%s",
 			r.code, r.out)
@@ -324,7 +324,7 @@ func TestABadIntervalIsRefusedAsMisuse(t *testing.T) {
 	dir := workdir(t)
 	mkTrigger(t, dir, "any", "every:1h", "schema")
 
-	r := iash(t, dir, "trigger", "run", "--interval", "soon", "--once")
+	r := arxi(t, dir, "trigger", "run", "--interval", "soon", "--once")
 	if r.code != 2 {
 		t.Errorf("--interval soon: exit %d, want 2\n%s", r.code, r.out)
 	}
@@ -347,7 +347,7 @@ func TestANonPositiveIntervalIsRefusedRatherThanClamped(t *testing.T) {
 	mkTrigger(t, dir, "any", "every:1h", "schema")
 
 	for _, iv := range []string{"0", "0s"} {
-		r := iash(t, dir, "trigger", "run", "--interval", iv)
+		r := arxi(t, dir, "trigger", "run", "--interval", iv)
 		if r.code != 2 {
 			t.Errorf("--interval %s: exit %d, want 2 (refused, not clamped)\n%s",
 				iv, r.code, r.out)
@@ -381,7 +381,7 @@ func TestANegativeIntervalIsRefusedByTheFlagParserNotTheIntervalCheck(t *testing
 	dir := workdir(t)
 	mkTrigger(t, dir, "any", "every:1h", "schema")
 
-	r := iash(t, dir, "trigger", "run", "--interval", "-5s")
+	r := arxi(t, dir, "trigger", "run", "--interval", "-5s")
 	if r.code != 2 {
 		t.Errorf("--interval -5s: exit %d, want 2\n%s", r.code, r.out)
 	}
@@ -401,7 +401,7 @@ func TestAnUndueTriggerIsReportedAndNotRun(t *testing.T) {
 	dir := workdir(t)
 	mkTrigger(t, dir, "later", "every:1h", "schema")
 
-	r := iash(t, dir, "trigger", "run", "--once")
+	r := arxi(t, dir, "trigger", "run", "--once")
 	if r.code != 0 {
 		t.Fatalf("run --once: exit %d\n%s", r.code, r.out)
 	}
@@ -422,11 +422,11 @@ func TestAPausedTriggerDoesNotFire(t *testing.T) {
 	dir := workdir(t)
 	mkDueTrigger(t, dir, "halted", "schema")
 
-	if r := iash(t, dir, "trigger", "pause", "--name", "halted"); r.code != 0 {
+	if r := arxi(t, dir, "trigger", "pause", "--name", "halted"); r.code != 0 {
 		t.Fatalf("pause: exit %d\n%s", r.code, r.out)
 	}
 
-	if r := iash(t, dir, "trigger", "run", "--once"); r.code != 0 {
+	if r := arxi(t, dir, "trigger", "run", "--once"); r.code != 0 {
 		t.Fatalf("run --once: exit %d\n%s", r.code, r.out)
 	}
 
@@ -444,7 +444,7 @@ func TestAPausedTriggerDoesNotFire(t *testing.T) {
 // build gives.
 func TestRunOnceOnAnEmptyDirectorySucceeds(t *testing.T) {
 	dir := workdir(t)
-	r := iash(t, dir, "trigger", "run", "--once")
+	r := arxi(t, dir, "trigger", "run", "--once")
 	if r.code != 0 {
 		t.Errorf("no triggers is not a failure: exit %d\n%s", r.code, r.out)
 	}

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // Timekeeper is how the run loop obtains the passage of time.
@@ -181,7 +181,7 @@ const (
 // queue and has nothing to keep in sync. An Emit becomes an event that is folded
 // exactly like an event from a provider, which is why a derived stage.entered
 // drives the run identically whether the reducer produced it or a human typed
-// `iash run steer`.
+// `arxi run steer`.
 //
 // The cursor advances only after an event is folded, and the state is carried
 // across iterations rather than re-folded from seq 1 each time. Re-folding would

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/michiTrader/iash/internal/surface"
-	"github.com/michiTrader/iash/internal/trigger"
+	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
 // fixed is the instant every test runs at.
@@ -96,7 +96,7 @@ func TestTheDocumentedInvocationParses(t *testing.T) {
 }
 
 // Every parameter the registry declares must be reachable. A flag advertised by
-// `iash surface` and offered to agents in the tool schema, but dropped by this
+// `arxi surface` and offered to agents in the tool schema, but dropped by this
 // parser, is the exact drift the derived parser exists to prevent — and the
 // failure is silent: the value is accepted and ignored.
 func TestEveryDeclaredParameterIsAcceptedByName(t *testing.T) {

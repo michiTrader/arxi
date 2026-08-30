@@ -1,4 +1,4 @@
-# iash
+# arxi
 
 Agent orchestration system in Go. The whole project rests on one thesis:
 
@@ -11,8 +11,8 @@ Decide(State, Event, Config) -> (State', []Effect)
 
 Pure: no clock, no network, no filesystem. Everything it wants to happen in the
 world it **describes** as an `Effect` and returns; something else carries it out.
-That constraint is why `iash run`, `iash run --sim`, `iash run replay` and
-`iash run why` are one body of logic instead of four programs that drift apart.
+That constraint is why `arxi run`, `arxi run --sim`, `arxi run replay` and
+`arxi run why` are one body of logic instead of four programs that drift apart.
 
 Before touching code, read `docs/adr/`. Seven records, each one stating what was
 decided, what alternative was rejected, and **what breaks if someone reverts it
@@ -219,7 +219,7 @@ activated. Weakening the test would have hidden a bug that costs real money.
 Requires Go 1.22.
 
 ```bash
-go build -o iash ./cmd/iash
+go build -o arxi ./cmd/arxi
 go vet ./... && gofmt -l .
 go test -count=1 ./...
 UPDATE_GOLDEN=1 go test ./internal/kernel   # regenerate golden fixtures

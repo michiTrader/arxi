@@ -50,7 +50,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/eval"
+	"github.com/michiTrader/arxi/internal/eval"
 )
 
 // DefaultDir is where runs live, relative to the working directory.
@@ -212,13 +212,13 @@ func (s *Store) Put(sum *eval.RunSummary) error {
 				"id and a citation that keeps resolving while its numbers change "+
 				"is worse than one that breaks.\n"+
 				// Points at a command that exists. This line said
-				// `iash eval show <id>`, which is not a capability the
+				// `arxi eval show <id>`, which is not a capability the
 				// registry declares -- written from what the store wished
 				// were true rather than from the surface. An error message
 				// that prescribes a nonexistent command costs the reader the
 				// one thing they came here with, which is trust that the
 				// tool knows its own shape.
-				"  the stored run is readable at %s, and `iash eval list` "+
+				"  the stored run is readable at %s, and `arxi eval list` "+
 				"shows every run", sum.ID, s.Path(id), s.Path(id))
 		}
 		return fmt.Errorf("run %q collides with the existing %q (%s).\n"+
@@ -288,7 +288,7 @@ func (s *Store) Load(id string) (*eval.RunSummary, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("there is no run %q in %s.\n"+
-				"  see what there is: iash eval list", id, s.dir)
+				"  see what there is: arxi eval list", id, s.dir)
 		}
 		return nil, fmt.Errorf("evalstore: read %s: %w", path, err)
 	}
@@ -302,7 +302,7 @@ func (s *Store) Load(id string) (*eval.RunSummary, error) {
 	// typed, which is a citation pointing at the wrong evidence.
 	if want := strings.TrimSuffix(filepath.Base(path), ext); sum.ID != want {
 		return nil, fmt.Errorf("%s holds a run with id %q.\n"+
-			"  the filename is what `iash eval compare` looks up, so this run "+
+			"  the filename is what `arxi eval compare` looks up, so this run "+
 			"answers to %q and reports itself as %q, and a comparison would be "+
 			"headed by ids that are not the ones asked for", path, sum.ID, want, sum.ID)
 	}

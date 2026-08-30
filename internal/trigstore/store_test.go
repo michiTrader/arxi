@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/trigger"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
 // nightly is the trigger from docs/design/20-use-cases.md §20.10.

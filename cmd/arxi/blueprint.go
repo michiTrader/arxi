@@ -6,12 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/blueprint"
-	"github.com/michiTrader/iash/internal/kernel"
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
-// cmdBlueprintValidate implements `iash blueprint validate <path>`.
+// cmdBlueprintValidate implements `arxi blueprint validate <path>`.
 //
 // It prints the RESOLVED config, not the file read back. Most of what it prints
 // the user never wrote: the workspace, the timeout policy, the activation mode.
@@ -25,7 +25,7 @@ import (
 func cmdBlueprintValidate(args []string) {
 	args, err := expandShort(surface.Lookup("blueprint", "validate"), args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash blueprint validate: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi blueprint validate: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -47,7 +47,7 @@ func cmdBlueprintValidate(args []string) {
 		}
 	}
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "usage: iash blueprint validate <file.yaml>\n"+
+		fmt.Fprintln(os.Stderr, "usage: arxi blueprint validate <file.yaml>\n"+
 			"short: -f path")
 		os.Exit(2)
 	}

@@ -3,8 +3,8 @@ package logstore
 import (
 	"testing"
 
-	"github.com/michiTrader/iash/internal/exec"
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // TestStoreSatisfiesTheExecutorsLogInterface is the seam test between the two
@@ -20,7 +20,7 @@ import (
 //
 // Without this assertion the two packages agree only by coincidence. The
 // mismatch would not surface in either package's own test suite; it would
-// surface at the wiring site in cmd/iash, which is the worst place to discover
+// surface at the wiring site in cmd/arxi, which is the worst place to discover
 // that the storage contract and the runner's expectation of it disagree.
 func TestStoreSatisfiesTheExecutorsLogInterface(t *testing.T) {
 	var _ exec.Log = (*Store)(nil)

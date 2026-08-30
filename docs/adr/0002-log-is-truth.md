@@ -56,7 +56,7 @@ duplicate `seq`, which is exactly what breaks the CAS of ADR-0006.
 **Authoritative snapshots with the log as an audit trail.** Faster, and it is
 what most workflow systems do. Discarded because it turns diagnosis into
 archaeology: when state and log differ there is no rule for deciding what really
-happened, and `iash run why` — which is the whole reason this tool exists — ends
+happened, and `arxi run why` — which is the whole reason this tool exists — ends
 up answering over data it cannot justify.
 
 ## Consequences

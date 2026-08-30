@@ -13,7 +13,7 @@ func TestOneSingleSurface(t *testing.T) {
 	if got := c.CLI(); got != "run start" {
 		t.Errorf("CLI = %q", got)
 	}
-	if got := c.Name(); got != "iash_run_start" {
+	if got := c.Name(); got != "arxi_run_start" {
 		t.Errorf("tool = %q", got)
 	}
 	if got := c.ProtocolType(); got != "run.start" {
@@ -130,9 +130,9 @@ func TestMutatingToolsAreNotAllowByDefault(t *testing.T) {
 	// between agents and they are scoped to the run. Without them the agents
 	// cannot collaborate and the tool has no reason to exist.
 	expected := map[string]bool{
-		"iash_state_set":  true,
-		"iash_event_emit": true,
-		"iash_state_lock": true,
+		"arxi_state_set":  true,
+		"arxi_event_emit": true,
+		"arxi_state_lock": true,
 	}
 	for _, td := range BuildManifest().Tools {
 		if td.Mutates && td.Policy == PolicyAllow && !expected[td.Name] {
@@ -224,7 +224,7 @@ func TestNoDuplicates(t *testing.T) {
 // registry, filtered.
 //
 // The failure this forbids is a server holding its own list of accepted message
-// types. Then `iash schema` advertises run.why while the server answers "unknown
+// types. Then `arxi schema` advertises run.why while the server answers "unknown
 // type", and the client has been lied to by the one document it was told to
 // trust. The check is mechanical: every Protocol-flagged entry has to come out
 // of ProtocolCommands, and nothing else may.
@@ -237,7 +237,7 @@ func TestProtocolSetIsDerivedFromTheRegistry(t *testing.T) {
 		exposed := c.Kind&Protocol != 0
 		if exposed && !got[c.ProtocolType()] {
 			t.Errorf("%s is declared Kind|Protocol but ProtocolCommands omits it.\n"+
-				"  consequence: iash schema advertises %q and the server answers "+
+				"  consequence: arxi schema advertises %q and the server answers "+
 				"unknown type. The client is following the manifest correctly and "+
 				"still failing, with nothing in either place to explain why.",
 				c.CLI(), c.ProtocolType())
@@ -540,7 +540,7 @@ func TestLongForFindsTheSyntheticJSONFlag(t *testing.T) {
 
 // TestTheWireHasNoShortFlags: short forms are a courtesy to fingers. A protocol
 // client has none, and `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is
-// a fact. If a letter ever leaked into WireParams, `iash schema` would advertise
+// a fact. If a letter ever leaked into WireParams, `arxi schema` would advertise
 // it and the server would reject it.
 func TestTheWireHasNoShortFlags(t *testing.T) {
 	for _, c := range Registry {

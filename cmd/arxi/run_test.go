@@ -23,7 +23,7 @@ func TestRunStartRefusesWithoutABudget(t *testing.T) {
 	if err == nil {
 		t.Fatal("run start accepted no --budget.\n" +
 			"  consequence: the run gets a spend ceiling the user never chose, " +
-			"which they discover from the bill. Every other ceiling in iash can " +
+			"which they discover from the bill. Every other ceiling in arxi can " +
 			"default; this is the one that cannot.")
 	}
 	if !strings.Contains(err.Error(), "--budget") {

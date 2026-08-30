@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // exchange runs lines through the protocol and returns the responses, skipping
@@ -644,8 +644,8 @@ func TestListenRefusesEverythingThatIsNotAUnixSocket(t *testing.T) {
 		":9000",
 		"0.0.0.0:9000",
 		"localhost:9000",
-		"/tmp/iash.sock", // a bare path: plausible, and not an address
-		"unix:/tmp/iash.sock",
+		"/tmp/arxi.sock", // a bare path: plausible, and not an address
+		"unix:/tmp/arxi.sock",
 		"stdio",
 	} {
 		if _, err := parseServeFlags([]string{"--listen", addr}); err == nil {
@@ -686,7 +686,7 @@ func TestListenAcceptsAUnixSocketAndDefaultsToStdio(t *testing.T) {
 			"  consequence: the common case — a supervisor spawning one server on "+
 			"a pipe — cannot be invoked", got, err)
 	}
-	for _, addr := range []string{"unix:///tmp/iash.sock", "unix://relative.sock"} {
+	for _, addr := range []string{"unix:///tmp/arxi.sock", "unix://relative.sock"} {
 		got, err := parseServeFlags([]string{"--listen", addr})
 		if err != nil {
 			t.Errorf("--listen %q was rejected: %v", addr, err)

@@ -8,15 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/eval"
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/eval"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // The eval CLI, exercised as a process.
 //
 // # Why these tests exist at all, stated bluntly
 //
-// cmd/iash/eval.go shipped in a state where EVERY possible invocation exited 2.
+// cmd/arxi/eval.go shipped in a state where EVERY possible invocation exited 2.
 // It gated the command on --sim, read that flag out of surface.Registry, and
 // nobody had declared it there — so the parser refused the only flag that gets
 // past the gate. The command could not be made to run at all.
@@ -42,7 +42,7 @@ import (
 //     reader compares against; a missing pass_rate key is one a program must
 //     handle.
 //
-// The harness (TestMain, buildIash, iash, workdir) lives in trigger_cli_test.go
+// The harness (TestMain, buildIash, arxi, workdir) lives in trigger_cli_test.go
 // and is shared deliberately: one binary, built once per package run.
 //
 // # The mutation that is left, and why it is not a gap
@@ -181,13 +181,13 @@ func TestEveryDeclaredFlagOfEvalRunIsAccepted(t *testing.T) {
 				args = append(args, "--"+pp.Name, "0")
 			}
 		}
-		got := iash(t, dir, args...)
+		got := arxi(t, dir, args...)
 		if strings.Contains(got.out, "is not a flag of") {
 			t.Errorf("eval run declares --%s and the parser refuses it:\n%s\n\n"+
 				"This is the bug this file was written for. A flag in "+
 				"surface.Registry that parseInvocation rejects is not a "+
 				"harmless mismatch: eval run gates itself on --sim, so an "+
-				"undeclared --sim made every invocation exit 2, and `iash "+
+				"undeclared --sim made every invocation exit 2, and `arxi "+
 				"schema` advertised a parameter an agent could not use.",
 				pp.Name, got.out)
 		}
@@ -203,7 +203,7 @@ func TestARunWithoutSimIsRefusedAndSaysWhatToTypeInstead(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00")
 	if got.code != 2 {
 		t.Fatalf("a run with no executor exited %d, want 2 (misuse, not an "+
 			"operational failure):\n%s", got.code, got.out)
@@ -214,7 +214,7 @@ func TestARunWithoutSimIsRefusedAndSaysWhatToTypeInstead(t *testing.T) {
 	if !strings.Contains(got.out, "--sim") {
 		t.Errorf("the refusal does not mention --sim:\n%s", got.out)
 	}
-	if !strings.Contains(got.out, "what works today: iash eval run "+suite) {
+	if !strings.Contains(got.out, "what works today: arxi eval run "+suite) {
 		t.Errorf("the refusal does not spell out the working invocation with "+
 			"the user's own suite path:\n%s", got.out)
 	}
@@ -235,7 +235,7 @@ func TestACompleteRunReportsWhatItMeasuredAndExitsZero(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", mixedSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 	if got.code != 0 {
 		t.Fatalf("a complete run exited %d, want 0:\n%s", got.code, got.out)
 	}
@@ -265,7 +265,7 @@ func TestAFailingCaseIsNamedNotCounted(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", mixedSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 	if !strings.Contains(got.out, "fail: beta") {
 		t.Errorf("the failing case is not named:\n%s", got.out)
 	}
@@ -304,7 +304,7 @@ cases:
 
 	// 0.02 buys two cases at the simulator's 0.01, and the reserve then blocks
 	// the third.
-	got := iash(t, dir, "eval", "run", suite, "--budget", "0.02", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "0.02", "--sim")
 
 	// The fixture must actually be the dangerous case, or this test passes
 	// while proving nothing.
@@ -353,7 +353,7 @@ cases:
     objective: simulated broken
     expect: {contains: ["simulated"]}
 `)
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 
 	if !strings.Contains(got.out, "unjudged:  1 errored, 0 skipped") {
 		t.Errorf("the errored tally is missing:\n%s", got.out)
@@ -388,7 +388,7 @@ cases:
     objective: simulated two
     expect: {contains: ["simulated"]}
 `)
-	got := iash(t, dir, "eval", "run", suite, "--budget", "0.01", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "0.01", "--sim")
 
 	note := strings.Index(got.out, "note:")
 	rate := strings.Index(got.out, "pass rate")
@@ -426,7 +426,7 @@ cases:
     objective: simulated three
     expect: {contains: ["simulated"]}
 `)
-	got := iash(t, dir, "eval", "run", suite, "--budget", "0.02", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "0.02", "--sim")
 
 	for _, want := range []string{
 		"the first ones in the file, not a sample of the suite",
@@ -450,7 +450,7 @@ func TestAPassRateOverNothingIsAbsentNotZero(t *testing.T) {
 
 	// The case errors on its missing blueprint, so nothing is judged even
 	// though the budget was ample.
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 
 	if strings.Contains(got.out, "pass rate: 0.00") {
 		t.Fatalf("a run that judged nothing reported a pass rate of 0.00:\n%s\n\n"+
@@ -475,7 +475,7 @@ func TestTheJSONOmitsAPassRateItDidNotMeasure(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", unjudgeableSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim", "--json")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim", "--json")
 
 	var m map[string]any
 	if err := json.Unmarshal([]byte(got.out), &m); err != nil {
@@ -519,7 +519,7 @@ cases:
     objective: simulated beta
     expect: {contains: ["simulated"]}
 `)
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 
 	if strings.Contains(got.out, "pass rate: 1.00") {
 		t.Fatalf("a suite whose every case names a missing blueprint reported "+
@@ -557,7 +557,7 @@ func TestTheSimulatorDoesNotSpendMoreThanItWasOffered(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "0.001", "--sim", "--json")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "0.001", "--sim", "--json")
 	var m map[string]any
 	if err := json.Unmarshal([]byte(got.out), &m); err != nil {
 		t.Fatalf("--json did not emit one JSON document: %v\n%s", err, got.out)
@@ -581,7 +581,7 @@ func TestABudgetTooSmallToRoundIsNotPrintedAsZero(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "0.001", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "0.001", "--sim")
 	if strings.Contains(got.out, "of 0.00\n") {
 		t.Errorf("a budget of 0.001 printed as 0.00:\n%s\n\nThe reader typed "+
 			"the number; showing it back as the value that means \"none\" "+
@@ -593,7 +593,7 @@ func TestABudgetTooSmallToRoundIsNotPrintedAsZero(t *testing.T) {
 			"it:\n%s", got.out)
 	}
 	// And the ordinary case keeps two decimals, because §20.11's line does.
-	got = iash(t, dir, "eval", "run", suite, "--budget", "11.30", "--sim")
+	got = arxi(t, dir, "eval", "run", suite, "--budget", "11.30", "--sim")
 	if !strings.Contains(got.out, "of 11.30") {
 		t.Errorf("an ordinary budget lost its two-decimal form:\n%s", got.out)
 	}
@@ -610,7 +610,7 @@ func TestTheBlueprintIsReadOncePerSuiteNotOncePerCase(t *testing.T) {
 	// Run once so the blueprint is loaded and cached, then remove it. If the
 	// cache works, the second case never touched the file; the assertion is on
 	// the run having completed, which is only possible with one read.
-	if got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
+	if got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
 		t.Fatalf("the baseline run failed: %s", got.out)
 	}
 	// This is a same-process claim, so it is checked in-process instead.
@@ -638,7 +638,7 @@ func TestTheJSONCarriesTheNotesAndTheJudgedDenominator(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", mixedSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim", "--json")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim", "--json")
 	var m map[string]any
 	if err := json.Unmarshal([]byte(got.out), &m); err != nil {
 		t.Fatalf("--json did not emit one JSON document: %v\n%s", err, got.out)
@@ -674,7 +674,7 @@ func TestCompareOfARunThatDoesNotExistNamesItAndSaysHowToLook(t *testing.T) {
 	// the feature it describes would have left the stub's obsolete refusal
 	// sitting in the binary.
 	dir := workdir(t)
-	got := iash(t, dir, "eval", "compare", "e1", "e2")
+	got := arxi(t, dir, "eval", "compare", "e1", "e2")
 
 	if got.code != 1 {
 		t.Errorf("compare exited %d, want 1 (the invocation was fine; the "+
@@ -705,7 +705,7 @@ func TestARunIsStoredAndCanThenBeCompared(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	first := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	first := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 	if first.code != 0 {
 		t.Fatalf("the first run failed: %s", first.out)
 	}
@@ -724,7 +724,7 @@ func TestARunIsStoredAndCanThenBeCompared(t *testing.T) {
 	// this is also the test that would catch an id scheme too coarse to
 	// distinguish two runs -- Put refuses a duplicate, so the second run would
 	// fail rather than silently overwrite the first.
-	second := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	second := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 	if second.code != 0 {
 		t.Fatalf("the second run failed, which means two runs cannot be told "+
 			"apart: %s", second.out)
@@ -734,7 +734,7 @@ func TestARunIsStoredAndCanThenBeCompared(t *testing.T) {
 		t.Fatalf("want 2 stored runs, got %v", ids)
 	}
 
-	cmp := iash(t, dir, "eval", "compare", ids[1], ids[0])
+	cmp := arxi(t, dir, "eval", "compare", ids[1], ids[0])
 	if cmp.code != 0 {
 		t.Fatalf("comparing two runs that exist failed: %s", cmp.out)
 	}
@@ -749,13 +749,13 @@ func TestASimulatedRunIsMarkedSimulatedEverywhereItIsReported(t *testing.T) {
 	// between a fake executor and a real one as a change in quality.
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
-	if got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
+	if got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
 		t.Fatalf("the run failed: %s", got.out)
 	}
-	iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 
 	// In the listing, in the row, where a reader scanning rates will see it.
-	list := iash(t, dir, "eval", "list")
+	list := arxi(t, dir, "eval", "list")
 	if !strings.Contains(list.out, "sim") {
 		t.Errorf("`eval list` does not mark a simulated run, so a rate of 1.00 "+
 			"from a fake executor is indistinguishable from a measurement:\n%s",
@@ -766,7 +766,7 @@ func TestASimulatedRunIsMarkedSimulatedEverywhereItIsReported(t *testing.T) {
 	var payload struct {
 		Runs []map[string]any `json:"runs"`
 	}
-	lj := iash(t, dir, "eval", "list", "--json")
+	lj := arxi(t, dir, "eval", "list", "--json")
 	if err := json.Unmarshal([]byte(lj.out), &payload); err != nil {
 		t.Fatalf("eval list --json is not JSON: %v\n%s", err, lj.out)
 	}
@@ -782,7 +782,7 @@ func TestASimulatedRunIsMarkedSimulatedEverywhereItIsReported(t *testing.T) {
 	if len(ids) < 2 {
 		t.Fatalf("want 2 runs, got %v", ids)
 	}
-	cmp := iash(t, dir, "eval", "compare", ids[1], ids[0])
+	cmp := arxi(t, dir, "eval", "compare", ids[1], ids[0])
 	if !strings.Contains(cmp.out, "SIMULATED") {
 		t.Errorf("comparing two simulated runs printed no warning that the "+
 			"table measures nothing:\n%s", cmp.out)
@@ -795,7 +795,7 @@ func TestASimulatedRunIsMarkedSimulatedEverywhereItIsReported(t *testing.T) {
 
 func TestAnEmptyListSaysSoRatherThanPrintingABareHeader(t *testing.T) {
 	dir := workdir(t)
-	got := iash(t, dir, "eval", "list")
+	got := arxi(t, dir, "eval", "list")
 	if got.code != 0 {
 		t.Fatalf("listing an empty store failed: %s", got.out)
 	}
@@ -818,11 +818,11 @@ func TestAListWithOneRunDoesNotSuggestComparingItWithItself(t *testing.T) {
 	// the suggested next command to be real.
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
-	if got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
+	if got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
 		t.Fatalf("the run failed: %s", got.out)
 	}
 
-	got := iash(t, dir, "eval", "list")
+	got := arxi(t, dir, "eval", "list")
 	ids := storedIDs(t, dir)
 	if len(ids) != 1 {
 		t.Fatalf("want 1 run, got %v", ids)
@@ -845,14 +845,14 @@ func TestTheCompareTableColumnsLineUpWithRealRunIDs(t *testing.T) {
 	// table in this repository most likely to be copied into a decision.
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
-	iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
-	iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 	ids := storedIDs(t, dir)
 	if len(ids) < 2 {
 		t.Fatalf("want 2 runs, got %v", ids)
 	}
 
-	out := iash(t, dir, "eval", "compare", ids[1], ids[0]).out
+	out := arxi(t, dir, "eval", "compare", ids[1], ids[0]).out
 	var header, passRow string
 	for _, line := range strings.Split(out, "\n") {
 		if strings.Contains(line, ids[0]) && strings.Contains(line, "delta") {
@@ -886,7 +886,7 @@ func TestTheCompareTableColumnsLineUpWithRealRunIDs(t *testing.T) {
 // that passes is evidence the listing works and not just the store.
 func storedIDs(t *testing.T, dir string) []string {
 	t.Helper()
-	got := iash(t, dir, "eval", "list", "--json")
+	got := arxi(t, dir, "eval", "list", "--json")
 	if got.code != 0 {
 		t.Fatalf("eval list --json failed: %s", got.out)
 	}
@@ -911,7 +911,7 @@ func storedIDs(t *testing.T, dir string) []string {
 // being one directory away from where the path is right.
 func TestAMissingSuiteIsNotReportedAsAnInvalidOne(t *testing.T) {
 	dir := workdir(t)
-	got := iash(t, dir, "eval", "run", "nope.yaml", "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", "nope.yaml", "--budget", "1.00", "--sim")
 
 	if got.code != 1 {
 		t.Errorf("a missing suite exited %d, want 1:\n%s", got.code, got.out)
@@ -946,7 +946,7 @@ cases:
     objective: simulated alpha
     expect: {}
 `)
-	got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim")
 
 	if got.code != 1 {
 		t.Errorf("an invalid suite exited %d, want 1:\n%s", got.code, got.out)
@@ -969,7 +969,7 @@ func TestABudgetThatIsNotANumberIsMisuse(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "abc", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "abc", "--sim")
 	if got.code != 2 {
 		t.Errorf("--budget abc exited %d, want 2 (misuse):\n%s", got.code, got.out)
 	}
@@ -984,7 +984,7 @@ func TestABudgetOfZeroIsRefusedRatherThanTreatedAsUnlimitedByTheCLI(t *testing.T
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "--budget", "0", "--sim")
+	got := arxi(t, dir, "eval", "run", suite, "--budget", "0", "--sim")
 	if got.code == 0 {
 		t.Errorf("--budget 0 exited 0:\n%s", got.out)
 	}
@@ -1004,7 +1004,7 @@ func TestTheShortFlagsReachTheEvalRun(t *testing.T) {
 	dir := workdir(t)
 	suite := evalSuite(t, dir, "s.yaml", passingSuite)
 
-	got := iash(t, dir, "eval", "run", suite, "-b", "1.00", "-S", "-J")
+	got := arxi(t, dir, "eval", "run", suite, "-b", "1.00", "-S", "-J")
 	if got.code != 0 {
 		t.Fatalf("the short-flag invocation exited %d:\n%s", got.code, got.out)
 	}
@@ -1032,7 +1032,7 @@ func TestADeclaredButUnbuiltEvalSubcommandIsNotCalledUnknown(t *testing.T) {
 		if len(c.Path) != 2 || c.Path[0] != "eval" {
 			continue
 		}
-		got := iash(t, dir, "eval", c.Path[1])
+		got := arxi(t, dir, "eval", c.Path[1])
 		if strings.Contains(got.out, "is not an eval command") {
 			t.Errorf("`eval %s` is declared in the surface and the CLI calls "+
 				"it unknown:\n%s", c.Path[1], got.out)
@@ -1043,7 +1043,7 @@ func TestADeclaredButUnbuiltEvalSubcommandIsNotCalledUnknown(t *testing.T) {
 // TestAnUnknownEvalSubcommandIsNamedAndTheUsagePrinted.
 func TestAnUnknownEvalSubcommandIsNamedAndTheUsagePrinted(t *testing.T) {
 	dir := workdir(t)
-	got := iash(t, dir, "eval", "frobnicate")
+	got := arxi(t, dir, "eval", "frobnicate")
 
 	if got.code != 2 {
 		t.Errorf("an unknown subcommand exited %d, want 2:\n%s", got.code, got.out)
@@ -1051,7 +1051,7 @@ func TestAnUnknownEvalSubcommandIsNamedAndTheUsagePrinted(t *testing.T) {
 	if !strings.Contains(got.out, `"frobnicate" is not an eval command`) {
 		t.Errorf("the unknown subcommand is not quoted back:\n%s", got.out)
 	}
-	if !strings.Contains(got.out, "usage: iash eval") {
+	if !strings.Contains(got.out, "usage: arxi eval") {
 		t.Errorf("no usage was offered:\n%s", got.out)
 	}
 }
@@ -1059,10 +1059,10 @@ func TestAnUnknownEvalSubcommandIsNamedAndTheUsagePrinted(t *testing.T) {
 // TestBareEvalPrintsTheUsageAndIsMisuse.
 func TestBareEvalPrintsTheUsageAndIsMisuse(t *testing.T) {
 	dir := workdir(t)
-	got := iash(t, dir, "eval")
+	got := arxi(t, dir, "eval")
 
 	if got.code != 2 {
-		t.Errorf("bare `iash eval` exited %d, want 2:\n%s", got.code, got.out)
+		t.Errorf("bare `arxi eval` exited %d, want 2:\n%s", got.code, got.out)
 	}
 	for _, want := range []string{"run <suite.yaml>", "compare <baseline> <candidate>"} {
 		if !strings.Contains(got.out, want) {
@@ -1096,7 +1096,7 @@ func TestTheRunWritesExactlyOneRunFileAndNothingElse(t *testing.T) {
 		before[e.Name()] = true
 	}
 
-	if got := iash(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
+	if got := arxi(t, dir, "eval", "run", suite, "--budget", "1.00", "--sim"); got.code != 0 {
 		t.Fatalf("the run failed: %s", got.out)
 	}
 
@@ -1140,7 +1140,7 @@ func TestTheRunWritesExactlyOneRunFileAndNothingElse(t *testing.T) {
 // exists because every other test in this file was blind to the bug.
 //
 // A suite's `blueprint:` used to be opened relative to the process's working
-// directory, so `iash eval run --suite ./suites/s.yaml` could only find
+// directory, so `arxi eval run --suite ./suites/s.yaml` could only find
 // `blueprint: bp.yaml` if bp.yaml sat next to the OPERATOR, not next to the
 // suite. The path written in the file therefore had to anticipate where
 // somebody would later be standing, and the same suite worked or errored
@@ -1171,7 +1171,7 @@ func TestASuiteIsRunnableFromSomewhereElse(t *testing.T) {
 	// Run from the PARENT, naming the suite by a relative path. The blueprint
 	// is beside the suite, which is the only place a suite author can
 	// reasonably be expected to put it.
-	res := iash(t, dir, "eval", "run", "suites/s.yaml", "--budget", "1.00", "--sim")
+	res := arxi(t, dir, "eval", "run", "suites/s.yaml", "--budget", "1.00", "--sim")
 	if res.code != 0 {
 		t.Fatalf("a suite in a subdirectory could not be run from its parent, "+
 			"which means the path in `blueprint:` has to be written relative "+
@@ -1207,7 +1207,7 @@ func TestAnAbsoluteBlueprintPathIsNotRewritten(t *testing.T) {
 		t.Fatalf("suite: %v", err)
 	}
 
-	res := iash(t, dir, "eval", "run", "suites/s.yaml", "--budget", "1.00", "--sim")
+	res := arxi(t, dir, "eval", "run", "suites/s.yaml", "--budget", "1.00", "--sim")
 	if res.code != 0 || strings.Contains(res.out, "could not be loaded") {
 		t.Fatalf("an absolute blueprint path was not honoured as written:\n%s", res.out)
 	}

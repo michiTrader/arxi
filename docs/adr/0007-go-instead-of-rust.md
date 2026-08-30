@@ -5,7 +5,7 @@
 
 ## Context
 
-The design of iash is a pure reducer over an enum of events returning an enum of
+The design of arxi is a pure reducer over an enum of events returning an enum of
 effects (ADR-0001). Described that way, it is a design that screams for Rust:
 
 - `enum Effect` with exhaustive `match` verified by the compiler

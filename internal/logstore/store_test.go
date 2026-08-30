@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // ------------------------------------------------------------------ helpers

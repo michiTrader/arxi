@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/michiTrader/iash/internal/kernel"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // Log is the slice of the event log that the runner needs, declared here rather

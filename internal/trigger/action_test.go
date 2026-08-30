@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 func mustAction(t *testing.T, then string) Action {

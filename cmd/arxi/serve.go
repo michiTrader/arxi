@@ -13,8 +13,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/michiTrader/iash/internal/blueprint"
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // The NDJSON protocol: one JSON object per line, in each direction.
@@ -134,7 +134,7 @@ var protoHandlers = map[string]protoHandler{
 // Taking io.Reader and io.Writer rather than a net.Conn is what makes the
 // protocol testable without a socket, and it is also what makes stdio and a unix
 // socket the same code path instead of two implementations that drift. The only
-// difference between `iash serve` and `iash serve --listen` is where these two
+// difference between `arxi serve` and `arxi serve --listen` is where these two
 // come from.
 //
 // Requests on one connection are handled STRICTLY IN ORDER. Handling them
@@ -205,7 +205,7 @@ func handleLine(line string) protoResponse {
 			Code: errMalformed,
 			Message: fmt.Sprintf("this line is not a JSON object: %v. Every line "+
 				"is one request: {\"id\":..., \"type\":..., \"params\":{...}}", err),
-			Fix: []string{"iash schema"},
+			Fix: []string{"arxi schema"},
 		}}
 	}
 
@@ -218,7 +218,7 @@ func handleLine(line string) protoResponse {
 		return protoResponse{ID: req.ID, OK: false, Error: &protoError{
 			Code:    errBadParams,
 			Message: err.Error(),
-			Fix:     []string{"iash schema"},
+			Fix:     []string{"arxi schema"},
 		}}
 	}
 
@@ -229,7 +229,7 @@ func handleLine(line string) protoResponse {
 			Message: fmt.Sprintf("%s is declared in surface v%d and this build has "+
 				"no executor for it. The request was well formed; retrying will not "+
 				"help until the capability lands.", c.CLI(), c.Since),
-			Fix: []string{"iash surface"},
+			Fix: []string{"arxi surface"},
 		}}
 	}
 
@@ -256,18 +256,18 @@ func unknownTypeError(t string) *protoError {
 	if c := surface.Lookup(strings.Split(t, ".")...); c != nil {
 		return &protoError{
 			Code: errUnknownType,
-			Message: fmt.Sprintf("%q is a real capability (iash %s) and is not "+
+			Message: fmt.Sprintf("%q is a real capability (arxi %s) and is not "+
 				"exposed to the protocol. That is deliberate, not missing: the "+
 				"operator-side capabilities are held off the wire so a socket "+
 				"client cannot change the rules a run is judged by.", t, c.CLI()),
-			Fix: []string{"iash " + c.CLI()},
+			Fix: []string{"arxi " + c.CLI()},
 		}
 	}
 	return &protoError{
 		Code: errUnknownType,
 		Message: fmt.Sprintf("%q is not a message type in surface v%d. The type is "+
 			"the CLI path with dots: `run why` is `run.why`.", t, surface.SurfaceVersion),
-		Fix: []string{"iash schema"},
+		Fix: []string{"arxi schema"},
 	}
 }
 
@@ -376,7 +376,7 @@ func checkType(c surface.Cmd, pp surface.Param, v any) error {
 	return nil
 }
 
-// handleSchema answers `schema` with the same manifest `iash schema` prints.
+// handleSchema answers `schema` with the same manifest `arxi schema` prints.
 // Same function, not a second projection: two documents claiming to be the
 // surface is the failure this whole design is arranged to prevent.
 func handleSchema(map[string]any) (any, error) {
@@ -467,18 +467,18 @@ func handleBlueprintValidate(params map[string]any) (any, error) {
 	return out, nil
 }
 
-// cmdServe implements `iash serve [--listen <addr>]`.
+// cmdServe implements `arxi serve [--listen <addr>]`.
 func cmdServe(args []string) {
 	args, err := expandShort(surface.Lookup("serve"), args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash serve: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi serve: %v\n", err)
 		os.Exit(2)
 	}
 
 	listen, err := parseServeFlags(args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash serve: %v\n\n"+
-			"usage: iash serve [--listen unix:///path/to.sock]\n"+
+		fmt.Fprintf(os.Stderr, "arxi serve: %v\n\n"+
+			"usage: arxi serve [--listen unix:///path/to.sock]\n"+
 			"       with no --listen it speaks the protocol over stdin/stdout\n"+
 			"short: -l listen\n", err)
 		os.Exit(2)
@@ -507,8 +507,8 @@ func serveSocket(path string) {
 	// to a process nobody knows is there. Making the operator remove the file
 	// costs one command and cannot do that.
 	if _, err := os.Stat(path); err == nil {
-		fmt.Fprintf(os.Stderr, "iash serve: %s already exists.\n\n"+
-			"It is not removed automatically: if another iash is still listening "+
+		fmt.Fprintf(os.Stderr, "arxi serve: %s already exists.\n\n"+
+			"It is not removed automatically: if another arxi is still listening "+
 			"there, unlinking the file would leave it running with its listener "+
 			"while every new client reached this process instead, so half the "+
 			"clients would be talking to a server nobody knows about.\n\n"+
@@ -550,7 +550,7 @@ func serveSocket(path string) {
 	// The banner goes to stderr, not stdout. stdout is the protocol stream in the
 	// stdio mode, and a server that greeted the operator on the same channel would
 	// make the two modes disagree about what stdout means.
-	fmt.Fprintf(os.Stderr, "iash serve: listening on unix://%s (surface v%d)\n",
+	fmt.Fprintf(os.Stderr, "arxi serve: listening on unix://%s (surface v%d)\n",
 		path, surface.SurfaceVersion)
 
 	for {
@@ -568,7 +568,7 @@ func serveSocket(path string) {
 		go func(c net.Conn) {
 			defer c.Close()
 			if err := serveConn(c, c); err != nil {
-				fmt.Fprintf(os.Stderr, "iash serve: connection ended: %v\n", err)
+				fmt.Fprintf(os.Stderr, "arxi serve: connection ended: %v\n", err)
 			}
 		}(conn)
 	}
@@ -599,7 +599,7 @@ func parseServeFlags(args []string) (string, error) {
 			// Here it is also already true. WireParams gives --json to every
 			// non-mutating command, and serve's entire output is NDJSON — asking
 			// for JSON output from the JSON protocol is a request that was
-			// already granted. Rejecting it would mean `iash surface --flags`
+			// already granted. Rejecting it would mean `arxi surface --flags`
 			// advertises -J on serve and serve refuses it, which is the drift
 			// TestEveryShortFlagReachesItsParameter exists to catch. It caught
 			// exactly this.
@@ -652,7 +652,7 @@ func parseServeFlags(args []string) (string, error) {
 				"unix:///path/to.sock", listen)
 		}
 		return "", fmt.Errorf("--listen %q must be a unix:// address, "+
-			"for example unix:///tmp/iash.sock", listen)
+			"for example unix:///tmp/arxi.sock", listen)
 	}
 	if strings.TrimPrefix(listen, "unix://") == "" {
 		return "", errors.New("--listen unix:// has no path")

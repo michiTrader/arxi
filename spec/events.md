@@ -85,13 +85,13 @@ concrete command:
 
 | `blocked_on` | `blocked_ref` | derived remedy |
 |---|---|---|
-| `approval` | `{inbox_id, tool, policy}` | `iash inbox approve <inbox_id>` |
-| `lock` | `{key, holder}` | `iash state unlock <key>` |
+| `approval` | `{inbox_id, tool, policy}` | `arxi inbox approve <inbox_id>` |
+| `lock` | `{key, holder}` | `arxi state unlock <key>` |
 | `peer` | `{peer}` | (informational: chained wait) |
-| `budget` | `{}` | `iash run unpause <run> --budget <higher>` |
+| `budget` | `{}` | `arxi run unpause <run> --budget <higher>` |
 | `timer` | `{timer_id}` | (informational) |
 | `tool` | `{tool}` | (informational) |
-| `workspace` | `{path}` | `iash run show <run> --workspace` |
+| `workspace` | `{path}` | `arxi run show <run> --workspace` |
 
 When a new blocking reason appears, it brings its reference and `why` shows it
 with no code changes. If somebody emits a block with no reference, `why` reports
@@ -159,6 +159,6 @@ half an hour of real time.
 
 ## User events
 
-`custom.*` is reserved for events emitted by agents via `iash event emit`. Agents
+`custom.*` is reserved for events emitted by agents via `arxi event emit`. Agents
 can **only** emit in that namespace: if they could emit `stage.advanced`, they
 could skip the advance rule of their own blueprint.

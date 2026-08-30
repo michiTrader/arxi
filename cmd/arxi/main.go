@@ -1,4 +1,4 @@
-// Command iash is the binary.
+// Command arxi is the binary.
 //
 // Today it implements schema, surface, why, blueprint validate, run start
 // (--sim only) and serve; for everything else it answers "declared but not
@@ -19,8 +19,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/michiTrader/iash/internal/kernel"
-	"github.com/michiTrader/iash/internal/surface"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 const version = "0.0.1-spec"
@@ -37,7 +37,7 @@ func main() {
 		usage()
 		return
 	case "--version", "version":
-		fmt.Printf("iash %s (surface v%d)\n", version, surface.SurfaceVersion)
+		fmt.Printf("arxi %s (surface v%d)\n", version, surface.SurfaceVersion)
 		return
 	case "schema":
 		cmdSchema()
@@ -81,29 +81,29 @@ func main() {
 // switch, which needed the identical answer for a declared-but-unbuilt trigger
 // subcommand. Copying the block would have made the two drift, and the way they
 // drift is the worse direction: a group that grew its own dispatcher starts
-// reporting "unknown command" for capabilities `iash surface` publishes.
+// reporting "unknown command" for capabilities `arxi surface` publishes.
 func notImplemented(args []string) {
 	for n := len(args); n >= 1; n-- {
 		if c := surface.Lookup(args[:n]...); c != nil {
 			fmt.Fprintf(os.Stderr,
-				"iash %s is declared in the surface but not implemented yet.\n\n"+
+				"arxi %s is declared in the surface but not implemented yet.\n\n"+
 					"  description: %s\n  tool:        %s\n  protocol:    %s\n  since:       surface v%d\n\n"+
-					"See the whole surface: iash surface\n",
+					"See the whole surface: arxi surface\n",
 				c.CLI(), c.Desc, c.Name(), c.ProtocolType(), c.Since)
 			os.Exit(2)
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "iash: %q does not exist in the surface.\nTry: iash surface\n",
+	fmt.Fprintf(os.Stderr, "arxi: %q does not exist in the surface.\nTry: arxi surface\n",
 		strings.Join(args, " "))
 	os.Exit(2)
 }
 
 func usage() {
-	fmt.Print(`iash - agent systems you can actually debug
+	fmt.Print(`arxi - agent systems you can actually debug
 
 USAGE
-  iash <command> [args]
+  arxi <command> [args]
 
 IMPLEMENTED TODAY
   schema                     emit the surface manifest (JSON)
@@ -120,10 +120,10 @@ SHORT FLAGS
   A letter is an error on a command without that parameter, rather than being
   quietly ignored, because ignoring it discards the value and reports success.
 
-  iash surface --flags       the whole assignment, and what each letter reaches
+  arxi surface --flags       the whole assignment, and what each letter reaches
 
 The rest of the surface is declared and verified by tests, but has no executor
-yet. 'iash surface' lists everything that is going to exist.
+yet. 'arxi surface' lists everything that is going to exist.
 
 DESIGN
   docs/design/10-execution.md   the execution model
@@ -190,7 +190,7 @@ func cmdWhy(args []string) {
 	// what keeps this from becoming a place where the letter could differ.
 	args, err := expandShort(surface.Lookup("run", "why"), args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "iash why: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arxi why: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -204,7 +204,7 @@ func cmdWhy(args []string) {
 		}
 	}
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "usage: iash why <file.json> [--json]\n\n"+
+		fmt.Fprintln(os.Stderr, "usage: arxi why <file.json> [--json]\n\n"+
 			"The file can be {\"state\":..., \"config\":...} or a bare State.\n"+
 			"short: -J json\n"+
 			"Try: testdata/scenarios/blocked-on-approval.json")
@@ -256,7 +256,7 @@ func cmdWhy(args []string) {
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "iash:", err)
+	fmt.Fprintln(os.Stderr, "arxi:", err)
 	os.Exit(1)
 }
 
