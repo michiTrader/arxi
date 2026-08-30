@@ -47,9 +47,25 @@ type StageConfig struct {
 // Activation defaults to "coalesce": if five reasons to wake the same agent
 // arrive, one turn is opened carrying all five. The alternative ("one event, one
 // turn") multiplies the bill by five in exchange for nothing.
+// Model names the model this member thinks with, in the spelling `model list`
+// prints: either a bare id ("claude-sonnet-4-6") or one qualified by provider
+// ("anthropic/claude-sonnet-4-6"). §20.2 shows it on `agent create --model` and
+// in `agent show`, so it is a promise already made.
+//
+// It is a plain string and the kernel never interprets it. Resolving a ref to an
+// endpoint and a credential is a question about THIS MACHINE -- which providers
+// are registered, which models are enabled -- and the reducer must stay a pure
+// function of (State, Event, Config). Were the resolution to happen here, the
+// same log would fold to different states on two machines, and replay is the one
+// property the whole design rests on.
+//
+// Empty means "the run decides", which is what makes the field additive: every
+// blueprint written before it existed still loads, and a single-model setup
+// never has to name the model twice.
 type MemberConfig struct {
 	Name       string   `json:"name"`
 	Role       string   `json:"role,omitempty"`
+	Model      string   `json:"model,omitempty"`
 	Advisory   bool     `json:"advisory,omitempty"`
 	Tools      []string `json:"tools,omitempty"`
 	Activation string   `json:"activation,omitempty"`
