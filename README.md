@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **940 tests, no dependencies**.
+Underneath, every package is done and tested — **978 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -191,7 +191,8 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 12 |
 | `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 55 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 175 |
+| `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 193 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -359,11 +360,11 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**22 of 49 declared capabilities are wired — 44.9%.** That figure is measured,
+**23 of 49 declared capabilities are wired — 46.9%.** That figure is measured,
 not estimated: a probe walks `surface.Registry`, invokes every declared path
 against the built binary, and counts the ones that do not answer *"declared but
 not implemented"*. It is the honest denominator, and it is deliberately
-unflattering — the 27 that remain are mostly `run *`, `agent *`, `state *`,
+unflattering — the 26 that remain are mostly `run *`, `agent *`, `state *`,
 `event *` and `inbox *`, which now want the inbox and a way to read the log
 rather than the executor or the tool runner. The implemented eighteen are
 `provider add`, `model list` /
@@ -373,7 +374,7 @@ rather than the executor or the tool runner. The implemented eighteen are
 
 ### One number is not enough
 
-44.9% is the CLI surface, and quoting it alone would be misleading in **both**
+46.9% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -381,12 +382,12 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **22 / 49 — 44.9%** | every declared path probed against the built binary |
+| the CLI surface | **23 / 49 — 46.9%** | every declared path probed against the built binary |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 940 tests live. What is missing is almost entirely
+that is where most of the 978 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
@@ -410,8 +411,8 @@ run can emit now reaches something real, and **no effect fakes a result**. It
 does *not* mean a run drives itself to completion after an approval — nothing
 yet resumes a blocked run from the CLI, which is the next thing worth building.
 
-That shape is also why 44.9% understates and 100% overstates. Twelve of the
-27 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
+That shape is also why 46.9% understates and 100% overstates. Twelve of the
+26 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
 `pause`, `cancel`, `fork`, `replay` — and each is a **projection of a log that
 already exists and is already correct**. They are not twelve features; they
 are twelve readings of one finished mechanism.
@@ -420,13 +421,14 @@ The one number worth committing to, if only one is wanted: **the system can
 reason about a run end to end, can do the work inside one, and cannot yet pick
 a run back up after a human has answered it.**
 
-Two entries in that unwired list are worth naming, because they are remedies
-this README itself recommends. `agent tool policy` is what stops an approval
-loop — approving a tool call re-spawns the turn while the policy still says
-`ask`, so the model asks again — and it is declared but not implemented. And
-`run unpause` is what would drive a run forward once an inbox reply has landed.
-A remedy a document names and a binary refuses is the worst kind of gap,
-because it is discovered by the person already in trouble.
+One entry in that unwired list is worth naming, because it is a remedy this
+README itself recommends: **`run unpause`** is what would drive a run forward
+once an inbox reply has landed. A remedy a document names and a binary refuses
+is the worst kind of gap, because it is discovered by the person already in
+trouble.
+
+It used to be two. `agent tool policy` was the other, and it is now implemented
+— see below.
 
 Both surface numbers moved for an unglamorous reason worth recording: `surface`
 and `version` were always implemented, were always on the first screen, and were
@@ -572,6 +574,49 @@ The rules are the ones the design already committed to: a tool not granted is
 undeclared policy is `deny` because a permissive default turns every oversight
 into a silent hole, and the person who pays for the hole is never the person who
 forgot.
+
+### The approval loop, and the way out
+
+`ask` has a consequence that only appears once you use it. Approving a tool call
+respawns the turn — that is what an approval *is* — but the policy still says
+`ask`, so the model calls the tool again and is asked again. Approving your way
+out does not work; it is a loop with a per-turn price.
+
+```bash
+arxi agent tool policy --agent backend --allow bash
+```
+
+That is the exit, and `run why` prints it as the second remedy. Four things
+about it are deliberate:
+
+**It is CLI-only, and that is a security boundary rather than an omission.** An
+agent that can widen its own tool policy does not have a policy. The registry
+declares it `CLIOnly`, so it is never exposed as a tool and never reachable over
+the protocol — the same line the three `inbox` reply verbs sit on.
+
+**An override cannot grant.** `tool.Resolve` checks the grant list first, so
+`--allow bash` on an agent that was never given `bash` changes nothing. An
+override that could grant would make the blueprint's `tools:` list decorative,
+and the blueprint is the reviewed artifact. The command says this in its own
+output, because succeeding while changing nothing observable is the most
+confusing thing it could do.
+
+**It is stored, not logged.** Every other durable decision here is an event in a
+run's log; this one is a file in `policies/`. The surface declares it with
+`--agent` and no `--run`: it is an operator decision about an agent *across*
+runs, so writing it into one run's log would mean the next run could not see it.
+Overrides also sit deliberately outside the frozen `blueprint.snapshot.yaml`,
+because they are a standing answer to "stop asking me about this" rather than a
+property of one run.
+
+**It is not retroactive, and the command says so.** The policy is read at
+`run start` and copied into that run's executor, so a run already waiting on an
+approval is *not* unblocked by changing the policy — answer that one with
+`arxi inbox`. Re-reading policy mid-run would mean the rules a run is judged by
+could change between two of its own turns. The person running this command is
+usually looking at exactly that blocked run, so the limitation is printed in the
+output rather than left in a doc comment where only the people who did not need
+it would find it.
 
 A denial is emitted as an **event, not an error**. A denial is a domain fact: it
 happened, it is the correct outcome, and the run should continue knowing it.
