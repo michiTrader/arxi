@@ -73,11 +73,16 @@ func cmdAgentToolPolicy(args []string) {
 	}
 
 	var agent string
-	// set holds the tool named by each policy flag. One command sets one tool,
-	// so two policy flags for the same tool is a contradiction and two for
-	// different tools is a second command -- both refused below rather than
-	// resolved by an order nobody can see.
-	set := map[string]surface.Policy{}
+	// change is a SLICE and not a map, and that is a defect this command shipped
+	// with for one commit. Keyed by tool name, `--allow bash --deny bash`
+	// collapsed to a single entry, so the "one tool at a time" refusal below
+	// counted one change and applied whichever flag was written last. A
+	// contradiction the command claimed to refuse was silently resolved by map
+	// assignment order.
+	//
+	// Found by running it, not by testing it: every unit assertion about the
+	// guard passed, because they all used two DIFFERENT tools.
+	var change []toolChange
 	var reset []string
 
 	for i := 0; i < len(args); i++ {
@@ -96,17 +101,17 @@ func cmdAgentToolPolicy(args []string) {
 		case strings.HasPrefix(a, "--agent="):
 			agent = strings.TrimPrefix(a, "--agent=")
 		case a == "--allow":
-			set[val("--allow")] = surface.PolicyAllow
+			change = append(change, toolChange{val("--allow"), surface.PolicyAllow})
 		case strings.HasPrefix(a, "--allow="):
-			set[strings.TrimPrefix(a, "--allow=")] = surface.PolicyAllow
+			change = append(change, toolChange{strings.TrimPrefix(a, "--allow="), surface.PolicyAllow})
 		case a == "--ask":
-			set[val("--ask")] = surface.PolicyAsk
+			change = append(change, toolChange{val("--ask"), surface.PolicyAsk})
 		case strings.HasPrefix(a, "--ask="):
-			set[strings.TrimPrefix(a, "--ask=")] = surface.PolicyAsk
+			change = append(change, toolChange{strings.TrimPrefix(a, "--ask="), surface.PolicyAsk})
 		case a == "--deny":
-			set[val("--deny")] = surface.PolicyDeny
+			change = append(change, toolChange{val("--deny"), surface.PolicyDeny})
 		case strings.HasPrefix(a, "--deny="):
-			set[strings.TrimPrefix(a, "--deny=")] = surface.PolicyDeny
+			change = append(change, toolChange{strings.TrimPrefix(a, "--deny="), surface.PolicyDeny})
 		case a == "--reset":
 			reset = append(reset, val("--reset"))
 		case strings.HasPrefix(a, "--reset="):
@@ -128,7 +133,7 @@ func cmdAgentToolPolicy(args []string) {
 		os.Exit(2)
 	}
 
-	if len(set)+len(reset) == 0 {
+	if len(change)+len(reset) == 0 {
 		// Showing the current policy would be a reasonable thing to do here,
 		// but `agent show` is the declared way to read one and this command
 		// declares itself as a change. Printing on no flags would make the
@@ -138,16 +143,18 @@ func cmdAgentToolPolicy(args []string) {
 		os.Exit(2)
 	}
 
-	if len(set)+len(reset) > 1 {
+	if len(change)+len(reset) > 1 {
 		// Refused rather than applied in some order. Two flags in one command
 		// means the operator is thinking of two changes, and if they conflict
 		// -- `--allow bash --deny bash` -- there is no reading of the command
 		// line that says which one they meant.
 		var named []string
-		for t := range set {
-			named = append(named, t)
+		for _, c := range change {
+			named = append(named, fmt.Sprintf("%s=%s", c.tool, c.policy))
 		}
-		named = append(named, reset...)
+		for _, r := range reset {
+			named = append(named, r+"=default")
+		}
 		sort.Strings(named)
 		fmt.Fprintf(os.Stderr, "arxi agent tool policy: one tool at a time (got %s)\n"+
 			"  two policy flags in one command have no order that is written down;\n"+
@@ -155,19 +162,23 @@ func cmdAgentToolPolicy(args []string) {
 		os.Exit(2)
 	}
 
+	// Tool names are checked before the store is touched, so an unknown tool is
+	// a usage error (exit 2) naming the flag the user typed, rather than the
+	// store's own error routed through fatal (exit 1). The store keeps its check
+	// regardless: that one protects a hand-edited file, and this one answers a
+	// person at a keyboard.
+	for _, c := range change {
+		requireKnownTool(c.tool)
+	}
+	for _, r := range reset {
+		requireKnownTool(r)
+	}
+
 	store := openPolicies()
 
 	// --reset first, because it is the only branch that takes the other path
 	// through the store.
 	for _, name := range reset {
-		if !tool.Known[name] {
-			// Checked here as well as in the store, so the message names the
-			// flag the user typed. The store's own check is what protects a
-			// hand-edited file.
-			fmt.Fprintf(os.Stderr, "arxi agent tool policy: unknown tool %q\n"+
-				"  known tools: %s\n", name, strings.Join(knownToolNames(), ", "))
-			os.Exit(2)
-		}
 		had, err := store.Clear(agent, name)
 		if err != nil {
 			fatal(err)
@@ -183,35 +194,75 @@ func cmdAgentToolPolicy(args []string) {
 		}
 		fmt.Printf("%s: %s is back to its default policy (%s).\n",
 			agent, name, defaultPolicyOf(name))
-		printNotRetroactive(agent)
+		printNotRetroactive()
 		return
 	}
 
-	for name, pol := range set {
+	for _, c := range change {
+		name, pol := c.tool, c.policy
 		prev, had, err := store.Set(agent, name, pol)
 		if err != nil {
 			fatal(err)
 		}
+		def := defaultPolicyOf(name)
 		switch {
 		case had && prev == pol:
 			fmt.Printf("%s: %s was already %s. nothing changed.\n", agent, name, pol)
+			return
+		case !had && pol == def:
+			// An override that restates the default is stored, and saying so
+			// matters. The walk printed "read is now allow (the default is
+			// allow)" for it, which reads as a change and is not one: the
+			// resolver would answer identically with no override at all.
+			//
+			// It is not refused, because an operator pinning a default against a
+			// future change to it is making a real decision. It is just not
+			// described as an effect it does not have.
+			fmt.Printf("%s: %s is %s, which is already the default. "+
+				"the override is recorded but changes nothing.\n", agent, name, pol)
+			fmt.Printf("  remove it with: arxi agent tool policy --agent %s --reset %s\n",
+				agent, name)
 			return
 		case had:
 			fmt.Printf("%s: %s is now %s (was %s).\n", agent, name, pol, prev)
 		default:
 			fmt.Printf("%s: %s is now %s (the default is %s).\n",
-				agent, name, pol, defaultPolicyOf(name))
+				agent, name, pol, def)
 		}
 
-		// An override cannot grant. Said here rather than left to be discovered,
-		// because `--allow bash` on an agent without bash succeeds at what it
-		// was asked to do and changes nothing observable, which is the most
-		// confusing possible outcome.
-		fmt.Printf("  this does not grant %s. an agent that was never given %s "+
-			"is still denied it.\n", name, name)
-		printNotRetroactive(agent)
+		// Only said for allow, and only because it is the widening direction.
+		// `--allow bash` on an agent without bash succeeds at what it was asked
+		// to do and changes nothing observable, which is the most confusing
+		// possible outcome -- so the message exists to pre-empt it.
+		//
+		// It used to print for every policy, including deny, where it read as
+		// advice about granting to somebody who had just refused something. A
+		// note that is true but irrelevant is how notes stop being read.
+		if pol == surface.PolicyAllow {
+			fmt.Printf("  this does not grant %s. an agent that was never given "+
+				"%s is still denied it.\n", name, name)
+		}
+		printNotRetroactive()
 		return
 	}
+}
+
+// toolChange is one --allow/--ask/--deny flag, kept as a pair so two flags
+// naming the same tool stay two flags. See the comment on `change`.
+type toolChange struct {
+	tool   string
+	policy surface.Policy
+}
+
+// requireKnownTool exits with a usage error for a tool name that is not
+// grantable, naming the alternatives.
+func requireKnownTool(name string) {
+	if tool.Known[name] {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "arxi agent tool policy: unknown tool %q\n"+
+		"  known tools: %s\n", name, strings.Join(knownToolNames(), ", "))
+	os.Exit(2)
 }
 
 // printNotRetroactive says the one thing about this command that surprises
@@ -222,7 +273,7 @@ func cmdAgentToolPolicy(args []string) {
 // running this command is very often looking at exactly that blocked run --
 // `run why` sent them here -- so leaving this in a doc comment would mean the
 // only people who learn it are the ones who did not need to.
-func printNotRetroactive(agent string) {
+func printNotRetroactive() {
 	fmt.Printf("  this applies to runs started from now on. a run already " +
 		"waiting is not unblocked by it:\n")
 	fmt.Printf("  answer that one with: arxi inbox\n")
