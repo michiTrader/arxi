@@ -212,3 +212,58 @@ func TestEveryKnownToolResolvesToARealPolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestKnownIsASetAndMutatingIsTheAnswerAboutMutation pins a distinction that
+// went undocumented for long enough to end up stated backwards.
+//
+// Known's doc comment used to say it recorded "whether each mutates". Every
+// value in it is true, so a reader who trusted the comment would have concluded
+// that read and grep mutate and gone looking for an approval gate on a search.
+// Nothing caught it because nothing asked: Known was only ever read for
+// membership, so the value could mean anything without a test noticing.
+//
+// This asserts both halves. Known is a set -- every value true, membership the
+// only question it answers -- and Mutating is a strict subset that leaves the
+// reading tools out. Adding a tool to Known with a false value, or quietly
+// widening Mutating to everything, fails here.
+func TestKnownIsASetAndMutatingIsTheAnswerAboutMutation(t *testing.T) {
+	for name, v := range Known {
+		if !v {
+			t.Errorf("Known[%q] is false\n"+
+				"  Known is a SET: the value carries no meaning and every entry is "+
+				"true. A false entry is a tool that is listed and not grantable, "+
+				"which is neither state this package has\n"+
+				"  if the intent was \"does not mutate\", that is Mutating's job", name)
+		}
+	}
+
+	for name := range Mutating {
+		if !Known[name] {
+			t.Errorf("Mutating lists %q, which Known does not\n"+
+				"  a tool can be gated without being grantable only by accident", name)
+		}
+	}
+
+	// The reading tools are the reason the two maps are not the same map. If
+	// this ever holds, every tool asks, `--tools read,grep` stops being usable
+	// unattended, and the design's read-only agent has nowhere to live.
+	for _, name := range []string{"read", "grep"} {
+		if !Known[name] {
+			t.Fatalf("%q is no longer a known tool", name)
+		}
+		if Mutating[name] {
+			t.Errorf("%q counts as mutating\n"+
+				"  it only looks. Marking it mutating puts an approval gate on a "+
+				"search and gives it a private workspace to scribble in, and "+
+				"docs/design/20-use-cases.md offers `--tools read,grep` as the "+
+				"read-only agent", name)
+		}
+	}
+
+	if len(Mutating) >= len(Known) {
+		t.Errorf("Mutating has %d entries and Known has %d\n"+
+			"  Mutating is meant to be a strict subset; if it is not, the two maps "+
+			"answer the same question and one of them is redundant",
+			len(Mutating), len(Known))
+	}
+}

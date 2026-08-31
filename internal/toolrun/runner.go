@@ -156,15 +156,48 @@ func (r *Runner) RunTool(ctx context.Context, member, name string, args map[stri
 		}
 		return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
 
-	case "grep", "edit":
-		// Declared in internal/tool.Known and not implemented here. Named
-		// explicitly rather than falling into the default, so the refusal says
-		// "not built yet" instead of "no such tool" — those send the reader to
-		// completely different places.
-		return "", fmt.Errorf("toolrun: %s: the %q tool is granted and permitted, but "+
-			"this runner has no implementation for it: %w\n"+
-			"  it is declared in internal/tool.Known, so this is a missing body and "+
-			"not a mistyped name", member, name, ErrNotImplemented)
+	case "grep":
+		pattern, err := stringArg(args, "pattern", "query", "regex")
+		if err != nil {
+			return "", fmt.Errorf("toolrun: %s calling grep: %w", member, err)
+		}
+		// An absent path means the whole workspace, which is what a model that
+		// says only `pattern` means. It is not an error, unlike an absent
+		// pattern: there is an obvious default for where to look and none for
+		// what to look for.
+		sub, _ := stringArg(args, "path", "dir", "directory")
+		matches, truncated, err := w.Grep(pattern, sub)
+		if err != nil {
+			return "", err
+		}
+		return formatGrep(matches, truncated, pattern), nil
+
+	case "edit":
+		path, err := stringArg(args, "path", "file")
+		if err != nil {
+			return "", fmt.Errorf("toolrun: %s calling edit: %w", member, err)
+		}
+		old, err := stringArg(args, "old", "old_string", "find")
+		if err != nil {
+			return "", fmt.Errorf("toolrun: %s calling edit: %w", member, err)
+		}
+		// A missing replacement is a DELETION, not an error, and for the same
+		// reason a missing `content` is an empty write: "remove this line" is a
+		// real instruction, and absent and empty are the same request.
+		replacement, _ := stringArg(args, "new", "new_string", "replace")
+		all := boolArg(args, "all", "replace_all", "global")
+
+		n, err := w.Edit(path, old, replacement, all)
+		if err != nil {
+			return "", err
+		}
+		// The COUNT is reported, not just success. An edit that replaced 7
+		// occurrences when the caller expected 1 is a fact it can act on, and
+		// the only place it can learn it.
+		if n == 1 {
+			return fmt.Sprintf("edited %s (1 replacement)", path), nil
+		}
+		return fmt.Sprintf("edited %s (%d replacements)", path, n), nil
 
 	default:
 		return "", fmt.Errorf("toolrun: %s asked for %q: %w\n"+
@@ -201,6 +234,35 @@ func stringArg(args map[string]any, names ...string) (string, error) {
 	}
 	sort.Strings(got)
 	return "", fmt.Errorf("no %s argument (got: %v)", strings.Join(names, " or "), got)
+}
+
+// boolArg pulls a boolean out of args, defaulting to false.
+//
+// Absent is false and there is no error case, which is deliberate: every caller
+// of this is a flag that widens what a tool does, so a value nobody supplied has
+// to mean the narrower behaviour. An unparseable value is also false, for the
+// same reason -- "all": "yes" turning into a global replace because a string is
+// truthy somewhere is how a model's loose vocabulary becomes an edit it did not
+// ask for.
+//
+// A JSON string "true" IS accepted, though, because that is not looseness: a
+// model emitting arguments as text is a normal thing that happens, and refusing
+// it would fail a turn over quoting rather than over intent.
+func boolArg(args map[string]any, names ...string) bool {
+	for _, n := range names {
+		v, ok := args[n]
+		if !ok {
+			continue
+		}
+		switch t := v.(type) {
+		case bool:
+			return t
+		case string:
+			return t == "true"
+		}
+		return false
+	}
+	return false
 }
 
 // formatBash renders a result as the text a model will read next.

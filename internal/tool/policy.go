@@ -39,12 +39,18 @@ var Mutating = map[string]bool{
 	"edit":  true,
 }
 
-// Known lists the tools an agent may be granted, and whether each mutates.
+// Known lists the tools an agent may be granted.
 //
 // A closed list, because the alternative is treating an unrecognised name as a
 // tool nobody has reviewed. `arxi agent create backend --tools reed` should say
 // so, rather than silently granting a tool that will fail at the moment it is
 // first needed, which is halfway through a paid run.
+//
+// The value carries no meaning: it is a set, and every entry is true. An
+// earlier version of this comment said the value recorded "whether each
+// mutates", which is what Mutating above is for. A reader who trusted it would
+// have concluded that read and grep mutate, and looked for an approval gate on
+// a search. Membership is the only question this map answers.
 var Known = map[string]bool{
 	"read":  true,
 	"grep":  true,
