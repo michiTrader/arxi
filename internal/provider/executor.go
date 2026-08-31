@@ -385,16 +385,56 @@ func (x *Executor) policyFor(agent, name string) surface.Policy {
 	return surface.PolicyDeny
 }
 
-// AskHuman refuses for the same reason, with a sharper consequence.
+// AskHuman records the question so a human can find it.
 //
-// The inbox is a real feature (§20.2 shows `arxi inbox`), and it needs somewhere
-// to persist a question that outlives the process. Faking it would emit
-// inbox.created for a question nobody can ever answer: applyInboxReplied would
-// find no item, and the run would wait forever while looking perfectly healthy.
+// This used to refuse, on the grounds that an inbox "needs somewhere to persist
+// a question that outlives the process". It does, and the answer turned out to
+// be the place the events already go: the effect runner appends what this
+// returns, kernel.Fold rebuilds State.Inbox from those events, and `arxi inbox`
+// folds the same log. So the question outlives the process without a second
+// store that could disagree with the first. There is no inbox database, and
+// that absence is the design -- see internal/inbox's package doc.
+//
+// The one thing this must not do is invent the id. e.ID is minted by the reducer
+// (nextInboxID, decide.go) precisely so an answer can be matched against it; a
+// fresh id here would produce a question that looks entirely normal in the log
+// and that applyInboxReplied can never match, so the run would wait forever
+// while looking healthy -- which is the exact failure the old refusal was
+// written to avoid. The refusal is gone; the property it protected is not.
+//
+// No inbox.replied is emitted, and the asymmetry is the point: this writes the
+// question and only a human writes the answer. An executor that could answer
+// its own questions would make the approval gate decorative.
 func (x *Executor) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event, error) {
-	return nil, fmt.Errorf("%s asked a human (%s: %q), but this build has no inbox: "+
-		"a faked question cannot be answered, and the run would wait forever while "+
-		"looking healthy.\n"+
-		"  what works today: arxi run start ... --sim, which can answer canned replies",
-		e.Agent, e.Kind, e.Question)
+	if err := ctx.Err(); err != nil {
+		// Checked before emitting, not after. A cancelled run that silently
+		// skipped writing the question would leave a member blocked on an inbox
+		// item that does not exist, so `arxi inbox` would show nothing to answer
+		// for a run that cannot proceed without an answer.
+		return nil, fmt.Errorf("ask a human (%s: %q): %w", e.Kind, e.Question, err)
+	}
+
+	payload := map[string]any{
+		"inbox_id":   e.ID,
+		"kind":       e.Kind,
+		"question":   e.Question,
+		"on_timeout": e.OnTimeout,
+	}
+	// Agent is omitted when empty rather than written blank, because a budget
+	// question belongs to nobody. An "agent":"" in the log reads as a member
+	// whose name was lost, and a reader would go looking for it.
+	if e.Agent != "" {
+		payload["agent"] = e.Agent
+	}
+	if e.TimeoutMs > 0 {
+		payload["timeout_ms"] = e.TimeoutMs
+	}
+
+	return []kernel.Event{{
+		ID:      x.id(e.Agent, "inbox"),
+		Type:    kernel.InboxCreated,
+		Source:  kernel.SourceRuntime,
+		Actor:   e.Agent,
+		Payload: payload,
+	}}, nil
 }

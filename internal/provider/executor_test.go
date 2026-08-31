@@ -431,12 +431,105 @@ func TestToolsAndTheInboxRefuseRatherThanFake(t *testing.T) {
 		}
 	}
 
-	evs, err = x.AskHuman(context.Background(), kernel.AskHuman{Agent: "backend", Kind: "approval"})
+	// AskHuman used to be asserted here, as a refusal. It is now implemented,
+	// and the property the refusal protected -- never write a question that
+	// cannot be matched to an answer -- is asserted by the three tests below.
+}
+
+// TestAskHumanRecordsTheQuestionUnderTheIdTheReducerMinted: the id in the event
+// must be the reducer's, not one the executor invented.
+//
+// This is the whole of what the old refusal was defending. A fresh id would
+// produce an inbox.created that looks entirely normal, and an inbox.replied
+// carrying that id would match nothing in State.Inbox, so the member would stay
+// blocked on a question that appears to have been asked and answered.
+func TestAskHumanRecordsTheQuestionUnderTheIdTheReducerMinted(t *testing.T) {
+	x := &Executor{}
+	evs, err := x.AskHuman(context.Background(), kernel.AskHuman{
+		ID:        "inbox-1",
+		Kind:      "tool_approval",
+		Question:  "backend wants to run bash. allow?",
+		Agent:     "backend",
+		OnTimeout: "deny",
+	})
+	if err != nil {
+		t.Fatalf("AskHuman refused (%v); the inbox exists now, so a refusal "+
+			"blocks a run for a reason that is no longer true", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("AskHuman emitted %v; want exactly one inbox.created", types(evs))
+	}
+	e := evs[0]
+	if e.Type != kernel.InboxCreated {
+		t.Fatalf("emitted %s, want %s", e.Type, kernel.InboxCreated)
+	}
+	if got := e.Payload["inbox_id"]; got != "inbox-1" {
+		t.Errorf("inbox_id = %v, want inbox-1; an id the executor invented can "+
+			"never be matched by applyInboxReplied, so the run waits forever "+
+			"while the log looks healthy", got)
+	}
+	if got, _ := e.Payload["question"].(string); got == "" {
+		t.Error("question is empty; a human is asked to authorise something " +
+			"without being told what")
+	}
+	if got := e.Payload["on_timeout"]; got != "deny" {
+		t.Errorf("on_timeout = %v, want deny; without it nothing records what "+
+			"happens to an unanswered question", got)
+	}
+	if e.Source != kernel.SourceRuntime {
+		t.Errorf("source = %q, want %q; the runtime asked, not a human",
+			e.Source, kernel.SourceRuntime)
+	}
+	for _, ev := range evs {
+		if ev.Type == kernel.InboxReplied {
+			t.Error("AskHuman emitted inbox.replied; an executor that answers " +
+				"its own questions makes the approval gate decorative")
+		}
+	}
+}
+
+// TestABudgetQuestionBelongsToNobodyAndSaysSo: an empty agent is omitted, not
+// written blank, because "agent":"" reads as a member whose name was lost.
+func TestABudgetQuestionBelongsToNobodyAndSaysSo(t *testing.T) {
+	x := &Executor{}
+	evs, err := x.AskHuman(context.Background(), kernel.AskHuman{
+		ID:       "inbox-1",
+		Kind:     "budget",
+		Question: "the run is at 90% of its budget. continue?",
+	})
+	if err != nil {
+		t.Fatalf("AskHuman refused: %v", err)
+	}
+	if _, ok := evs[0].Payload["agent"]; ok {
+		t.Errorf("payload carries agent = %#v for a question with no member; "+
+			"a blank name reads as one that was lost, and a reader goes "+
+			"looking for it", evs[0].Payload["agent"])
+	}
+}
+
+// TestACancelledRunDoesNotSilentlySkipTheQuestion: cancellation must be an
+// error, not a quiet no-op.
+//
+// Returning no events and no error would leave the member blocked on an inbox
+// item that does not exist: `arxi inbox` would show nothing to answer for a run
+// that cannot proceed without an answer.
+func TestACancelledRunDoesNotSilentlySkipTheQuestion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	x := &Executor{}
+	evs, err := x.AskHuman(ctx, kernel.AskHuman{
+		ID: "inbox-1", Kind: "tool_approval", Question: "allow bash?", Agent: "backend",
+	})
 	if err == nil {
-		t.Fatal("AskHuman succeeded; the run would wait forever on a question nobody can answer")
+		t.Fatal("a cancelled AskHuman succeeded quietly; the member would be " +
+			"blocked on a question that was never recorded")
 	}
 	if len(evs) != 0 {
-		t.Errorf("AskHuman emitted %v", types(evs))
+		t.Errorf("emitted %v after cancellation", types(evs))
+	}
+	if !strings.Contains(err.Error(), "allow bash?") {
+		t.Errorf("error %q does not name the question that was lost", err)
 	}
 }
 
