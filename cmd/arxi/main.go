@@ -86,6 +86,9 @@ func main() {
 	case "model":
 		cmdModel(args[1:])
 		return
+	case "inbox":
+		cmdInbox(args[1:])
+		return
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
