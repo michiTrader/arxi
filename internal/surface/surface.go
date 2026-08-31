@@ -142,6 +142,15 @@ var Registry = []Cmd{
 			// mentions nothing, which is the one every reader assumes is safe.
 			enum(def(p("workspace", "string", "filesystem isolation"), "auto"),
 				"auto", "shared", "worktree", "copy", "none"),
+			// --model is the run's default for members that declare none.
+			//
+			// It has no Default of its own on purpose. A default here would be a
+			// spend decision taken in the binary: the user would be billed at
+			// whatever rate this build happens to prefer, and upgrading the
+			// binary could change the price of an unchanged command. A member
+			// with no model and no --model is refused, and the refusal names
+			// both fixes.
+			p("model", "string", "default model for members that declare none"),
 			p("sim", "bool", "run with a fake executor, without spending money"),
 			p("attach", "bool", "follow the output live")}},
 	{Path: []string{"run", "list"}, Desc: "list runs",

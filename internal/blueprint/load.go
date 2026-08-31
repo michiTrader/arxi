@@ -179,15 +179,40 @@ func (v *validator) members(raw any) []kernel.MemberConfig {
 			continue
 		}
 		where := fmt.Sprintf("members[%d]", i)
-		v.known(where, m, "name", "role", "advisory", "tools", "activation", "stages")
+		v.known(where, m, "name", "role", "model", "advisory", "tools", "activation", "stages")
 
 		mc := kernel.MemberConfig{
 			Name:       v.str(where, m, "name"),
 			Role:       v.str(where, m, "role"),
+			Model:      v.str(where, m, "model"),
 			Advisory:   v.bool(where, m, "advisory"),
 			Tools:      v.strList(where, m, "tools"),
 			Activation: v.enum(where, m, "activation", "coalesce", "queue", "steer", "reject"),
 			Stages:     v.strList(where, m, "stages"),
+		}
+
+		// The model is checked for SHAPE and not for existence, deliberately.
+		//
+		// Asking "is this model registered and enabled" would make a static file's
+		// validity depend on the machine reading it: a blueprint that passes
+		// `blueprint validate` in CI would fail on a laptop that has not run
+		// `provider add`, and the same file would be both valid and invalid. Worse,
+		// it would put the answer behind a directory read, so validation would
+		// start depending on the working directory.
+		//
+		// The run resolves it instead, where the failure is cheap, immediate and
+		// names the fix -- and where refusing costs nothing, because nothing has
+		// been spent yet.
+		if mc.Model != "" {
+			if strings.TrimSpace(mc.Model) != mc.Model {
+				v.errf("%s: model %q has surrounding whitespace; "+
+					"model ids are compared exactly, so a stray space is a model that does not exist",
+					where, mc.Model)
+			}
+			if strings.Count(mc.Model, "/") > 1 {
+				v.errf("%s: model %q has more than one '/'; "+
+					"the spelling is either `id` or `provider/id`", where, mc.Model)
+			}
 		}
 		if mc.Name == "" {
 			v.errf("%s: a member with no name cannot be addressed by `run steer` or named in a diagnosis", where)

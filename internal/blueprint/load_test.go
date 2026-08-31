@@ -290,3 +290,76 @@ func TestValidBlueprintReportsItsName(t *testing.T) {
 		t.Errorf("Config.Blueprint = %q, expected feature-team", bp.Config.Blueprint)
 	}
 }
+
+// TestAMemberMayNameItsModel protects the promise in §20.2: `agent create
+// --model claude-sonnet-4-6`, and `agent show` printing it back. A blueprint is
+// the declarative spelling of the same thing, so the field has to survive a
+// load.
+func TestAMemberMayNameItsModel(t *testing.T) {
+	bp := mustLoad(t, "name: t\nmembers:\n  - {name: a, model: claude-sonnet-4-6}\n")
+	if got := bp.Config.Members[0].Model; got != "claude-sonnet-4-6" {
+		t.Errorf("model = %q, expected claude-sonnet-4-6. The run resolves this ref to "+
+			"an endpoint and a credential; dropped here, every agent silently falls back "+
+			"to whatever the run defaults to, which is how you get billed at one model's "+
+			"rate for another model's work", got)
+	}
+}
+
+// TestAMemberNeedNotNameAModel is the additive half. Every blueprint in the
+// tree predates the field, including the one the design doc prints, and a
+// required field would have broken all of them at once.
+func TestAMemberNeedNotNameAModel(t *testing.T) {
+	bp := mustLoad(t, designDocBlueprint)
+	for _, m := range bp.Config.Members {
+		if m.Model != "" {
+			t.Errorf("member %s got model %q out of a blueprint that names none; "+
+				"an invented default here is a spend decision taken behind the user's back",
+				m.Name, m.Model)
+		}
+	}
+}
+
+// TestAQualifiedModelRefLoads: two providers can offer one id, and the
+// qualified spelling is the only way to say which one. If the loader rejected
+// the slash, the ambiguity `model list` reports would have no fix.
+func TestAQualifiedModelRefLoads(t *testing.T) {
+	bp := mustLoad(t, "name: t\nmembers:\n  - {name: a, model: anthropic/claude-sonnet-4-6}\n")
+	if got := bp.Config.Members[0].Model; got != "anthropic/claude-sonnet-4-6" {
+		t.Errorf("model = %q, expected the qualified ref to survive intact", got)
+	}
+}
+
+// TestAModelWithStrayWhitespaceIsRejected: ids are compared exactly, so " x" is
+// a model that does not exist. Caught at load, the message names the file and
+// the member; caught at run time it is a refusal after the run directory exists.
+func TestAModelWithStrayWhitespaceIsRejected(t *testing.T) {
+	if _, err := Load([]byte("name: t\nmembers:\n  - {name: a, model: \"claude-sonnet-4-6 \"}\n")); err == nil {
+		t.Fatal("a model id with a trailing space was accepted; ids are compared exactly, " +
+			"so this names a model that does not exist and the run fails later for a " +
+			"reason that looks like a missing provider")
+	}
+}
+
+// TestAModelRefWithTwoSlashesIsRejected: the spelling is `id` or
+// `provider/id`. Anything else would be split somewhere arbitrary, and the
+// arbitrary choice would pick a provider.
+func TestAModelRefWithTwoSlashesIsRejected(t *testing.T) {
+	if _, err := Load([]byte("name: t\nmembers:\n  - {name: a, model: a/b/c}\n")); err == nil {
+		t.Fatal("model `a/b/c` was accepted; the ref would be split at an arbitrary point " +
+			"and the arbitrary point chooses which provider gets billed")
+	}
+}
+
+// TestBlueprintValidationDoesNotConsultRegisteredProviders is the rule that
+// keeps a static file's meaning static.
+//
+// A model that is not registered anywhere must still LOAD. Checking existence
+// here would mean the same blueprint is valid in CI and invalid on a laptop
+// that has not run `provider add`, and validation would start depending on the
+// working directory.
+func TestBlueprintValidationDoesNotConsultRegisteredProviders(t *testing.T) {
+	bp := mustLoad(t, "name: t\nmembers:\n  - {name: a, model: a-model-nobody-registered}\n")
+	if bp.Config.Members[0].Model != "a-model-nobody-registered" {
+		t.Fatal("the unregistered model did not survive the load")
+	}
+}
