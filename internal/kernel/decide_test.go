@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -1291,4 +1292,88 @@ func spawnsFor(fx []Effect, agent string) int {
 		}
 	}
 	return n
+}
+
+// TestTheReadmeProgressTableMatchesTheEngine guards the two rows of the
+// progress table that this package can actually contradict.
+//
+// The table exists because a single percentage was misleading in both
+// directions: 36.7% of the CLI surface is wired while 100% of the reducer is
+// done, and quoting either alone tells a different lie. But a table of measured
+// numbers rots exactly like a headline does, and this one rots in the
+// flattering direction — nobody revisits "100%" after adding the 33rd event.
+//
+// So the claim is checked against the code that makes it true. The other two
+// rows (effects dispatched, effects really performed) belong to internal/exec
+// and internal/provider and are not visible from here; this covers the two that
+// are.
+func TestTheReadmeProgressTableMatchesTheEngine(t *testing.T) {
+	raw, err := os.ReadFile(filepath.FromSlash("../../README.md"))
+	if err != nil {
+		t.Fatalf("cannot read README.md: %v\n"+
+			"if it moved, update this path; this test is what keeps the progress "+
+			"table from becoming a claim nobody can check", err)
+	}
+	doc := string(raw)
+
+	// Count the EventType constants, then confirm each is reduced. Reading the
+	// constants out of the source rather than maintaining a list here is the
+	// whole point: a list would be a second copy that agrees with itself.
+	src, err := os.ReadFile("event.go")
+	if err != nil {
+		t.Fatalf("cannot read event.go: %v", err)
+	}
+	constRe := regexp.MustCompile(`(?m)^\t([A-Z][A-Za-z]*)\s+EventType\s*=\s*"[a-z_]+\.[a-z_]+"`)
+	var names []string
+	for _, m := range constRe.FindAllStringSubmatch(string(src), -1) {
+		names = append(names, m[1])
+	}
+	if len(names) == 0 {
+		t.Fatal("no EventType constants were found, so this test proves nothing. " +
+			"Either event.go changed shape or the constants were renamed")
+	}
+
+	dec, err := os.ReadFile("decide.go")
+	if err != nil {
+		t.Fatalf("cannot read decide.go: %v", err)
+	}
+	// Only the switch arms, so a name merely mentioned in a comment does not
+	// count as handled. That distinction is the difference between "the reducer
+	// folds this" and "somebody wrote the word down".
+	armRe := regexp.MustCompile(`case ([A-Za-z][A-Za-z, ]*):`)
+	handled := map[string]bool{}
+	for _, m := range armRe.FindAllStringSubmatch(string(dec), -1) {
+		for _, n := range strings.Split(m[1], ",") {
+			handled[strings.TrimSpace(n)] = true
+		}
+	}
+
+	var unhandled []string
+	for _, n := range names {
+		if !handled[n] {
+			unhandled = append(unhandled, n)
+		}
+	}
+	reduced := len(names) - len(unhandled)
+
+	want := fmt.Sprintf("**%d / %d — 100%%**", reduced, len(names))
+	if len(unhandled) > 0 {
+		t.Errorf("%d event types are declared but never reduced: %v\n"+
+			"  consequence: an event the reducer ignores is an event the log "+
+			"records and the state forgets, so `run why` would be reasoning over "+
+			"a fold that silently dropped a fact.\n"+
+			"  the README claims the engine is at 100%%, which is now false.",
+			len(unhandled), unhandled)
+		return
+	}
+
+	if !strings.Contains(doc, want) {
+		t.Errorf("the README progress table does not state %q\n"+
+			"  measured: %d of %d event types are folded by Decide.\n"+
+			"  why this is guarded: the table was added because one percentage "+
+			"misled in both directions, and a table of stale numbers misleads "+
+			"more confidently than a single stale number.\n"+
+			"  what to do: correct the engine row of the table in README.md.",
+			want, reduced, len(names))
+	}
 }

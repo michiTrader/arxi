@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **840 tests, no dependencies**.
+Underneath, every package is done and tested — **841 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -175,7 +175,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
 | package | what it owns | tests |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 41 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 42 |
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
@@ -368,8 +368,38 @@ the executor. The implemented eighteen are `provider add`, `model list` /
 `list` / `show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema`,
 `serve`, `surface` and `version`.
 
-Both numbers moved for an unglamorous reason worth recording: `surface` and
-`version` were always implemented, were always on the first screen, and were
+### One number is not enough
+
+36.7% is the CLI surface, and quoting it alone would be misleading in **both**
+directions. Four things are being built, and they are at very different stages:
+
+| dimension | measured | how |
+|---|---|---|
+| the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
+| effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
+| effects a **real** executor performs | **1 / 3 — 33%** | `SpawnTurn` calls models; `CallTool` decides but cannot run; `AskHuman` refuses |
+| the CLI surface | **18 / 49 — 36.7%** | every declared path probed against the built binary |
+
+Read together they say something a single percentage cannot: **the core is
+finished and the edges are not.** The reducer, the log, the fold, the budget
+arithmetic and the trigger/eval/model layers are complete and heavily tested —
+that is where 840 tests live. What is missing is almost entirely *the last
+mile*: two effect runners (a sandbox for `bash`, an inbox that survives the
+process) and the CLI verbs that would read state those runners produce.
+
+That shape is also why 36.7% understates and 100% overstates. Thirteen of the
+31 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
+`pause`, `cancel`, `fork`, `replay` — and each is a **projection of a log that
+already exists and is already correct**. They are not thirteen features; they
+are thirteen readings of one finished mechanism. Conversely the two missing
+runners are small in count and large in consequence: they are the difference
+between an agent that decides and an agent that acts.
+
+The one number worth committing to, if only one is wanted: **the system can
+reason about a run end to end, and cannot yet do the work inside one.**
+
+Both surface numbers moved for an unglamorous reason worth recording: `surface`
+and `version` were always implemented, were always on the first screen, and were
 never *declared*. They were absent from the denominator and the numerator at
 once. The count changed because the registry stopped being wrong, not because
 anything new was built.
