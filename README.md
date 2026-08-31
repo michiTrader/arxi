@@ -90,7 +90,7 @@ sync:
 |---|---|---|---|
 | `["run","start"]` | `run start` | `arxi_run_start` | `run.start` |
 
-There are **47 declared capabilities**, of which **33 are exposed as tools** to
+There are **49 declared capabilities**, of which **33 are exposed as tools** to
 the agents. The difference is not an oversight: there are things a human can do
 from the terminal that an agent should not be able to do to itself. `arxi
 surface` shows all of them; `arxi schema` emits the manifest an agent consumes.
@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **822 tests, no dependencies**.
+Underneath, every package is done and tested — **840 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -179,15 +179,16 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
-| `internal/surface` | the capability manifest every command is checked against | 29 |
-| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 150 |
+| `internal/surface` | the capability manifest every command is checked against | 31 |
+| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 152 |
 | `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
 | `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
 | `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
 | `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
-| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 14 |
+| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 16 |
+| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 12 |
 | `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 160 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
@@ -356,16 +357,22 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**16 of 47 declared capabilities are wired — 34.0%.** That figure is measured,
+**18 of 49 declared capabilities are wired — 36.7%.** That figure is measured,
 not estimated: a probe walks `surface.Registry`, invokes every declared path
 against the built binary, and counts the ones that do not answer *"declared but
 not implemented"*. It is the honest denominator, and it is deliberately
 unflattering — the 31 that remain are mostly `run *`, `agent *`, `state *`,
 `event *` and `inbox *`, which now want the tool runner and the inbox rather than
-the executor. The implemented sixteen are `provider add`, `model list` / `enable`
-/ `disable`, `run start`, `blueprint validate`, `trigger create` / `list` /
-`show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema emit` and
-`serve`.
+the executor. The implemented eighteen are `provider add`, `model list` /
+`enable` / `disable`, `run start`, `blueprint validate`, `trigger create` /
+`list` / `show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema`,
+`serve`, `surface` and `version`.
+
+Both numbers moved for an unglamorous reason worth recording: `surface` and
+`version` were always implemented, were always on the first screen, and were
+never *declared*. They were absent from the denominator and the numerator at
+once. The count changed because the registry stopped being wrong, not because
+anything new was built.
 
 The count did not move when the live executor landed, and that is the honest
 result: `run start` already counted as wired when only `--sim` worked, so making
@@ -479,10 +486,42 @@ context was cancelled. The distinction is load-bearing rather than tidy.
 Emitting `agent.activated` and *then* returning an error would leave a member the
 reducer believes is thinking, holding a turn that can never close.
 
-Missing still: the tool runner and the inbox. `CallTool` and `AskHuman` on the
-live executor **refuse** rather than fake, which is why the run above goes quiet
-instead of finishing — submitting work is a tool call. A fake result here would
-be indistinguishable in the log from a real one, and the log is the truth.
+**Tool policy is enforced; tool execution is not.** That split is the useful
+order rather than a halfway measure, because two of the three policy outcomes
+are decisions rather than work — and they are the two where being wrong is
+unrecoverable:
+
+| outcome | what happens |
+|---|---|
+| `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
+| `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
+| `allow` | still **refused**, loudly — running it needs a sandbox for `bash` and the workspace isolation the blueprint declares. |
+
+The rules are the ones the design already committed to: a tool not granted is
+`deny`, a granted mutating tool is `ask`, a granted reading tool is `allow`. An
+undeclared policy is `deny` because a permissive default turns every oversight
+into a silent hole, and the person who pays for the hole is never the person who
+forgot.
+
+A denial is emitted as an **event, not an error**. A denial is a domain fact: it
+happened, it is the correct outcome, and the run should continue knowing it.
+Returning an error would abort the effect and leave no trace, so the one case
+where the policy did its job would look identical to a broken executor.
+
+`tool.Mutating` is a named set rather than two literals in two packages, because
+`internal/kernel` already had it — deciding that a blueprint whose members can
+write needs a worktree instead of a shared directory. If the two drift, neither
+failure is visible: a tool that mutates for isolation but not for policy gets a
+private directory to scribble in and no approval gate on the scribbling, and the
+reverse gets an approval gate and a shared directory to corrupt.
+`TestTheMutatingSetAgreesWithTheKernel` reads the kernel's set through the
+behaviour it drives, not by copying it — a copy would agree with itself forever.
+
+Missing still: the tool **runner** (a sandbox for `bash`, workspace isolation)
+and the **inbox** (somewhere a question can outlive the process). `AskHuman`
+still refuses entirely, which is why the run above goes quiet instead of
+finishing — submitting work is a tool call. A fake result would be
+indistinguishable in the log from a real one, and the log is the truth.
 
 The trigger **scheduler** exists as of this change, and is worth describing
 precisely because the split is the interesting part. `internal/trigger` decides,

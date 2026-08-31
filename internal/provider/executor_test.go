@@ -388,18 +388,43 @@ func TestA200CarryingAnErrorIsStillARefusal(t *testing.T) {
 // the log -- which every replay and `run why` trust -- would record a result
 // that never existed. A faked inbox.created is worse: applyInboxReplied would
 // find no item, so the run waits forever while looking healthy.
+//
+// The property is "never report work that did not happen", and it is unchanged.
+// What changed is that not every outcome is an error any more: a DENIED call is
+// a domain fact, so it is an event. This test used to assert that every CallTool
+// returns an error, which was true only while nothing was implemented -- and the
+// assertion would have blocked the policy layer while appearing to protect the
+// log. The thing actually worth asserting is that no completion is ever
+// fabricated, which is checked here in both directions.
 func TestToolsAndTheInboxRefuseRatherThanFake(t *testing.T) {
-	x := &Executor{}
-
-	evs, err := x.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "bash"})
+	// An ALLOWED tool still refuses: running it needs the sandbox and the
+	// workspace isolation, and neither exists.
+	allowed := &Executor{
+		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"read"}}},
+	}
+	evs, err := allowed.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "read"})
 	if err == nil {
-		t.Fatal("CallTool succeeded; a stage would advance on work nobody did")
+		t.Fatal("an allowed tool call succeeded; a stage would advance on work nobody did")
 	}
 	if len(evs) != 0 {
 		t.Errorf("CallTool emitted %v; a result for a call nobody made is unrecoverable", types(evs))
 	}
 	if !strings.Contains(err.Error(), "--sim") {
 		t.Errorf("error %q does not point at what works today", err)
+	}
+
+	// A DENIED tool is not an error and never runs, so there is nothing to
+	// fake. It must not report a completion either.
+	x := &Executor{}
+	evs, err = x.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "bash"})
+	if err != nil {
+		t.Fatalf("a denied call returned an error (%v); the one case where the "+
+			"policy did its job would be indistinguishable from a broken executor", err)
+	}
+	for _, e := range evs {
+		if e.Type == kernel.ToolCallCompleted {
+			t.Errorf("a denied call reported tool.call_completed; nothing ran")
+		}
 	}
 
 	evs, err = x.AskHuman(context.Background(), kernel.AskHuman{Agent: "backend", Kind: "approval"})
@@ -455,5 +480,117 @@ func TestTwoTurnsDoNotShareAnEventID(t *testing.T) {
 			}
 			seen[e.ID] = true
 		}
+	}
+}
+
+// TestAPolicyDecisionReachesTheReducerAsAQuestion is the end-to-end claim, and
+// the reason the policy half was worth shipping before the sandbox.
+//
+// The design promises something specific and load-bearing: `tool.call_denied`
+// with `policy: ask` is not an error, it is a question that creates an inbox
+// item and leaves a `blocked_ref` so the remedy is derivable (spec/events.md,
+// and §20.2). Three pieces have to agree for that to be true -- this executor
+// choosing `ask`, the event carrying the policy, and the reducer reading it --
+// and no compiler checks any of the three against the others.
+//
+// So the event goes through the real reducer here, rather than being inspected
+// as a payload. Asserting the payload would only prove that this package
+// believes what it just wrote down.
+func TestAPolicyDecisionReachesTheReducerAsAQuestion(t *testing.T) {
+	x := &Executor{
+		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"read", "bash"}}},
+	}
+
+	evs, err := x.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "bash"})
+	if err != nil {
+		t.Fatalf("a mutating tool needing approval returned an error (%v); per "+
+			"spec/events.md policy=ask is not an error, it is a question", err)
+	}
+	if len(evs) != 1 || evs[0].Type != kernel.ToolCallDenied {
+		t.Fatalf("got %v, want one tool.call_denied", types(evs))
+	}
+	if got := evs[0].Payload["policy"]; got != "ask" {
+		t.Fatalf("policy = %v, want ask\n"+
+			"  consequence: the reducer reads this field to tell a dead end from a "+
+			"question. Wrong here and the member is parked as denied, with no inbox "+
+			"item and no remedy -- a run that stopped for a reason nobody can act on.", got)
+	}
+
+	// Through the real reducer, not a fake.
+	st := kernel.State{
+		Members: []kernel.Member{{Name: "backend", State: kernel.MemberIdle}},
+	}
+	ev := evs[0]
+	ev.Seq = 5
+	out, _ := kernel.Decide(st, ev, kernel.Config{})
+
+	if len(out.Inbox) != 1 {
+		t.Fatalf("the reducer produced %d inbox items, want 1\n"+
+			"  consequence: the agent waits for an approval that was never asked "+
+			"for, and `arxi inbox` shows nothing to approve.", len(out.Inbox))
+	}
+	item := out.Inbox[0]
+	if item.Agent != "backend" {
+		t.Errorf("inbox item belongs to %q, want backend", item.Agent)
+	}
+	if !strings.Contains(item.Question, "bash") {
+		t.Errorf("the question %q does not name the tool, so approving it is a "+
+			"guess about what is being approved", item.Question)
+	}
+
+	m := out.Member("backend")
+	if m == nil {
+		t.Fatal("backend vanished from the state")
+	}
+	if m.State != kernel.MemberWaiting {
+		t.Errorf("backend is %v, want waiting: a member whose tool needs approval "+
+			"but who is not marked waiting looks idle, and quiescence would call "+
+			"the run finished with the question unanswered", m.State)
+	}
+	// blocked_ref is what makes the remedy derivable rather than hard-coded:
+	// `run why` walks it to print `arxi inbox approve <id>`.
+	if m.BlockedOn == nil {
+		t.Fatal("no blocked_ref; `run why` would report a block it cannot name")
+	}
+	if m.BlockedOn["inbox_id"] != item.ID {
+		t.Errorf("blocked_ref points at %v but the item is %q; the remedy would "+
+			"name the wrong id", m.BlockedOn["inbox_id"], item.ID)
+	}
+	if m.BlockedOn["tool"] != "bash" {
+		t.Errorf("blocked_ref tool = %v, want bash", m.BlockedOn["tool"])
+	}
+}
+
+// TestADeniedToolDoesNotCreateAQuestionNobodyAsked is the other half, and it
+// guards the more tempting mistake.
+//
+// If `deny` also produced an inbox item, every ungranted tool would become a
+// permission prompt, and the safe default would quietly turn into "ask a human
+// about everything" -- which is how approval fatigue gets built, and an approval
+// nobody reads is an allow.
+func TestADeniedToolDoesNotCreateAQuestionNobodyAsked(t *testing.T) {
+	x := &Executor{
+		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"read"}}},
+	}
+
+	evs, err := x.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "bash"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := evs[0].Payload["policy"]; got != "deny" {
+		t.Fatalf("an ungranted tool resolved to %v, want deny", got)
+	}
+
+	st := kernel.State{Members: []kernel.Member{{Name: "backend", State: kernel.MemberIdle}}}
+	out, _ := kernel.Decide(st, evs[0], kernel.Config{})
+
+	if len(out.Inbox) != 0 {
+		t.Errorf("a denied tool created %d inbox items; approval fatigue is how a "+
+			"safe default becomes an allow, because an approval nobody reads is "+
+			"granted by default", len(out.Inbox))
+	}
+	if m := out.Member("backend"); m != nil && m.State == kernel.MemberWaiting {
+		t.Error("backend is waiting on a denial; nothing is ever going to arrive, " +
+			"so the run would hang instead of reporting the refusal")
 	}
 }

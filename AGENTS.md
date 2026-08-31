@@ -192,7 +192,7 @@ only. A CLI that ships as a single static binary with no runtime is a feature,
 and every dependency is a claim against it. Justify it against that or leave it
 out.
 
-**Respect the frozen surface.** `internal/surface` declares 47 capabilities;
+**Respect the frozen surface.** `internal/surface` declares 49 capabilities;
 33 are exposed as agent tools. That gap is deliberate — some things a human may
 do from a terminal an agent must not be able to do to itself. Adding a command
 means implementing something already promised, not inventing a new promise.
