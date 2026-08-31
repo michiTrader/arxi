@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **999 tests, no dependencies**.
+Underneath, every package is done and tested — **1028 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -188,8 +188,8 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
 | `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 24 |
-| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 12 |
-| `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 55 |
+| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 13 |
+| `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
 | `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 208 |
@@ -396,7 +396,7 @@ directions. Four things are being built, and they are at very different stages:
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 999 tests live. What is missing is almost entirely
+that is where most of the 1028 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
@@ -567,9 +567,18 @@ unrecoverable:
 | `allow` | **runs**, in `internal/toolrun`: a per-member workspace, `bash` under a deadline, output bounded. `tool.call_completed` carries the result. |
 
 The `allow` row is narrower than it sounds, and the reason is worth stating.
-Because a granted *mutating* tool resolves to `ask`, `bash` and `write` do not
-reach the runner unattended — they reach a human first. What runs unattended
-is `read`. That ordering is deliberate: the confinement in `internal/toolrun`
+Because a granted *mutating* tool resolves to `ask`, `bash`, `write` and `edit`
+do not reach the runner unattended — they reach a human first. What runs
+unattended is `read` and `grep`, the two that only look. Read back through
+`tool.Resolve` rather than asserted here:
+
+```
+granted read  -> allow      granted write -> ask
+granted grep  -> allow      granted edit  -> ask
+                            granted bash  -> ask
+```
+
+That ordering is deliberate: the confinement in `internal/toolrun`
 stops careless **paths**, and it cannot stop a **script**, because a script is a
 program rather than an argument. The package doc says so in as many words,
 under a heading naming what it does not protect against, and a test reads the
@@ -1072,6 +1081,82 @@ Four defects, all found by walking the command by hand and none by a unit test:
    `serve` read the remaining paths off stdin. A measurement that quietly drops
    two of its own cases still looks like a result; the fixed probe redirects
    stdin per invocation and prints the total it walked.
+
+### Searching and editing, without lying about either
+
+`grep` and `edit` were declared in `internal/tool.Known` before they existed —
+the runner refused them by name and said which kind of refusal it was. They now
+have bodies, and the decisions in them are all versions of one rule: **a tool
+must not report an answer it did not obtain.**
+
+**`grep` is a regular expression, because that is what the name promises.** A
+model told it has grep will send `func \w+\(` sooner or later. Matching that
+literally would find nothing, report success, and teach the model that a file
+does not contain what it does contain. The pattern is compiled *before* the walk,
+so a bad pattern is a refusal naming the escape (`func\(\(`) rather than an
+empty result. Go's `regexp` is RE2 — no backreferences, no lookahead, and no
+exponential backtracking — which is why `grep` needs no deadline where `bash`
+does.
+
+**Two caps, preventing different failures.** `maxMatches = 200`, because a grep
+for `"e"` matches nearly every line and tool output becomes an event in the run
+log. `maxGrepFiles = 2000`, because *a pattern that matches nothing still walks
+the whole tree*: a cap on matches alone cannot stop a no-match grep in a
+workspace somebody unpacked a dependency tree into. Hitting either is reported,
+not hidden — a caller shown 200 of 250 matches and told nothing reads the list as
+complete.
+
+**`edit` refuses two things a permissive tool would accept.** A replacement
+matching **nothing is an error, not a silent no-op**: the caller would believe
+the file says something it does not, and every later step would be built on that
+belief. A replacement matching **more than once is an error unless `all=true`**:
+"the first one" is a position in a file the caller cannot see, so which
+occurrence got edited would be luck. The count comes back either way, because
+that is the fact the caller needs to choose between narrowing the match and
+going global. A *missing* replacement is a deletion rather than an error,
+matching how `write` treats missing `content`.
+
+Four defects were found by probing the implementation and by breaking each
+guard, and all four are the same shape:
+
+1. **A search that could not happen reported "no matches".** Measured:
+   `path: nope-dir` and a `path` naming a symlink both returned *"no matches for
+   func"*. Two correct behaviours combined into a wrong one — `Resolve` permits a
+   final component that does not exist yet, which is right for a *write*, and the
+   walk deliberately swallows `WalkDir`'s error callback so one unreadable
+   subtree cannot fail a whole grep. A missing root hits that callback once, gets
+   swallowed, and the walk ends empty. Now an `os.Lstat` gate refuses both, and a
+   single regular file is still a valid root.
+
+2. **A test that asserted the opposite of the truth, and passed.**
+   `TestADeclaredButUnimplementedToolSaysWhichItIs` checked that `grep` and
+   `edit` had no bodies. After they got bodies it kept passing, because it called
+   them with `{"path": "x"}` — incomplete for both, so both still errored, now on
+   a *missing argument*. It is replaced by a test that reads `tool.Known`, drives
+   every declared name with arguments that should work, and fails if a name is
+   added to `Known` with no way to call it.
+
+3. **A comment that credited the wrong control.** The doc said the walk's
+   symlink skip was what stopped a link to `/` putting the filesystem in scope.
+   Breaking the skip did **not** make the boundary test fail. Measured:
+   `filepath.WalkDir` never descends into a symlinked directory (it yields the
+   link as one non-directory entry), and `ReadFile` refuses that entry *in the
+   kernel* with `O_NOFOLLOW`. The skip is an optimisation. A doc naming the wrong
+   control points the next reader at the wrong line to be careful with, so the
+   comment now says which layer holds the boundary — and the test still asserts
+   the outcome rather than the mechanism, because one written to fail when the
+   skip is removed would have pinned an optimisation as though it were a control.
+
+4. **A guard whose own test could not reach it.** Removing the `old == ""`
+   refusal did not fail its test: with `all=false` the ambiguity check fires
+   first, since an empty string "occurs" at every position. The test only passed
+   `all=false`. With `all=true` nothing is in the way — measured, the guard
+   removed: `Edit("abc\n", old="", new="X", all=true)` returned **5 replacements,
+   no error**, leaving the file as `"XaXbXcX\nX"`. The test now covers both.
+
+Under the policy table above, this puts `grep` on the unattended side and `edit`
+behind a human, without either being special-cased: `internal/tool.Mutating` is
+`{write, bash, edit}`, and the resolution falls out of it.
 
 ## Build and test
 

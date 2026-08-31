@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/michiTrader/arxi/internal/tool"
 )
 
 func runner(t *testing.T) *Runner {
@@ -179,18 +181,62 @@ func TestAnUnknownToolIsRefusedRatherThanImprovised(t *testing.T) {
 	}
 }
 
-func TestADeclaredButUnimplementedToolSaysWhichItIs(t *testing.T) {
-	r := runner(t)
-	for _, name := range []string{"grep", "edit"} {
-		_, err := r.RunTool(context.Background(), "backend", name, map[string]any{"path": "x"})
-		if err == nil {
-			t.Fatalf("%s succeeded but has no implementation", name)
+// TestEveryDeclaredToolHasABodyBehindIt replaces a test that used to assert the
+// opposite, and the replacement is the point.
+//
+// The old test named grep and edit and checked they failed with something other
+// than "unknown tool". When they were IMPLEMENTED it kept passing -- because
+// the arguments it sent (`{"path": "x"}`) are incomplete for both, so both
+// still returned an error, now a missing-argument one. It went on reporting
+// success for a claim that had become false, which is the same defect the tools
+// it was watching are written to refuse.
+//
+// So it is inverted. This asks internal/tool.Known what is declared, drives
+// each name with arguments that should WORK, and fails if any of them is
+// refused as unimplemented. A tool added to Known without a body fails here
+// instead of shipping as a promise nothing keeps.
+func TestEveryDeclaredToolHasABodyBehindIt(t *testing.T) {
+	// Arguments sufficient for a real call, one entry per declared tool. A name
+	// added to Known with no entry here fails the completeness check below
+	// rather than being silently skipped.
+	args := map[string]map[string]any{
+		"read":  {"path": "seed.txt"},
+		"write": {"path": "out.txt", "content": "x"},
+		"grep":  {"pattern": "seed"},
+		"edit":  {"path": "seed.txt", "old": "seed", "new": "sprout"},
+		"bash":  {"command": "true"},
+	}
+	for name := range tool.Known {
+		if _, ok := args[name]; !ok {
+			t.Fatalf("tool %q is declared in internal/tool.Known but this test does "+
+				"not know how to call it\n"+
+				"  add it here: an untested tool is how a declared name ships with "+
+				"no body behind it", name)
 		}
-		if strings.Contains(err.Error(), "unknown tool") {
-			t.Errorf("%s is reported as unknown, but it is declared in "+
-				"internal/tool.Known\n"+
-				"  \"not built yet\" and \"no such tool\" send the reader to completely "+
-				"different places: one is a missing feature, the other a typo", name)
+	}
+
+	for name, a := range args {
+		if !tool.Known[name] {
+			t.Errorf("this test drives %q, which internal/tool.Known no longer "+
+				"declares", name)
+			continue
+		}
+
+		r := runner(t) // a fresh workspace per tool, so one edit cannot affect another
+		if _, err := r.RunTool(context.Background(), "backend", "write",
+			map[string]any{"path": "seed.txt", "content": "seed\n"}); err != nil {
+			t.Fatalf("seeding for %s: %v", name, err)
+		}
+
+		out, err := r.RunTool(context.Background(), "backend", name, a)
+		if err != nil {
+			t.Errorf("%s(%v) failed: %v\n"+
+				"  these arguments are sufficient, so this is the tool refusing work "+
+				"it declares it does", name, a, err)
+			continue
+		}
+		if errors.Is(err, ErrNotImplemented) || strings.Contains(out, "not implemented") {
+			t.Errorf("%s is declared in internal/tool.Known but has no body", name)
 		}
 	}
 }
