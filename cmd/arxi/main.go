@@ -94,6 +94,31 @@ func main() {
 	notImplemented(args)
 }
 
+// article picks "a" or "an" for a command name.
+//
+// Trivial, and it earns its place: hardcoding "an" produced "is not an model
+// command" and "is not an run command" on five of the seven groups, which reads
+// as carelessness in the one message whose whole job is to be trusted about what
+// went wrong. Vowel-initial group names ("agent", "eval") are the minority, so
+// the wrong constant was also the more visible one.
+//
+// The argument may be a multi-word prefix ("agent tool"), and only the first
+// letter of the first word decides. That is what English does, and it was worth
+// making explicit rather than leaving correct by accident: reading word[0] of
+// the joined string gets "agent tool" right for the same reason it would get
+// "an eval suite" right, which is not a reason at all.
+func article(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "a"
+	}
+	switch name[0] {
+	case 'a', 'e', 'i', 'o', 'u':
+		return "an"
+	}
+	return "a"
+}
+
 // notImplemented answers for a command this binary does not run yet.
 //
 // Extracted from main's fallback when `trigger` acquired its own subcommand
@@ -113,6 +138,55 @@ func notImplemented(args []string) {
 		}
 	}
 
+	// Before calling the whole thing unknown, check whether the FIRST word is a
+	// real group. `arxi model --help` used to answer "model --help does not
+	// exist in the surface", naming the group -- which is false, since `model`
+	// exists and three of its subcommands are built. The user was told the
+	// opposite of the truth about the one word they got right.
+	//
+	// The two answers send the reader to different places: "no such command"
+	// means check the spelling, this means the group is real and only the verb
+	// is wrong. `trigger` and `eval` already answered this way from their own
+	// dispatchers; doing it here fixes every group at once, and means the next
+	// group to grow a dispatcher does not have to remember.
+	// The LONGEST declared prefix is used, not the first word, because depth
+	// varies. `agent tool` is declared only as part of `agent tool policy`, and
+	// blaming word two there printed a message that contradicted itself in a
+	// single breath: `"tool" is not an agent command` directly above `it
+	// accepts: list, create, show, tool`. Naming the deepest prefix that really
+	// exists puts the blame on the first word that is actually wrong.
+	//
+	// n runs from len(args) DOWN, and includes len(args) itself, which is the
+	// case of a prefix that is real but incomplete: `arxi agent tool` names
+	// nothing wrong at all, it just stops one word short. Telling that user
+	// what `agent tool` accepts is the whole answer, and telling them "tool is
+	// not an agent command" was worse than useless.
+	for n := len(args); n >= 1; n-- {
+		subs := surface.SubcommandsUnder(args[:n]...)
+		if len(subs) == 0 {
+			continue
+		}
+		prefix := strings.Join(args[:n], " ")
+
+		// An incomplete path is a different sentence from a wrong one. There is
+		// no bad word to quote, so quoting the empty string, or blaming a word
+		// the user got right, would both be lies about what happened.
+		if n == len(args) {
+			fmt.Fprintf(os.Stderr,
+				"arxi %s needs a subcommand.\n\n  it accepts: %s\n\n"+
+					"See the whole surface: arxi surface\n",
+				prefix, strings.Join(subs, ", "))
+			os.Exit(2)
+		}
+
+		fmt.Fprintf(os.Stderr,
+			"arxi %s: %q is not %s %s command.\n\n  it accepts: %s\n\n"+
+				"See the whole surface: arxi surface\n",
+			prefix, strings.Join(args[n:], " "), article(prefix),
+			prefix, strings.Join(subs, ", "))
+		os.Exit(2)
+	}
+
 	fmt.Fprintf(os.Stderr, "arxi: %q does not exist in the surface.\nTry: arxi surface\n",
 		strings.Join(args, " "))
 	os.Exit(2)
@@ -129,7 +203,11 @@ IMPLEMENTED TODAY
   surface                    see the whole surface, human readable
   why <file>                 explain why a run is not advancing
   blueprint validate <file>  check a blueprint and print the resolved config
-  run start <bp> <prompt>    run a blueprint to completion (--sim only today)
+  provider add <name>        register a provider (--base-url, --api-key-env)
+  model list                 see which models may be called, and their status
+  run start <bp> <prompt>    run a blueprint, calling real models (or --sim)
+  trigger list               schedules, and the loop that fires them
+  eval run <suite>           suites, pass rates, and two runs side by side
   serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
   version                    version of the binary and of the surface
 
@@ -141,8 +219,16 @@ SHORT FLAGS
 
   arxi surface --flags       the whole assignment, and what each letter reaches
 
-The rest of the surface is declared and verified by tests, but has no executor
-yet. 'arxi surface' lists everything that is going to exist.
+The rest of the surface is declared and verified by tests, but is not wired to a
+command yet. 'arxi surface' lists everything that is going to exist, and asking
+for one of those says so by name rather than calling it unknown.
+
+'run start' calls real models. It resolves each member's model against the
+registered providers and charges --budget from the tokens they report, so a
+first run wants 'provider add' before it. --sim drives the same reducer, log and
+loop with no model calls, which is what makes a simulated log worth reading.
+Tools and the inbox are still refused rather than faked, so a stage needing work
+submitted goes quiet and names the member that owes it.
 
 DESIGN
   docs/design/10-execution.md   the execution model

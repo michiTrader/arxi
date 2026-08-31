@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **819 tests, no dependencies**.
+Underneath, every package is done and tested — **822 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -188,7 +188,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
 | `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 14 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 157 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 160 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
