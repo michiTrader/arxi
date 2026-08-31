@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **877 tests, no dependencies**.
+Underneath, every package is done and tested — **897 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -187,9 +187,9 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
 | `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
-| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 16 |
+| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 21 |
 | `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 12 |
-| `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 36 |
+| `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 51 |
 | `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 160 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
@@ -363,8 +363,9 @@ not estimated: a probe walks `surface.Registry`, invokes every declared path
 against the built binary, and counts the ones that do not answer *"declared but
 not implemented"*. It is the honest denominator, and it is deliberately
 unflattering — the 31 that remain are mostly `run *`, `agent *`, `state *`,
-`event *` and `inbox *`, which now want the tool runner and the inbox rather than
-the executor. The implemented eighteen are `provider add`, `model list` /
+`event *` and `inbox *`, which now want the inbox and a way to read the log
+rather than the executor or the tool runner. The implemented eighteen are
+`provider add`, `model list` /
 `enable` / `disable`, `run start`, `blueprint validate`, `trigger create` /
 `list` / `show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema`,
 `serve`, `surface` and `version`.
@@ -378,23 +379,21 @@ directions. Four things are being built, and they are at very different stages:
 |---|---|---|
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
-| effects a **real** executor performs | **1 / 3 — 33%** | `SpawnTurn` calls models; `CallTool` decides, and the runner it needs now exists but is not yet connected to it; `AskHuman` refuses |
+| effects a **real** executor performs | **2 / 3 — 67%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` refuses |
 | the CLI surface | **18 / 49 — 36.7%** | every declared path probed against the built binary |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 877 tests live. What is missing is almost entirely
-*the last mile*: two effect runners (a sandbox for `bash`, an inbox that
-survives the process) and the CLI verbs that would read state those runners
-produce.
+that is where most of the 897 tests live. What is missing is almost entirely
+*the last mile*: one effect runner (an inbox that survives the process) and the
+CLI verbs that would read state those runners produce.
 
-The sandbox half of that now exists — `internal/toolrun` confines a member to
-its workspace and runs `bash` under a deadline — and the row above still says
-**1 / 3**, deliberately. `CallTool` does not call it yet, and a number that
-counted the runner because it was written rather than because it is reached
-would be measuring the author's effort instead of the user's capability. It
-moves when the wire is connected, not before.
+That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
+`internal/toolrun`, and not when the runner was written. The runner existed,
+fully tested, for two commits while the number stayed at 1 / 3, because a
+count that rose on code being authored rather than reached would measure this
+project's effort instead of its user's capability.
 
 That shape is also why 36.7% understates and 100% overstates. Thirteen of the
 31 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
