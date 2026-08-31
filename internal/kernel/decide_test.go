@@ -1298,7 +1298,7 @@ func spawnsFor(fx []Effect, agent string) int {
 // progress table that this package can actually contradict.
 //
 // The table exists because a single percentage was misleading in both
-// directions: 36.7% of the CLI surface is wired while 100% of the reducer is
+// directions: 44.9% of the CLI surface is wired while 100% of the reducer is
 // done, and quoting either alone tells a different lie. But a table of measured
 // numbers rots exactly like a headline does, and this one rots in the
 // flattering direction — nobody revisits "100%" after adding the 33rd event.
