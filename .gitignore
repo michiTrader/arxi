@@ -1,3 +1,45 @@
 /arxi
 /dist/
 *.test
+
+# Runtime state, not source.
+#
+# These are the directories arxi WRITES when it is used: run logs, trigger
+# definitions, eval results, provider credentials. They are a user's data, and
+# committing a developer's copy of them ships one machine's debris to every
+# clone.
+#
+# The concrete harm was measured before this entry was added. Five run
+# directories had been committed by accident, three of them carrying a
+# writer.lock naming a pid from the machine that made them. A fresh clone
+# inherited those locks, and the tool did exactly what it promises:
+#
+#   arxi: run directory runs/live-probe is already open for writing by pid 3811:
+#   exactly one writer per log is required, because two writers produce
+#   duplicate seq and an unfoldable log. If that writer is certainly dead,
+#   remove runs/live-probe/writer.lock by hand after confirming no process is
+#   running.
+#
+# That message is correct and unactionable at the same time: pid 3811 never
+# existed on the cloner's machine, so "after confirming no process is running"
+# asks them to account for a process they cannot see. The lock is doing its job
+# on evidence that should never have been shipped.
+#
+# The list is the DefaultDir of each store rather than a guess, read from the
+# code: evalstore "evals", modelstore "providers", toolstore "policies",
+# trigstore "triggers", and cmd/arxi's runsDir "runs". A first draft of this
+# entry listed "agents", which no store writes, and omitted "policies", which
+# one does -- an ignore file that names directories nobody creates looks
+# maintained while leaving a real one tracked.
+#
+# providers/ matters most: modelstore writes it 0600 because it holds
+# credentials, and a mode that careful is wasted if the file is committed.
+#
+# The paths are anchored with a leading slash so they only match at the repo
+# root. A test fixture named runs/ inside a package is a different thing and
+# stays tracked.
+/runs/
+/triggers/
+/evals/
+/providers/
+/policies/
