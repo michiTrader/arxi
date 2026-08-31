@@ -126,7 +126,13 @@ func cmdRunStart(args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	// The defer is for ordinary returns; atExit is for os.Exit, which skips
+	// defers. `run start` has the same exposure `run unpause` was measured to
+	// have: openPolicies and openProviders both fatal, and they are called after
+	// this lock is taken, so a bad policy or provider file used to leave
+	// writer.lock behind holding a dead pid.
 	defer store.Close()
+	atExit(func() { store.Close() })
 
 	// The clock and the executor are the ONLY two things that differ between a
 	// simulation and a real run. Everything downstream -- the reducer, the log,
@@ -249,8 +255,18 @@ func cmdRunStart(args []string) {
 		fatal(fmt.Errorf("record run.started: %w", err))
 	}
 
-	fmt.Printf("run %s started (budget %.2f USD, workspace %s)\n",
-		f.runID, f.budget, workspaceNote(f.workspace, cfg.Workspace))
+	// usd and not %.2f. This line printed `--budget 0.005` as `budget 0.01
+	// USD`: a ceiling ROUNDED UP, so the banner promised twice the headroom the
+	// run actually had, and the summary four lines later contradicted it with
+	// `of 0.0050`. One command, one field, two numbers.
+	//
+	// Rounding a ceiling up is the worse of the two directions, because the
+	// reader is shown more room than the run has and the block that follows
+	// looks premature. eval run was already held to this rule by
+	// TestABudgetTooSmallToRoundIsNotPrintedAsZero; the run that actually
+	// spends the money was not.
+	fmt.Printf("run %s started (budget %s USD, workspace %s)\n",
+		f.runID, usd(f.budget), workspaceNote(f.workspace, cfg.Workspace))
 
 	loop := &exec.Loop{
 		Runner: runner,
@@ -268,6 +284,20 @@ func cmdRunStart(args []string) {
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
+		// The store is CLOSED before exiting, and the deferred Close above is
+		// not enough: os.Exit does not run defers, so this path left the writer
+		// lock on disk holding a pid that no longer exists. The next command
+		// touching that run then refused with "already open for writing by pid
+		// N" and told the operator to delete a lock file by hand -- for a run
+		// that had merely failed, which is exactly when somebody wants to
+		// retry it.
+		//
+		// The failure is doubly unhelpful because the advice is dangerous to
+		// generalise: an operator who learns to delete writer.lock after a
+		// crash will eventually delete a live one. Releasing it on the way out
+		// is the fix; the manual remedy is for a hard kill, which nothing here
+		// can help with.
+		store.Close()
 		os.Exit(1)
 	}
 }

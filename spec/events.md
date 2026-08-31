@@ -36,7 +36,8 @@ in it.
 |---|---|---|
 | `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `parent_run_id?`, `spawn_depth?` | `blueprint_sha` freezes the config: without it, a replay would use today's config. |
 | `run.prompt` | `text`, `to?` | Injects a new cause into a live run. |
-| `run.paused` / `run.unpaused` | — | |
+| `run.paused` | — | |
+| `run.unpaused` | `budget_usd?` | A **raise** of the tree ceiling, honoured by the reducer, which also clears the block and the 80% warning. Absent means "resume, ceiling unchanged" — reading a missing field as `0` would give every plain resume an unsatisfiable limit. A value at or below the current ceiling is refused by the CLI and ignored by the reducer: one under the spend re-breaches on the next cost, which is the loop a raise exists to end. This is the payload behind the budget remedy below. |
 | `run.cancelled` | `reason?` | |
 | `run.expired` | — | |
 | `run.quiescent` | **`diagnosis`** (required), `stage` | See below. |

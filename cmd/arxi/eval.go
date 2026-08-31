@@ -380,18 +380,27 @@ func printEvalCompare(cmp *eval.Comparison) {
 	}
 }
 
-// usd renders money at two decimals, and at more when two would round a real
-// amount to zero.
+// usd renders money at two decimals, and at more when two would misreport it.
 //
 // The rule is narrow on purpose: 11.30 stays 11.30, because that is how a bill
 // is read and §20.11's line depends on it. But a figure that is not zero must
 // never print as "0.00", and a budget is the field where that matters — the
 // reader typed the number, and being shown it back as the value that means
 // "none" makes them doubt the invocation rather than the precision.
+//
+// The test is whether two decimals are EXACT, not whether the value is small,
+// and that widening came out of `run unpause`. The old rule was `v < 0.005`, so
+// a ceiling of exactly 0.005 printed as "0.01" — measured, not guessed. Rounding
+// a spend ceiling UP is the bad direction twice over: the reader is shown more
+// headroom than the run has, and `run unpause` puts two ceilings on one line
+// ("raised 0.01 -> 10.00" for a run whose budget was 0.005), so the same command
+// contradicted itself about a number it had just read out of one field.
+//
+// Four places is still the floor rather than %g, for the original reason: below
+// that a figure is not a budget anybody chose, and %g would print exponents into
+// a sentence about money.
 func usd(v float64) string {
-	if v != 0 && v < 0.005 {
-		// Four places, which reaches the reserve's scale. Below that a figure
-		// is not a budget anybody chose, and %g would print exponents.
+	if v != float64(int64(v*100))/100 {
 		return strconv.FormatFloat(v, 'f', 4, 64)
 	}
 	return strconv.FormatFloat(v, 'f', 2, 64)
