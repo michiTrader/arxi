@@ -169,11 +169,30 @@ func cmdRunStart(args []string) {
 		// cfg.Workspace has already resolved to "worktree" if any member holds
 		// write/bash/edit, so this is the decision the config recorded and
 		// `blueprint validate` printed -- not a second, invisible one taken here.
+		// Tool policy overrides are read HERE, at the start, and copied into the
+		// executor. They are deliberately not re-read per turn: the rules a run
+		// is judged by must not move underneath it, which is the same argument
+		// that freezes blueprint.snapshot.yaml.
+		//
+		// The visible consequence, which `agent tool policy` prints in its own
+		// output rather than leaving to be discovered: a run already waiting on
+		// an approval is not unblocked by a policy change. This is the next run.
+		//
+		// Overrides sit outside the frozen snapshot on purpose. They are an
+		// operator's standing answer to "stop asking me about this", declared
+		// with --agent and no --run, so baking them into one run's snapshot
+		// would mean the next run could not see them.
+		overrides, err := openPolicies().LoadAll()
+		if err != nil {
+			fatal(err)
+		}
+
 		executor = &provider.Executor{
 			Resolver:     providerResolver{openProviders()},
 			DefaultModel: f.model,
 			Members:      cfg.Members,
 			Prompt:       f.prompt,
+			ToolPolicy:   overrides,
 			Tools: &toolrun.Runner{
 				Root:   filepath.Join(dir, "workspace"),
 				Shared: cfg.Workspace == "shared",
