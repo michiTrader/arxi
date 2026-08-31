@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **840 tests, no dependencies**.
+Underneath, every package is done and tested — **940 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -175,7 +175,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
 | package | what it owns | tests |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 41 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 42 |
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
@@ -187,9 +187,11 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
 | `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
-| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 16 |
+| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 24 |
 | `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 12 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 160 |
+| `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 55 |
+| `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 175 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -357,19 +359,77 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**18 of 49 declared capabilities are wired — 36.7%.** That figure is measured,
+**22 of 49 declared capabilities are wired — 44.9%.** That figure is measured,
 not estimated: a probe walks `surface.Registry`, invokes every declared path
 against the built binary, and counts the ones that do not answer *"declared but
 not implemented"*. It is the honest denominator, and it is deliberately
-unflattering — the 31 that remain are mostly `run *`, `agent *`, `state *`,
-`event *` and `inbox *`, which now want the tool runner and the inbox rather than
-the executor. The implemented eighteen are `provider add`, `model list` /
+unflattering — the 27 that remain are mostly `run *`, `agent *`, `state *`,
+`event *` and `inbox *`, which now want the inbox and a way to read the log
+rather than the executor or the tool runner. The implemented eighteen are
+`provider add`, `model list` /
 `enable` / `disable`, `run start`, `blueprint validate`, `trigger create` /
 `list` / `show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema`,
 `serve`, `surface` and `version`.
 
-Both numbers moved for an unglamorous reason worth recording: `surface` and
-`version` were always implemented, were always on the first screen, and were
+### One number is not enough
+
+44.9% is the CLI surface, and quoting it alone would be misleading in **both**
+directions. Four things are being built, and they are at very different stages:
+
+| dimension | measured | how |
+|---|---|---|
+| the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
+| effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
+| effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
+| the CLI surface | **22 / 49 — 44.9%** | every declared path probed against the built binary |
+
+Read together they say something a single percentage cannot: **the core is
+finished and the edges are not.** The reducer, the log, the fold, the budget
+arithmetic and the trigger/eval/model layers are complete and heavily tested —
+that is where most of the 940 tests live. What is missing is almost entirely
+*the last mile*: CLI verbs that would read state the runners already produce.
+
+That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
+`internal/toolrun`, and not when the runner was written. The runner existed,
+fully tested, for two commits while the number stayed at 1 / 3, because a
+count that rose on code being authored rather than reached would measure this
+project's effort instead of its user's capability.
+
+It reached **3 / 3** when `AskHuman` stopped refusing. That refusal's stated
+reason was that an inbox needs somewhere to persist a question outliving the
+process, and the reason turned out to be satisfiable without building anything
+to persist it: the question is already an event. `applyToolDenied` mints the id
+and records the item, `AskHuman` returns `inbox.created`, `kernel.Fold` rebuilds
+`State.Inbox` from it, and `arxi inbox` folds the same log. **Listing is a fold,
+answering is an append, and there is no third thing to keep in sync** — see
+`internal/inbox`'s package doc for why a second store would be a liability
+rather than a convenience.
+
+So the honest summary of that row is smaller than 3 / 3 sounds: every effect a
+run can emit now reaches something real, and **no effect fakes a result**. It
+does *not* mean a run drives itself to completion after an approval — nothing
+yet resumes a blocked run from the CLI, which is the next thing worth building.
+
+That shape is also why 44.9% understates and 100% overstates. Twelve of the
+27 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
+`pause`, `cancel`, `fork`, `replay` — and each is a **projection of a log that
+already exists and is already correct**. They are not twelve features; they
+are twelve readings of one finished mechanism.
+
+The one number worth committing to, if only one is wanted: **the system can
+reason about a run end to end, can do the work inside one, and cannot yet pick
+a run back up after a human has answered it.**
+
+Two entries in that unwired list are worth naming, because they are remedies
+this README itself recommends. `agent tool policy` is what stops an approval
+loop — approving a tool call re-spawns the turn while the policy still says
+`ask`, so the model asks again — and it is declared but not implemented. And
+`run unpause` is what would drive a run forward once an inbox reply has landed.
+A remedy a document names and a binary refuses is the worst kind of gap,
+because it is discovered by the person already in trouble.
+
+Both surface numbers moved for an unglamorous reason worth recording: `surface`
+and `version` were always implemented, were always on the first screen, and were
 never *declared*. They were absent from the denominator and the numerator at
 once. The count changed because the registry stopped being wrong, not because
 anything new was built.
@@ -486,16 +546,26 @@ context was cancelled. The distinction is load-bearing rather than tidy.
 Emitting `agent.activated` and *then* returning an error would leave a member the
 reducer believes is thinking, holding a turn that can never close.
 
-**Tool policy is enforced; tool execution is not.** That split is the useful
-order rather than a halfway measure, because two of the three policy outcomes
-are decisions rather than work — and they are the two where being wrong is
+**Tool policy is enforced, and an allowed tool now runs.** Policy came first
+rather than as a halfway measure, because two of the three outcomes are
+decisions rather than work — and they are the two where being wrong is
 unrecoverable:
 
 | outcome | what happens |
 |---|---|
 | `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
 | `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
-| `allow` | still **refused**, loudly — running it needs a sandbox for `bash` and the workspace isolation the blueprint declares. |
+| `allow` | **runs**, in `internal/toolrun`: a per-member workspace, `bash` under a deadline, output bounded. `tool.call_completed` carries the result. |
+
+The `allow` row is narrower than it sounds, and the reason is worth stating.
+Because a granted *mutating* tool resolves to `ask`, `bash` and `write` do not
+reach the runner unattended — they reach a human first. What runs unattended
+is `read`. That ordering is deliberate: the confinement in `internal/toolrun`
+stops careless **paths**, and it cannot stop a **script**, because a script is a
+program rather than an argument. The package doc says so in as many words,
+under a heading naming what it does not protect against, and a test reads the
+`ask` claim back through `tool.Resolve` so the prose cannot quietly become
+reassuring and wrong.
 
 The rules are the ones the design already committed to: a tool not granted is
 `deny`, a granted mutating tool is `ask`, a granted reading tool is `allow`. An
@@ -517,11 +587,12 @@ reverse gets an approval gate and a shared directory to corrupt.
 `TestTheMutatingSetAgreesWithTheKernel` reads the kernel's set through the
 behaviour it drives, not by copying it — a copy would agree with itself forever.
 
-Missing still: the tool **runner** (a sandbox for `bash`, workspace isolation)
-and the **inbox** (somewhere a question can outlive the process). `AskHuman`
-still refuses entirely, which is why the run above goes quiet instead of
-finishing — submitting work is a tool call. A fake result would be
-indistinguishable in the log from a real one, and the log is the truth.
+Missing still: the **inbox** — somewhere a question can outlive the process.
+`AskHuman` refuses entirely, which is why the run above still goes quiet
+instead of finishing: submitting work is a tool call, and a call that resolves
+to `ask` has nowhere to wait. A fake result would be indistinguishable in the
+log from a real one, and the log is the truth. Refusing loudly is the only
+option that keeps that sentence honest.
 
 The trigger **scheduler** exists as of this change, and is worth describing
 precisely because the split is the interesting part. `internal/trigger` decides,

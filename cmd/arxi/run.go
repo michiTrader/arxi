@@ -19,6 +19,7 @@ import (
 	"github.com/michiTrader/arxi/internal/modelstore"
 	"github.com/michiTrader/arxi/internal/provider"
 	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/toolrun"
 )
 
 // startFlags is what `run start` was invoked with, after parsing but before any
@@ -157,11 +158,26 @@ func cmdRunStart(args []string) {
 	} else {
 		rc := exec.NewRealClock()
 		clock, timekeep = rc, exec.RealTime{C: rc}
+		// The workspace lives inside the run directory, beside the log and the
+		// frozen blueprint, and is NOT deleted when the run ends. That is the
+		// same argument as freezing the blueprint: what the agents actually
+		// produced is evidence, and `run why` sends the user to look at it. A
+		// runner that tidied up after itself would answer "why did this fail?"
+		// with an empty directory.
+		//
+		// Shared follows the blueprint rather than a flag of its own.
+		// cfg.Workspace has already resolved to "worktree" if any member holds
+		// write/bash/edit, so this is the decision the config recorded and
+		// `blueprint validate` printed -- not a second, invisible one taken here.
 		executor = &provider.Executor{
 			Resolver:     providerResolver{openProviders()},
 			DefaultModel: f.model,
 			Members:      cfg.Members,
 			Prompt:       f.prompt,
+			Tools: &toolrun.Runner{
+				Root:   filepath.Join(dir, "workspace"),
+				Shared: cfg.Workspace == "shared",
+			},
 		}
 		now = func() string { return nowFunc().UTC().Format(time.RFC3339Nano) }
 	}

@@ -86,6 +86,9 @@ func main() {
 	case "model":
 		cmdModel(args[1:])
 		return
+	case "inbox":
+		cmdInbox(args[1:])
+		return
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
@@ -206,6 +209,7 @@ IMPLEMENTED TODAY
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
   run start <bp> <prompt>    run a blueprint, calling real models (or --sim)
+  inbox                      questions an agent cannot continue without
   trigger list               schedules, and the loop that fires them
   eval run <suite>           suites, pass rates, and two runs side by side
   serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
