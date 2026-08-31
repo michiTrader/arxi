@@ -103,10 +103,15 @@ func OpenWorkspace(dir, member string) (*Workspace, error) {
 //
 // The remaining gap is honest to state: if the final component is itself an
 // existing symlink pointing outside, this returns a path inside the root that
-// resolves outside it. That is why Resolve is not the only defence — the write
-// itself uses O_NOFOLLOW semantics via openNoFollow, so the two together close
-// what neither closes alone. A single check that looks sufficient is worse than
-// two that admit their limits.
+// resolves outside it. That is why Resolve is not the only defence — the open
+// itself passes O_NOFOLLOW (see openNoFollow), so the two together close what
+// neither closes alone. A single check that looks sufficient is worse than two
+// that admit their limits.
+//
+// Which means Resolve is not the confinement and must not be used as if it
+// were. Callers get WriteFile and ReadFile, never a bare resolved path, because
+// a caller holding one half and forgetting the other has written exactly the
+// invisible bug described above.
 func (w *Workspace) Resolve(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", fmt.Errorf("toolrun: %s gave an empty path\n"+
