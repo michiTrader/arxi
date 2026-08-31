@@ -177,6 +177,19 @@ func cmdInboxAnswer(verb string, args []string) {
 	}
 	switch len(dirs) {
 	case 0:
+		// Nothing PENDING has that id, which is two different situations, and
+		// the package has two sentinels for them precisely because the remedies
+		// differ. Searching the answered questions too is what preserves that
+		// distinction: without this the CLI reports "no such question" for an id
+		// the user can see in their own terminal history, and sends them hunting
+		// for a typo they never made.
+		if dir, item, ok := answeredSomewhere(id); ok {
+			fmt.Fprintf(os.Stderr, "arxi inbox %s: %q was already answered in %s.\n"+
+				"  question: %s\n"+
+				"  answering again would spawn a second turn for %s, and turns cost "+
+				"money.\n", verb, id, dir, item.Question, item.Agent)
+			os.Exit(2)
+		}
 		fmt.Fprintf(os.Stderr, "arxi inbox %s: no pending question %q in any run "+
 			"under %s.\n  see what is waiting: arxi inbox\n", verb, id, runsDir)
 		os.Exit(1)
@@ -274,6 +287,30 @@ func runsHolding(id string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// answeredSomewhere finds an id among the questions that were already answered.
+//
+// It exists only to tell "you already did this" apart from "that id does not
+// exist". Those look identical to a search that only considers pending items,
+// and conflating them is how a correct command gets reported as a bug.
+func answeredSomewhere(id string) (string, inbox.Item, bool) {
+	runs, err := discoverRuns()
+	if err != nil {
+		return "", inbox.Item{}, false
+	}
+	for _, dir := range runs {
+		r, err := inbox.OpenRun(dir)
+		if err != nil {
+			continue
+		}
+		for _, it := range r.List(false) {
+			if it.ID == id && it.Replied {
+				return dir, it, true
+			}
+		}
+	}
+	return "", inbox.Item{}, false
 }
 
 // discoverRuns lists run directories.

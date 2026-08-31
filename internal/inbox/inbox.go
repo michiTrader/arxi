@@ -50,6 +50,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/kernel"
@@ -65,6 +66,13 @@ import (
 // half of a sentence, which is the defect the toolrun sentinels were introduced
 // for.
 var ErrNoSuchItem = errors.New("no such inbox item")
+
+// now is the clock, indirected so a test can pin it. The rest of this project
+// takes the same seam (nowFunc in cmd/arxi) rather than calling time.Now at the
+// point of use, because an assertion on a timestamp produced by the real clock
+// can only check that the field is non-empty -- which passes just as well when
+// the value is wrong.
+var now = time.Now
 
 // ErrAlreadyAnswered means the question was answered before.
 //
@@ -272,8 +280,17 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 	}
 
 	ev := kernel.Event{
-		ID:     "inbox-reply-" + id,
-		Type:   kernel.InboxReplied,
+		ID:   "inbox-reply-" + id,
+		Type: kernel.InboxReplied,
+		// Ts is set HERE because nothing else will. The effect runner stamps the
+		// events IT produces (Runner.stamp fills an empty Ts from its clock),
+		// and this append does not go through the effect runner -- a human typed
+		// a command, there is no run loop in this process. Measured on a real
+		// log before fixing it: the reply landed with "ts":"".
+		//
+		// An audit record of who authorised a tool, carrying no "when", answers
+		// half of the only question anybody asks about a destructive command.
+		Ts:     now().UTC().Format(time.RFC3339),
 		Source: kernel.SourceHuman,
 		Payload: map[string]any{
 			"inbox_id": id,
