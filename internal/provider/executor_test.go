@@ -13,6 +13,7 @@ import (
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // TestTheLiveExecutorSatisfiesTheInterfaceTheRunnerWants is the test that makes
@@ -397,8 +398,11 @@ func TestA200CarryingAnErrorIsStillARefusal(t *testing.T) {
 // log. The thing actually worth asserting is that no completion is ever
 // fabricated, which is checked here in both directions.
 func TestToolsAndTheInboxRefuseRatherThanFake(t *testing.T) {
-	// An ALLOWED tool still refuses: running it needs the sandbox and the
-	// workspace isolation, and neither exists.
+	// An ALLOWED tool refuses when no runner was wired in. The sandbox now
+	// exists, so this is no longer "nothing is implemented" — it is the case
+	// where this particular Executor was built without one, which is what every
+	// --sim run does. Left as an assertion because the failure mode is unchanged:
+	// a nil runner must refuse rather than report a completion.
 	allowed := &Executor{
 		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"read"}}},
 	}
@@ -592,5 +596,156 @@ func TestADeniedToolDoesNotCreateAQuestionNobodyAsked(t *testing.T) {
 	if m := out.Member("backend"); m != nil && m.State == kernel.MemberWaiting {
 		t.Error("backend is waiting on a denial; nothing is ever going to arrive, " +
 			"so the run would hang instead of reporting the refusal")
+	}
+}
+
+// fakeRunner records what it was asked and answers without touching a disk.
+//
+// A fake here rather than the real internal/toolrun, deliberately: this package
+// is being tested on whether it TRANSLATES between the effect and the runner,
+// and a real runner would make these tests depend on bash, a filesystem and a
+// timeout. The confinement itself is tested where it lives.
+type fakeRunner struct {
+	member, tool string
+	args         map[string]any
+	result       string
+	err          error
+}
+
+func (f *fakeRunner) RunTool(_ context.Context, member, name string, args map[string]any) (string, error) {
+	f.member, f.tool, f.args = member, name, args
+	return f.result, f.err
+}
+
+// TestAnAllowedToolRunsAndReportsWhatHappened is the other half of
+// TestToolsAndTheInboxRefuseRatherThanFake, and without it that test proves
+// only that a nil runner refuses -- which a permanently broken CallTool would
+// also satisfy.
+func TestAnAllowedToolRunsAndReportsWhatHappened(t *testing.T) {
+	fr := &fakeRunner{result: "exit 0 (success)\n\nok\n"}
+	x := &Executor{
+		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"read"}}},
+		Tools:   fr,
+	}
+
+	evs, err := x.CallTool(context.Background(), kernel.CallTool{
+		Agent: "backend", Tool: "read", Args: map[string]any{"path": "main.go"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if len(evs) != 1 || evs[0].Type != kernel.ToolCallCompleted {
+		t.Fatalf("events = %v, want one tool.call_completed", types(evs))
+	}
+	if got := evs[0].Payload["result"]; got != fr.result {
+		t.Errorf("result = %q, want %q\n"+
+			"  the result is what the next turn reads: a summary invented here would "+
+			"mean the model reasons about output the tool never produced", got, fr.result)
+	}
+	if evs[0].Payload["tool"] != "read" {
+		t.Errorf("tool = %v, want read", evs[0].Payload["tool"])
+	}
+	if evs[0].Actor != "backend" {
+		t.Errorf("actor = %q, want backend; a completion attributed to the wrong "+
+			"member sends run why to the wrong place", evs[0].Actor)
+	}
+
+	// The member name has to reach the runner, because the runner is what maps it
+	// to a workspace. Dropping it would silently give every member the same
+	// directory, which is the overwrite the worktree default exists to prevent.
+	if fr.member != "backend" {
+		t.Errorf("runner got member %q, want backend", fr.member)
+	}
+	if fr.tool != "read" {
+		t.Errorf("runner got tool %q, want read", fr.tool)
+	}
+	if fr.args["path"] != "main.go" {
+		t.Errorf("runner got args %v; arguments dropped here would make every tool "+
+			"call operate on a default nobody asked for", fr.args)
+	}
+}
+
+// TestAToolThatFailsIsStillAnEventWhileABrokenRunnerIsAnError separates the two
+// things a returning RunTool can mean.
+func TestAToolThatFailsIsStillAnEventWhileABrokenRunnerIsAnError(t *testing.T) {
+	// A command that ran and exited non-zero: the runner returns no error, and
+	// the failure is IN the result. That is an answer, not a malfunction --
+	// "the tests fail" is what the agent asked to find out.
+	ok := &Executor{
+		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"bash"}}},
+		ToolPolicy: map[string]map[string]surface.Policy{
+			"backend": {"bash": surface.PolicyAllow},
+		},
+		Tools: &fakeRunner{result: "exit 1 (failure)\n\nFAIL ./pkg/auth\n"},
+	}
+	evs, err := ok.CallTool(context.Background(), kernel.CallTool{
+		Agent: "backend", Tool: "bash", Args: map[string]any{"command": "go test ./..."},
+	})
+	if err != nil {
+		t.Fatalf("a command exiting non-zero became an executor error (%v)\n"+
+			"  the agent asked whether the tests pass; \"no\" is the answer, and "+
+			"turning it into an error stops the run instead of informing it", err)
+	}
+	if len(evs) != 1 || evs[0].Type != kernel.ToolCallCompleted {
+		t.Fatalf("events = %v, want one tool.call_completed", types(evs))
+	}
+	if !strings.Contains(evs[0].Payload["result"].(string), "FAIL") {
+		t.Error("the failure output did not reach the result, so the next turn " +
+			"cannot see what went wrong")
+	}
+
+	// A runner that could not run at all: bash missing, workspace gone, a path
+	// refused by confinement. That IS a malfunction, and must not be recorded as
+	// a tool that ran.
+	broken := &Executor{
+		Members: []kernel.MemberConfig{{Name: "backend", Tools: []string{"read"}}},
+		Tools:   &fakeRunner{err: errors.New("toolrun: backend tried to reach \"../x\"")},
+	}
+	evs, err = broken.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "read"})
+	if err == nil {
+		t.Fatal("a broken runner produced no error; the log would hold a " +
+			"plausible-looking history of work that never happened")
+	}
+	if len(evs) != 0 {
+		t.Errorf("events = %v; a failed runner must emit nothing", types(evs))
+	}
+}
+
+// TestADeniedToolIsNeverHandedToTheRunner guards the ordering that makes the
+// policy layer worth having.
+func TestADeniedToolIsNeverHandedToTheRunner(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy surface.Policy
+		tools  []string
+	}{
+		{"denied", surface.PolicyDeny, nil},
+		{"ask", surface.PolicyAsk, []string{"bash"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &fakeRunner{result: "SHOULD NEVER APPEAR"}
+			x := &Executor{
+				Members: []kernel.MemberConfig{{Name: "backend", Tools: tc.tools}},
+				ToolPolicy: map[string]map[string]surface.Policy{
+					"backend": {"bash": tc.policy},
+				},
+				Tools: fr,
+			}
+			evs, err := x.CallTool(context.Background(), kernel.CallTool{Agent: "backend", Tool: "bash"})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if fr.tool != "" {
+				t.Errorf("the runner was called for a %s tool\n"+
+					"  checking the policy after running the tool protects nothing: "+
+					"the write already happened, and the refusal is a note about it",
+					tc.name)
+			}
+			for _, e := range evs {
+				if e.Type == kernel.ToolCallCompleted {
+					t.Error("a refused call reported tool.call_completed")
+				}
+			}
+		})
 	}
 }

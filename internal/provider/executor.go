@@ -33,6 +33,33 @@ type Resolver interface {
 	Resolve(ref string) (model.Resolution, error)
 }
 
+// ToolRunner does the work a permitted tool describes.
+//
+// Declared here for the same reason as Resolver, and with a sharper motive: the
+// implementation (internal/toolrun) starts child processes and writes to disk,
+// and importing it directly would put the package that holds provider API keys
+// in the same dependency closure as the code that runs `bash`. Keeping the
+// boundary an interface is what lets those two stay apart.
+//
+// It takes the member name rather than a pre-opened workspace, because WHICH
+// workspace is a per-member decision (`workspace: worktree` gives each member
+// its own) and the wiring site owns that mapping. An executor that held one
+// workspace would silently give every member the same one, which is the exact
+// overwrite the worktree default exists to prevent.
+type ToolRunner interface {
+	// RunTool performs name with args for member, and reports what happened.
+	//
+	// The result is a string because that is what becomes the `result` field of
+	// tool.call_completed, and therefore what the next turn reads. Returning a
+	// struct would tempt a caller to record fields the spec does not carry.
+	//
+	// An error means the RUNNER failed, not that the tool reported failure. A
+	// command exiting non-zero is a successful run with a bad outcome, and the
+	// two must not arrive by the same channel: one needs a fix to arxi, the
+	// other is the answer the agent asked for.
+	RunTool(ctx context.Context, member, name string, args map[string]any) (string, error)
+}
+
 // Executor is the live executor. It satisfies exec.Executor structurally.
 //
 // SpawnTurn calls a model. CallTool and AskHuman deliberately do not do their
@@ -62,6 +89,14 @@ type Executor struct {
 	// policy --agent backend --allow bash` is a written decision, and the
 	// remedy `run why` prints has to actually change something.
 	ToolPolicy map[string]map[string]surface.Policy
+
+	// Tools performs the tools policy has allowed. Nil means this build has no
+	// runner, and CallTool then refuses instead of pretending -- a faked result
+	// would advance the stage on work nobody did.
+	//
+	// Optional on purpose. `--sim` runs must not carry a real runner, and a
+	// field that had to be filled would force every test to supply one.
+	Tools ToolRunner
 
 	// Prompt is the run's opening instruction. It joins the volatile half of
 	// every context, because it is what the run was started to do.
@@ -285,12 +320,39 @@ func (x *Executor) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Ev
 	policy := x.policyFor(e.Agent, e.Tool)
 
 	if policy == surface.PolicyAllow {
-		return nil, fmt.Errorf("tool %q is allowed for %s, but this build has no tool "+
-			"runner: running it needs a sandbox for bash and the declared workspace "+
-			"isolation.\n"+
-			"  a faked result would advance the stage on work nobody did.\n"+
-			"  what works today: arxi run start ... --sim, which fakes tools deliberately",
-			e.Tool, e.Agent)
+		if x.Tools == nil {
+			return nil, fmt.Errorf("tool %q is allowed for %s, but this executor was "+
+				"built without a tool runner.\n"+
+				"  a faked result would advance the stage on work nobody did.\n"+
+				"  what works today: arxi run start ... --sim, which fakes tools deliberately",
+				e.Tool, e.Agent)
+		}
+
+		result, err := x.Tools.RunTool(ctx, e.Agent, e.Tool, e.Args)
+		if err != nil {
+			// Returned as an error, not as a completed call with the failure in
+			// the result. The runner failing means arxi is broken -- bash is
+			// missing, the workspace vanished, a path escaped confinement -- and
+			// recording that as a tool that ran and reported trouble would put a
+			// plausible-looking history of a broken build into the log the user is
+			// asked to trust. The effect runner surfaces it; the run stops.
+			return nil, err
+		}
+
+		// tool.call_completed, whose payload the spec fixes as {tool, result?}.
+		// The result is what the next turn reads, so it carries the command's own
+		// output verbatim -- including a non-zero exit, which is an ANSWER and not
+		// an error: "the tests fail" is precisely what the agent asked to find out.
+		return []kernel.Event{{
+			ID:     x.id(e.Agent, "tool"),
+			Type:   kernel.ToolCallCompleted,
+			Source: kernel.SourceAgent,
+			Actor:  e.Agent,
+			Payload: map[string]any{
+				"tool":   e.Tool,
+				"result": result,
+			},
+		}}, nil
 	}
 
 	// One event, carrying the policy, because the reducer reads that field to
