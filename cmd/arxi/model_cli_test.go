@@ -11,6 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/michiTrader/arxi/internal/surface"
 )
 
 // Subprocess tests for `provider add` and the `model` commands.
@@ -601,4 +604,337 @@ func startLoopbackModelServer(t *testing.T) string {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// A real group with a bad subcommand must not be reported as a group that does
+// not exist.
+//
+// `arxi model --help` answered "model --help does not exist in the surface",
+// which names the GROUP and is false: `model` is declared and three of its
+// subcommands are built. The user was told the opposite of the truth about the
+// one word they got right, and sent to look for a typo they had not made.
+//
+// The two answers are for different mistakes. "does not exist in the surface"
+// means check the spelling. "is not a model command" means the group is real and
+// only the verb is wrong, which is why it lists the verbs that would work.
+//
+// `trigger` and `eval` already answered correctly from their own dispatchers, so
+// this was inconsistent as well as wrong -- the same input got a helpful answer
+// from two groups and a misleading one from five.
+func TestABadSubcommandBlamesTheSubcommandNotTheGroup(t *testing.T) {
+	dir := workdir(t)
+
+	// Every group the surface declares subcommands for, so a group added later
+	// is covered without editing this test.
+	groups := map[string]bool{}
+	for _, c := range surface.Registry {
+		if len(c.Path) >= 2 {
+			groups[c.Path[0]] = true
+		}
+	}
+	if len(groups) == 0 {
+		t.Fatal("no multi-word groups found in the registry; this test would " +
+			"pass vacuously")
+	}
+
+	for g := range groups {
+		r := arxi(t, dir, g, "definitely-not-a-verb")
+		if strings.Contains(r.out, "does not exist in the surface") {
+			t.Errorf("arxi %s definitely-not-a-verb says the whole thing is "+
+				"not in the surface:\n%s\n"+
+				"  consequence: %q IS in the surface. The user is told the "+
+				"opposite of the truth about the one word they got right, and "+
+				"goes looking for a typo they did not make.", g, r.out, g)
+			continue
+		}
+		if !strings.Contains(r.out, g) {
+			t.Errorf("arxi %s definitely-not-a-verb does not name the group:\n%s",
+				g, r.out)
+		}
+		// The refusal has to say what WOULD work, because a refusal that only
+		// says no leaves the user running `arxi surface` to find out -- the
+		// work the message exists to save.
+		//
+		// It checks that a real verb is NAMED rather than that a particular
+		// phrase appears. The first version required "it accepts:" and failed
+		// on `trigger` and `eval`, which print a fuller `usage:` block listing
+		// every subcommand with its arguments. That is better than the phrasing
+		// the test demanded, so the test was wrong, not the code -- and pinning
+		// wording here would have quietly punished the two groups that did the
+		// most for the user.
+		if !strings.Contains(r.out, "not implemented yet") {
+			named := false
+			for _, sub := range surface.SubcommandsOf(g) {
+				if strings.Contains(r.out, sub) {
+					named = true
+					break
+				}
+			}
+			if !named {
+				t.Errorf("arxi %s definitely-not-a-verb refuses without "+
+					"naming a single verb that would work:\n%s\n"+
+					"  consequence: the user has to go read `arxi surface` to "+
+					"recover from a one-word mistake the binary could have "+
+					"corrected in place.", g, r.out)
+			}
+		}
+		if r.code == 0 {
+			t.Errorf("arxi %s definitely-not-a-verb exited 0; a refusal that "+
+				"reports success is worse than a wrong message, because a "+
+				"script cannot see it", g)
+		}
+	}
+}
+
+// The article has to agree with the group name.
+//
+// Small, and it is here because the wrong constant was the more visible one:
+// hardcoding "an" produced "is not an model command" on five of seven groups,
+// and only "agent" and "eval" read correctly. Sloppiness in the one message
+// whose entire job is to be believed about what went wrong costs more than the
+// fix.
+func TestTheRefusalArticleAgreesWithTheGroupName(t *testing.T) {
+	dir := workdir(t)
+	for _, tc := range []struct{ group, want string }{
+		{"model", "is not a model command"},
+		{"run", "is not a run command"},
+		{"agent", "is not an agent command"},
+		{"eval", "is not an eval command"},
+	} {
+		r := arxi(t, dir, tc.group, "definitely-not-a-verb")
+		if !strings.Contains(r.out, tc.want) {
+			t.Errorf("arxi %s: expected %q in the refusal, got:\n%s",
+				tc.group, tc.want, r.out)
+		}
+	}
+}
+
+// TestTheUsageScreenListsWhatIsActuallyImplemented asks the binary about every
+// command the usage screen advertises under IMPLEMENTED TODAY.
+//
+// The usage screen is the third place the same claim is made -- the README
+// table, the package doc comment, and `arxi` with no arguments -- and it is the
+// one a user reads FIRST. It had already drifted twice, saying `run start ...
+// (--sim only today)` and that the rest of the surface "has no executor yet",
+// both false since the live executor landed, and neither breaking anything. A
+// doc that cannot go stale without turning the build red is worth more than one
+// that merely happens to be correct today.
+//
+// The binary is its own oracle here, which is the point: the screen and the
+// dispatcher cannot drift apart without this failing, and no list has to be
+// maintained in two places.
+func TestTheUsageScreenListsWhatIsActuallyImplemented(t *testing.T) {
+	dir := workdir(t)
+
+	help := arxi(t, dir)
+	if help.out == "" {
+		t.Fatal("arxi with no arguments printed nothing")
+	}
+
+	listed := commandsListedAsImplemented(help.out)
+	if len(listed) < 5 {
+		t.Fatalf("parsed only %d commands out of the IMPLEMENTED TODAY block, which means the parser broke rather than the screen; got %q\nscreen:\n%s",
+			len(listed), listed, help.out)
+	}
+
+	firstWords := make([]string, 0, len(listed))
+	for _, e := range listed {
+		firstWords = append(firstWords, strings.Fields(e)[0])
+	}
+
+	// Direction one: everything advertised is real.
+	for _, entry := range listed {
+		// The FULL path is probed, not just the first word, and that correction
+		// came from watching this test fail to fail. A bogus `agent create`
+		// sailed past the first version, because probing only `agent` gets
+		// "does not exist in the surface" -- which this test was not looking
+		// for. Truncating a command path turns "not built yet" into "no such
+		// command", the same bug in the same flattering direction that made the
+		// capability probe report 36.2% instead of 34.0% by truncating
+		// `agent tool policy` to `agent tool`.
+		path := strings.Fields(entry)
+		r := arxi(t, dir, append(append([]string{}, path...), "--help")...)
+
+		if strings.Contains(r.out, "not implemented yet") {
+			t.Errorf("the usage screen lists %q under IMPLEMENTED TODAY, but the binary says it is not implemented yet:\n%s\n  consequence: the first thing a user reads promises a command that refuses them.",
+				entry, r.out)
+		}
+		if strings.Contains(r.out, "does not exist in the surface") {
+			t.Errorf("the usage screen lists %q under IMPLEMENTED TODAY, but the binary does not know that path at all:\n%s\n  consequence: worse than unimplemented -- the screen names something that was never declared.",
+				entry, r.out)
+		}
+	}
+
+	// Direction two: everything real is advertised. Without this the screen
+	// could pass by listing less and less, which is how it went stale before.
+	for _, group := range implementedTopLevelGroups(t, dir) {
+		if !containsCommand(firstWords, group) {
+			t.Errorf("%q is implemented but the usage screen never mentions it\n  consequence: the screen understates the binary, so a working command stays invisible to the person most likely to need it.",
+				group)
+		}
+	}
+}
+
+// commandsListedAsImplemented pulls command paths out of the IMPLEMENTED TODAY
+// block, taking the longest leading run of words the surface recognises.
+//
+// The block's lines are "path  description", with no marker between the two, so
+// the split has to be discovered rather than assumed: `run start <bp> <prompt>`
+// is two path words, `blueprint validate <file>` is two, `schema` is one. The
+// surface registry is the only thing that actually knows.
+func commandsListedAsImplemented(help string) []string {
+	lines := strings.Split(help, "\n")
+	start := -1
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) == "IMPLEMENTED TODAY" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+
+	var out []string
+	for _, ln := range lines[start:] {
+		if strings.TrimSpace(ln) == "" {
+			break // the block ends at the first blank line
+		}
+		fields := strings.Fields(ln)
+		if len(fields) == 0 {
+			break
+		}
+		best := 0
+		for n := 1; n <= len(fields); n++ {
+			if !isPathWord(fields[n-1]) {
+				break
+			}
+			if isKnownPrefix(fields[:n]) {
+				best = n
+			}
+		}
+		if best > 0 {
+			out = append(out, strings.Join(fields[:best], " "))
+		}
+	}
+	return out
+}
+
+// isPathWord is a cheap filter so placeholders and prose never reach the
+// registry lookup: real path words are lowercase letters and hyphens.
+func isPathWord(w string) bool {
+	if w == "" {
+		return false
+	}
+	for _, r := range w {
+		if (r < 'a' || r > 'z') && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// isKnownPrefix reports whether p is a declared command or the start of one.
+func isKnownPrefix(p []string) bool {
+	if surface.Lookup(p...) != nil {
+		return true
+	}
+	if len(p) == 1 {
+		return len(surface.SubcommandsOf(p[0])) > 0
+	}
+	return false
+}
+
+// implementedTopLevelGroups asks the binary which top-level words it actually
+// runs, so direction two of the guard needs no maintained list either.
+//
+// A group counts as implemented when at least one of its SUBCOMMANDS runs, and
+// that is deliberate rather than incidental. The first version asked the group
+// word itself -- `arxi agent --help` -- and treated the absence of a refusal as
+// success. That was already fragile, and the group-aware refusal added in this
+// same body of work broke it outright: the new message is neither "not
+// implemented yet" nor "does not exist in the surface", so every declared group
+// suddenly looked implemented and the guard reported agent, role, state and
+// event as missing from a screen that is right to omit them. The test was
+// wrong, not the screen.
+//
+// The lesson is the one this file keeps relearning: a group word is not a
+// command, and asking about a truncated path answers a different question than
+// the one being asked.
+func implementedTopLevelGroups(t *testing.T, dir string) []string {
+	t.Helper()
+
+	seen := map[string]bool{}
+	var out []string
+	for i := range surface.Registry {
+		g := surface.Registry[i].Path[0]
+		if seen[g] {
+			continue
+		}
+		seen[g] = true
+
+		// serve is skipped because without --listen it speaks the protocol on
+		// stdin and would block this test forever.
+		if g == "serve" {
+			continue
+		}
+
+		// The registry's paths ARE the declared commands, at whatever depth each
+		// one really has, so they are used directly rather than rebuilt from
+		// the group word. Reconstructing them assumed two words and missed
+		// `agent tool policy`, whose parent `agent tool` answers "needs a
+		// subcommand" -- neither a refusal nor a run, which is exactly how a
+		// group came to look implemented on the strength of a command that does
+		// not exist.
+		for j := range surface.Registry {
+			p := surface.Registry[j].Path
+			if p[0] != g {
+				continue
+			}
+
+			// A short deadline, because this runs real commands rather than
+			// asking for help: `trigger run` and friends would otherwise sit in
+			// their loop until the test binary times out. Whether the refusal
+			// was printed is decided long before the deadline.
+			if isRefusal(arxiBounded(t, dir, 3*time.Second, p...)) {
+				continue
+			}
+			out = append(out, g)
+			break
+		}
+	}
+	return out
+}
+
+// isRefusal reports whether output is the binary declining to run a command,
+// rather than the command running.
+//
+// One named place for the set, because the set grew twice while this guard was
+// being written and both times the guard broke silently rather than loudly. It
+// started as two strings; the group-aware refusal made three and every declared
+// group started looking implemented; "needs a subcommand" made four. A test that
+// infers success from the absence of known failure strings is only as good as
+// its list, and that is a bad property to leave spread across call sites.
+func isRefusal(out string) bool {
+	for _, s := range []string{
+		"not implemented yet",
+		"does not exist in the surface",
+		"is not a", // covers "is not a X command" and "is not an X command"
+		"needs a subcommand",
+	} {
+		if strings.Contains(out, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsCommand reports whether want is in list.
+func containsCommand(list []string, want string) bool {
+	for _, e := range list {
+		if e == want {
+			return true
+		}
+	}
+	return false
 }

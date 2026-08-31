@@ -643,6 +643,67 @@ func Lookup(path ...string) *Cmd {
 	return nil
 }
 
+// SubcommandsOf lists the declared second words under a group, in declaration
+// order, with duplicates removed.
+//
+// It exists so a dispatcher can tell a bad SUBCOMMAND from a bad GROUP. Those
+// are different mistakes and they send the reader somewhere different: an
+// unknown group means check the spelling, a known group with an unknown
+// subcommand means only the verb is wrong. `arxi model --help` used to answer
+// that "model --help" does not exist in the surface -- which names the group and
+// is false, since `model` is declared and three of its subcommands are built.
+// The user was told the opposite of the truth about the one word they got right.
+//
+// The list is what the SURFACE declares rather than what is implemented, because
+// that is the promise the reader was given and the set they are choosing from. A
+// declared-but-unbuilt subcommand is caught earlier by the path lookup, which
+// gives the more specific "not implemented yet" answer.
+func SubcommandsOf(group string) []string {
+	return SubcommandsUnder(group)
+}
+
+// SubcommandsUnder lists the declared next words under a path prefix, in
+// declaration order, with duplicates removed.
+//
+// The general form of SubcommandsOf, and it exists because a group is not the
+// only prefix that is not a command. `agent tool` is declared only as part of
+// `agent tool policy`, so answering it with the top-level list produced a
+// message that contradicted itself in a single breath: `"tool" is not an agent
+// command` printed directly above `it accepts: list, create, show, tool`.
+//
+// Depth is the thing that was assumed away. Treating "not a leaf" as "wrong at
+// word two" is the same class of mistake as truncating a path before looking it
+// up, which is how the capability probe once turned `agent tool policy` into
+// `agent tool` and reported a percentage that was too kind.
+func SubcommandsUnder(prefix ...string) []string {
+	n := len(prefix)
+	if n == 0 {
+		return nil
+	}
+
+	var out []string
+	seen := map[string]bool{}
+	for i := range Registry {
+		p := Registry[i].Path
+		if len(p) <= n {
+			continue
+		}
+		match := true
+		for j := 0; j < n; j++ {
+			if p[j] != prefix[j] {
+				match = false
+				break
+			}
+		}
+		if !match || seen[p[n]] {
+			continue
+		}
+		seen[p[n]] = true
+		out = append(out, p[n])
+	}
+	return out
+}
+
 // shortFlags maps a parameter name to its one-letter form, ONCE, for the whole
 // surface. A letter means the same thing in every command that has that
 // parameter, or it does not exist.
