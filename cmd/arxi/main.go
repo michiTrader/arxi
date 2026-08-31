@@ -74,6 +74,10 @@ func main() {
 			cmdRunStart(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "unpause" {
+			cmdRunUnpause(args[2:])
+			return
+		}
 	case "trigger":
 		cmdTrigger(args[1:])
 		return
@@ -212,6 +216,7 @@ IMPLEMENTED TODAY
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
   run start <bp> <prompt>    run a blueprint, calling real models (or --sim)
+  run unpause <run>          pick a run back up (--budget raises the ceiling)
   inbox                      questions an agent cannot continue without
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them
@@ -368,8 +373,48 @@ func cmdWhy(args []string) {
 	}
 }
 
+// onExit holds work that must happen before the process dies.
+//
+// It exists because os.Exit does not run deferred calls, and the thing most
+// often deferred in this binary is releasing a run's writer lock. Measured, not
+// theorised: `run unpause` on a run with an unparseable policy file appended
+// run.unpaused, then fataled out of openPolicies with the lock held. writer.lock
+// stayed on disk holding pid 5871, and the next command on that run refused with
+//
+//	run directory runs/... is already open for writing by pid 5871
+//	... remove runs/.../writer.lock by hand after confirming no process is running
+//
+// for a run that had merely hit a bad config file. That advice is also dangerous
+// to generalise: an operator who learns to delete writer.lock after a crash will
+// eventually delete a live one.
+//
+// A registry here rather than a store.Close() before each os.Exit, because there
+// were four exit paths under one lock in `run unpause` alone (two fatals, an
+// append error, and the stopped-early branch) and the next command added will
+// have its own. Fixing them one at a time is how the second one gets missed.
+//
+// Only a hard kill can still strand a lock, and nothing in a process can help
+// with that -- which is what the manual remedy in the message is actually for.
+var onExit []func()
+
+// atExit registers cleanup to run before fatal or exitWith terminates.
+func atExit(f func()) { onExit = append(onExit, f) }
+
+// runExitHooks runs the registered cleanups, most recent first.
+//
+// Reverse order for the same reason defer uses it: later work was set up on top
+// of earlier work, so unwinding the other way round can release something that
+// is still in use.
+func runExitHooks() {
+	for i := len(onExit) - 1; i >= 0; i-- {
+		onExit[i]()
+	}
+	onExit = nil
+}
+
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "arxi:", err)
+	runExitHooks()
 	os.Exit(1)
 }
 

@@ -46,6 +46,10 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 	case RunPaused:
 		out.Status = StatusPaused
 	case RunUnpaused:
+		// A resume may carry a new ceiling, and honouring it here is what makes
+		// the remedy this project prints actually work. See raiseBudget.
+		raiseBudget(&out, e)
+
 		// Unpausing has to hand back the work the pause withheld, for the same
 		// reason answering a budget question does: spendingHalted parked those
 		// causes, so a resume that does not drain them restarts a run with nothing
@@ -862,6 +866,64 @@ func drainParked(out *State, c Config) []Effect {
 		fx = append(fx, spawnFor(out, *m, c, causes, len(causes)))
 	}
 	return fx
+}
+
+// raiseBudget applies the new ceiling a resume may carry.
+//
+// THE DEFECT THIS FIXES, measured before it was written. `run unpause` declares
+// a --budget parameter described as the "new spend ceiling", and
+// spec/events.md gives `arxi run unpause <run> --budget <higher>` as THE remedy
+// for a budget block -- as does run why, which prints that exact line. Only
+// run.started ever wrote BudgetUSD, so a run resumed that way came back to
+// running against the ceiling it had already exhausted, spent one more time,
+// and blocked again. Probed on a real fold:
+//
+//	after exceeded:            status=blocked budget=1.00
+//	after unpaused(budget 10): status=running budget=1.00
+//
+// The command a document recommends and a reducer ignores is worse than a
+// missing feature, because the person following the advice concludes the block
+// is unfixable rather than that the remedy is unimplemented.
+//
+// LOWER IS NOT ACCEPTED, and this is the one judgement call here. A ceiling
+// below what the tree has already spent would put the run under water the
+// instant it resumed: applyCost would breach on the next event and re-ask,
+// which is the loop this function exists to end. A ceiling below the current
+// one but above the spend is refused too, because "unpause" is not the verb for
+// tightening a budget -- a resume that quietly narrowed the headroom would be a
+// surprise in the direction that costs the run. So the field raises or it does
+// nothing, and the CLI is where a rejected value is explained to a human,
+// because the reducer has no way to talk to one.
+//
+// A missing or zero budget_usd leaves the ceiling alone. Zero is not "no
+// ceiling" here: an unpause carrying no budget is the ordinary case (§20.6's
+// first example is a bare `arxi run unpause r1`), and reading its absent field
+// as a limit of zero would set every plain resume to a budget it can never
+// satisfy.
+func raiseBudget(out *State, e Event) {
+	next := e.Num("budget_usd")
+	if next <= out.BudgetUSD {
+		return
+	}
+	out.BudgetUSD = next
+
+	// The breach is over as far as the ceiling is concerned, so the memory of
+	// having reported it has to go with it. Without this, BudgetBlocked stays
+	// true, and applyCost's first act on any later cost event is to return
+	// early -- so the run would spend straight through the NEW ceiling in
+	// silence, never emitting budget.exceeded again. Raising a budget would
+	// then buy an unlimited one, which is the opposite of what the operator
+	// asked for. applyCost clears the same flag when spend falls back under the
+	// ceiling, and this is that same fact arriving from the other direction:
+	// there, the spend came down; here, the ceiling went up.
+	out.BudgetBlocked = false
+
+	// BudgetWarned is cleared for the same reason. It is the "you are at 80%"
+	// memory, and 80% of the old ceiling is not 80% of the new one. Leaving it
+	// set means the one warning that exists before the hard stop is spent on a
+	// ceiling nobody is being measured against any more, and the next thing the
+	// operator hears about their raised budget is that it, too, ran out.
+	out.BudgetWarned = false
 }
 
 func applyInboxTimeout(out *State, e Event) []Effect {

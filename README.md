@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **978 tests, no dependencies**.
+Underneath, every package is done and tested — **999 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -175,7 +175,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
 | package | what it owns | tests |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 42 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 48 |
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
@@ -192,7 +192,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 55 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 193 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 208 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -360,21 +360,30 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**23 of 49 declared capabilities are wired — 46.9%.** That figure is measured,
+**24 of 49 declared capabilities are wired — 49.0%.** That figure is measured,
 not estimated: a probe walks `surface.Registry`, invokes every declared path
 against the built binary, and counts the ones that do not answer *"declared but
 not implemented"*. It is the honest denominator, and it is deliberately
-unflattering — the 26 that remain are mostly `run *`, `agent *`, `state *`,
-`event *` and `inbox *`, which now want the inbox and a way to read the log
-rather than the executor or the tool runner. The implemented eighteen are
+unflattering — the 25 that remain are mostly `run *`, `agent *`, `state *` and
+`event *`, which now want a way to read the log rather than the executor, the
+tool runner or the inbox. The implemented twenty-four are
 `provider add`, `model list` /
-`enable` / `disable`, `run start`, `blueprint validate`, `trigger create` /
-`list` / `show` / `pause` / `run`, `eval run` / `list` / `compare`, `schema`,
-`serve`, `surface` and `version`.
+`enable` / `disable`, `run start`, `run unpause`, `agent tool policy`,
+`blueprint validate`, `trigger create` /
+`list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
+`eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
+
+That probe is worth *running* rather than trusting, and a botched run of it is
+the reason for saying so: an early attempt this step reported **22 / 47**,
+because the shell loop it ran in let `serve` read the paths list off stdin and
+swallow two lines. A measurement that quietly loses part of its own denominator
+still looks like a result. The fixed probe redirects stdin per invocation and
+reports the total it actually walked, so a repeat of that failure is visible in
+the output instead of hidden in it.
 
 ### One number is not enough
 
-46.9% is the CLI surface, and quoting it alone would be misleading in **both**
+49.0% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -382,12 +391,12 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **23 / 49 — 46.9%** | every declared path probed against the built binary |
+| the CLI surface | **24 / 49 — 49.0%** | every declared path probed against the built binary |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 978 tests live. What is missing is almost entirely
+that is where most of the 999 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
@@ -408,27 +417,25 @@ rather than a convenience.
 
 So the honest summary of that row is smaller than 3 / 3 sounds: every effect a
 run can emit now reaches something real, and **no effect fakes a result**. It
-does *not* mean a run drives itself to completion after an approval — nothing
-yet resumes a blocked run from the CLI, which is the next thing worth building.
+does *not* mean a run drives itself to completion after an approval — but a
+blocked run can now be picked back up from the CLI, which is what `run unpause`
+does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 46.9% understates and 100% overstates. Twelve of the
-26 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
+That shape is also why 49.0% understates and 100% overstates. Twelve of the
+25 unwired capabilities are `run *` verbs — `list`, `show`, `tree`, `result`,
 `pause`, `cancel`, `fork`, `replay` — and each is a **projection of a log that
 already exists and is already correct**. They are not twelve features; they
 are twelve readings of one finished mechanism.
 
 The one number worth committing to, if only one is wanted: **the system can
-reason about a run end to end, can do the work inside one, and cannot yet pick
-a run back up after a human has answered it.**
+reason about a run end to end, can do the work inside one, and can now be
+picked back up after a human has answered it.**
 
-One entry in that unwired list is worth naming, because it is a remedy this
-README itself recommends: **`run unpause`** is what would drive a run forward
-once an inbox reply has landed. A remedy a document names and a binary refuses
-is the worst kind of gap, because it is discovered by the person already in
-trouble.
-
-It used to be two. `agent tool policy` was the other, and it is now implemented
-— see below.
+That last clause is new, and earning it is what the section below is about.
+There were three gaps of the worst kind — a remedy this project *prints* and the
+binary *refuses* — and they are now zero: `AskHuman`, then `agent tool policy`,
+then **`run unpause`**. A gap of that kind is discovered by the person already in
+trouble, which is why closing them came before building anything new.
 
 Both surface numbers moved for an unglamorous reason worth recording: `surface`
 and `version` were always implemented, were always on the first screen, and were
@@ -958,6 +965,113 @@ That interval is Agresti-Caffo rather than the textbook one, because the naive
 standard error is `p(1-p)/n` and collapses to **zero** at a 0% or 100% pass rate
 — 4/4 against 3/4 would be compared against ±0.00 and the difference declared
 real, certainty manufactured by the formula out of four samples.
+
+### Picking a run back up
+
+`arxi run unpause <run> [--budget <usd>]` is the third of the three remedies
+this project printed and could not honour. `run why` emitted the exact line
+`arxi run unpause <run> --budget <higher>` for an exhausted budget,
+`spec/events.md` listed it as **the** remedy for a budget block, and §20.6 built
+its narrative on "raise and continue as one action rather than a fork". The
+binary answered *"declared but not implemented"*.
+
+The interesting part was not writing the command. It was that **the reducer was
+the thing that was wrong.** `--budget` was declared on the surface as a "new
+spend ceiling", promised by the spec, printed by `why` — and only `run.started`
+had ever written `BudgetUSD`. So `run.unpaused` now raises it, and the project's
+own rule decided that: *correct the code, not the test*. The promise lives in
+the surface and the spec, which makes the reducer the thing that disagrees.
+
+Raising the number is the easy half. Two flags decide whether the raise is a
+ceiling or a blank cheque:
+
+- **`BudgetBlocked` must be cleared**, because `applyCost` returns early while
+  it is set. A raise that left it would let the run spend straight past the
+  *new* ceiling in silence — **raising a budget would buy an unlimited one.**
+  `applyCost` already clears that flag when spend falls under the ceiling; a
+  raise is the same fact arriving from the other direction.
+- **`BudgetWarned` must be cleared**, because 80% of the old ceiling is not 80%
+  of the new one. Leaving it set spends the only pre-stop notice on a ceiling
+  nobody is measured against.
+- **A lower ceiling is refused, not applied.** One under the current spend
+  re-breaches on the next event, which is the loop a raise exists to end — and
+  "unpause" is not the verb for tightening a budget. The refusal is in the CLI,
+  not the reducer: the reducer has nobody to talk to, so it ignores what it will
+  not honour, and the CLI is where a person is told why.
+- **A missing `budget_usd` leaves the ceiling alone**, because §20.6's first
+  example is a bare `arxi run unpause r1`. Reading an absent field as a limit of
+  zero would give every plain resume an unsatisfiable ceiling.
+
+Resuming is then **two acts**: append `run.unpaused`, and *drive the loop*. The
+split is deliberate and `arxi inbox` does only the first half on purpose —
+answering a question is not the same act as paying for the turns the answer
+unblocks. Unpause is the other half.
+
+Driving needs a cursor, and **there isn't one to have.** `exec.Loop`'s own doc
+rules out both guesses: `Head()` skips the effects of anything a previous pass
+had not reached, and zero re-spawns every turn the run already paid for.
+`run start` prints the cursor as "resume from here" and **nothing persists it** —
+measured, not assumed: a run directory holds only `blueprint.snapshot.yaml`,
+`events.ndjson`, `state.snapshot.json` and `writer.lock`. A fresh process
+therefore cannot know it, and the choice is which failure to take. `Head()` may
+strand a crashed pass's effects, on a run that is likely stuck anyway; zero
+re-charges the whole bill on every healthy run. **The tip wins**, and this is a
+limitation the command reports rather than hides.
+
+One more thing is read off the log rather than asked: a run whose `run.started`
+says `simulated:true` was produced by `exec.Fake`, so it is **not driven**.
+Charging real money to continue a rehearsal is the failure worth designing
+against, and a `--sim` flag on this command would let two answers differ — with
+the money-costing direction being the one a user hits by forgetting a flag.
+`kernel.State` has no `Simulated` field (verified: the reducer has no use for the
+distinction, which is exactly what makes `--sim` trustworthy), so it comes from
+the event.
+
+#### What only running it could find
+
+Four defects, all found by walking the command by hand and none by a unit test:
+
+1. **One ceiling, three numbers.** A run started with `--budget 0.005` had its
+   ceiling printed as `0.01` by the start banner, `0.0050` by the block summary,
+   and `0.01 -> 10.00` by the raise. The raise is the worst, because it puts
+   both ceilings on one line: **the same command contradicted itself about a
+   number it had just read out of a single field.** Every instance rounded *up*,
+   which is the bad direction twice over — the reader is shown more headroom than
+   the run has, so the block that follows looks premature.
+
+   The fix exposed that `usd()` already existed, solving the same problem with
+   the same reasoning, so the duplicate I had written was deleted and the shared
+   helper widened. Its rule tested **size** (`v < 0.005`); the right test is
+   whether two decimals are **exact**.
+
+2. **A fatal under the lock stranded the writer lock.** `os.Exit` does not run
+   deferred calls, so a `run unpause` that appended `run.unpaused` and then hit
+   an unparseable `policies/backend.json` left `writer.lock` on disk holding
+   pid 5871. The next command on that run refused — *"already open for writing
+   by pid 5871 … remove `writer.lock` by hand"* — for a run whose log says it
+   was successfully resumed. `run start` had the identical exposure.
+
+   Fixed with an `atExit` registry called by `fatal`, not a `store.Close()` in
+   front of each `os.Exit`: there were four exit paths under one lock in
+   `run unpause` alone, and fixing them one at a time is how the second one gets
+   missed. The manual remedy in that message is for a hard kill, which is the
+   only case a process genuinely cannot clean up after.
+
+3. **A test that could not fail.** The first guard for defect 2 passed — and
+   passed with the fix reverted, which is how the mistake was caught. It resumed
+   a `--sim` run, and a `--sim` resume returns *before* the executor is wired up,
+   so the `os.Exit` path it claimed to guard was never reached. **Breaking the
+   code is the only way to learn that**, and it is the reason the replacement
+   asserts its own setup: it checks that `run.started` really said
+   `simulated:true` before patching it, and that the bad policy file was really
+   read, so a guard that stops reaching the path fails loudly instead of
+   vacuously.
+
+4. **A probe that lost part of its denominator.** The surface re-measure first
+   reported **22 / 47** against a registry of **49**, because the shell loop let
+   `serve` read the remaining paths off stdin. A measurement that quietly drops
+   two of its own cases still looks like a result; the fixed probe redirects
+   stdin per invocation and prints the total it walked.
 
 ## Build and test
 

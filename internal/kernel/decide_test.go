@@ -739,6 +739,160 @@ func TestBudgetExhaustedBlocksAndAsks(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------------------- resume
+
+// The defect this was written for: --budget is declared as the "new spend
+// ceiling" and spec/events.md gives it as THE remedy for a budget block, and
+// only run.started ever wrote BudgetUSD. Measured before the fix, the ceiling
+// did not move, so the remedy the tool recommends returned the run to running
+// against a budget it had already exhausted.
+func TestARaisedCeilingOnResumeIsTheCeilingTheRunIsJudgedBy(t *testing.T) {
+	c := bp()
+	s := started(c) // budget 5.0
+	s, _ = Decide(s, ev(BudgetExceeded, "", map[string]any{
+		"tree_spent_usd": 5.0, "budget_usd": 5.0,
+	}), c)
+	if s.Status != StatusBlocked {
+		t.Fatalf("status = %q, want blocked before the resume is interesting", s.Status)
+	}
+
+	s, _ = Decide(s, ev(RunUnpaused, "", map[string]any{"budget_usd": 20.0}), c)
+
+	if s.Status != StatusRunning {
+		t.Errorf("status = %q, want running: unpause resumes the run", s.Status)
+	}
+	if s.BudgetUSD != 20.0 {
+		t.Errorf("budget = %.2f, want 20.00. The remedy `run unpause --budget` is "+
+			"printed by run why and by spec/events.md; a resume that leaves the "+
+			"ceiling where it was sends the run straight back into the same block",
+			s.BudgetUSD)
+	}
+}
+
+// A raised ceiling has to be ENFORCEABLE, and that is a different claim from
+// having been stored. applyCost returns early while BudgetBlocked is set, so a
+// raise that left the flag alone would let the run spend past the new ceiling in
+// silence -- raising a budget would buy an unlimited one.
+func TestARaisedCeilingIsStillACeiling(t *testing.T) {
+	c := bp()
+	s := started(c)
+	s, _ = Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 5.0}), c)
+	if !s.BudgetBlocked {
+		t.Fatal("spending the whole budget had to record the breach")
+	}
+
+	s, _ = Decide(s, ev(RunUnpaused, "", map[string]any{"budget_usd": 8.0}), c)
+	if s.BudgetBlocked {
+		t.Fatal("BudgetBlocked survived the raise, so applyCost will return early " +
+			"on every later cost and the new ceiling can never be breached")
+	}
+
+	// Spend past the NEW ceiling: 5.0 already spent, 3.5 more is 8.5 of 8.0.
+	_, fx := Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 3.5}), c)
+	em, ok := firstEffect[Emit](fx)
+	if !ok || em.Event.Type != BudgetExceeded {
+		t.Fatalf("8.50 of a raised ceiling of 8.00 did not breach it; effects: %#v", fx)
+	}
+	if got := em.Event.Payload["budget_usd"]; got != 8.0 {
+		t.Errorf("the breach reports budget_usd = %v, want 8; it has to name the "+
+			"ceiling that was actually exceeded, not the one that was replaced", got)
+	}
+}
+
+// The 80% warning is the only notice before the hard stop, and 80% of the old
+// ceiling is not 80% of the new one. Leaving BudgetWarned set spends that notice
+// on a ceiling nobody is measured against any more.
+func TestTheWarningIsOwedAgainAfterARaise(t *testing.T) {
+	c := bp()
+	s := started(c) // budget 5.0, warns at 4.0
+	s, _ = Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 4.2}), c)
+	if !s.BudgetWarned {
+		t.Fatal("4.2 of 5.0 had to warn")
+	}
+
+	s, _ = Decide(s, ev(RunUnpaused, "", map[string]any{"budget_usd": 100.0}), c)
+	if s.BudgetWarned {
+		t.Fatal("BudgetWarned survived the raise: the run would reach its new " +
+			"ceiling with no warning at all")
+	}
+
+	// 80% of 100 is 80. 4.2 + 76 = 80.2.
+	_, fx := Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 76.0}), c)
+	em, ok := firstEffect[Emit](fx)
+	if !ok || em.Event.Type != BudgetWarning {
+		t.Fatalf("80.2 of 100.0 had to warn against the new ceiling; effects: %#v", fx)
+	}
+}
+
+// An ordinary resume carries no budget at all -- §20.6's first example is a bare
+// `arxi run unpause r1`. Reading that absent field as a limit of zero would set
+// every plain resume to a ceiling it can never satisfy.
+func TestAPlainResumeLeavesTheCeilingAlone(t *testing.T) {
+	c := bp()
+	s := started(c)
+	s, _ = Decide(s, ev(RunPaused, "", nil), c)
+	if s.Status != StatusPaused {
+		t.Fatalf("status = %q, want paused", s.Status)
+	}
+
+	s, _ = Decide(s, ev(RunUnpaused, "", nil), c)
+	if s.Status != StatusRunning {
+		t.Errorf("status = %q, want running", s.Status)
+	}
+	if s.BudgetUSD != 5.0 {
+		t.Errorf("budget = %.2f, want the 5.00 it started with. A resume with no "+
+			"--budget is the ordinary case, not a request for a ceiling of zero",
+			s.BudgetUSD)
+	}
+}
+
+// Unpause raises or does nothing. A lower ceiling is refused because a resume
+// that quietly narrowed the headroom is a surprise in the direction that costs
+// the run, and one under the spend would re-breach on the very next event.
+func TestResumeDoesNotQuietlyTightenTheCeiling(t *testing.T) {
+	c := bp()
+	s := started(c) // budget 5.0
+	s, _ = Decide(s, ev(LLMResponse, "backend", map[string]any{"cost_usd": 2.0}), c)
+
+	s, _ = Decide(s, ev(RunUnpaused, "", map[string]any{"budget_usd": 1.0}), c)
+	if s.BudgetUSD != 5.0 {
+		t.Errorf("budget = %.2f, want 5.00 unchanged. A ceiling of 1.00 under a "+
+			"spend of 2.00 would breach on the next cost event, which is the loop "+
+			"raising a budget exists to end", s.BudgetUSD)
+	}
+	if s.Status != StatusRunning {
+		t.Errorf("status = %q: refusing the value must not refuse the resume", s.Status)
+	}
+}
+
+// The two halves of a resume are independent, and the drain is the older one.
+// Raising a ceiling must not cost the run the work the block withheld.
+func TestARaiseStillHandsBackTheParkedWork(t *testing.T) {
+	c := bp()
+	s := started(c)
+	s, _ = drive(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
+	s, _ = Decide(s, ev(BudgetExceeded, "", map[string]any{
+		"tree_spent_usd": 5.0, "budget_usd": 5.0,
+	}), c)
+
+	// A cause arriving while the run is blocked is parked rather than spawned.
+	s, fx := Decide(s, ev(AgentSteered, "", map[string]any{
+		"text": "keep going", "to": "backend",
+	}), c)
+	if n := countEffects[SpawnTurn](fx); n != 0 {
+		t.Fatalf("%d turns opened while blocked; spendingHalted parks them", n)
+	}
+
+	s, fx = Decide(s, ev(RunUnpaused, "", map[string]any{"budget_usd": 20.0}), c)
+	if n := countEffects[SpawnTurn](fx); n == 0 {
+		t.Error("the resume raised the ceiling and left the parked work parked: " +
+			"the run comes back with nothing to do and quiescence blames the blueprint")
+	}
+	if s.BudgetUSD != 20.0 {
+		t.Errorf("budget = %.2f, want 20.00", s.BudgetUSD)
+	}
+}
+
 func TestSpendAttributedPerMember(t *testing.T) {
 	c := bp()
 	s := started(c)
@@ -1298,7 +1452,7 @@ func spawnsFor(fx []Effect, agent string) int {
 // progress table that this package can actually contradict.
 //
 // The table exists because a single percentage was misleading in both
-// directions: 46.9% of the CLI surface is wired while 100% of the reducer is
+// directions: 49.0% of the CLI surface is wired while 100% of the reducer is
 // done, and quoting either alone tells a different lie. But a table of measured
 // numbers rots exactly like a headline does, and this one rots in the
 // flattering direction — nobody revisits "100%" after adding the 33rd event.
