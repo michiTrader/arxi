@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **897 tests, no dependencies**.
+Underneath, every package is done and tested — **901 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -189,7 +189,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
 | `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 21 |
 | `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 12 |
-| `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 51 |
+| `internal/toolrun` | where a tool may do it: the workspace boundary, and `bash` under a deadline | 55 |
 | `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 160 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
@@ -385,7 +385,7 @@ directions. Four things are being built, and they are at very different stages:
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 897 tests live. What is missing is almost entirely
+that is where most of the 901 tests live. What is missing is almost entirely
 *the last mile*: one effect runner (an inbox that survives the process) and the
 CLI verbs that would read state those runners produce.
 
@@ -524,16 +524,26 @@ context was cancelled. The distinction is load-bearing rather than tidy.
 Emitting `agent.activated` and *then* returning an error would leave a member the
 reducer believes is thinking, holding a turn that can never close.
 
-**Tool policy is enforced; tool execution is not.** That split is the useful
-order rather than a halfway measure, because two of the three policy outcomes
-are decisions rather than work — and they are the two where being wrong is
+**Tool policy is enforced, and an allowed tool now runs.** Policy came first
+rather than as a halfway measure, because two of the three outcomes are
+decisions rather than work — and they are the two where being wrong is
 unrecoverable:
 
 | outcome | what happens |
 |---|---|
 | `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
 | `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
-| `allow` | still **refused**, loudly — running it needs a sandbox for `bash` and the workspace isolation the blueprint declares. |
+| `allow` | **runs**, in `internal/toolrun`: a per-member workspace, `bash` under a deadline, output bounded. `tool.call_completed` carries the result. |
+
+The `allow` row is narrower than it sounds, and the reason is worth stating.
+Because a granted *mutating* tool resolves to `ask`, `bash` and `write` do not
+reach the runner unattended — they reach a human first. What runs unattended
+is `read`. That ordering is deliberate: the confinement in `internal/toolrun`
+stops careless **paths**, and it cannot stop a **script**, because a script is a
+program rather than an argument. The package doc says so in as many words,
+under a heading naming what it does not protect against, and a test reads the
+`ask` claim back through `tool.Resolve` so the prose cannot quietly become
+reassuring and wrong.
 
 The rules are the ones the design already committed to: a tool not granted is
 `deny`, a granted mutating tool is `ask`, a granted reading tool is `allow`. An
@@ -555,11 +565,12 @@ reverse gets an approval gate and a shared directory to corrupt.
 `TestTheMutatingSetAgreesWithTheKernel` reads the kernel's set through the
 behaviour it drives, not by copying it — a copy would agree with itself forever.
 
-Missing still: the tool **runner** (a sandbox for `bash`, workspace isolation)
-and the **inbox** (somewhere a question can outlive the process). `AskHuman`
-still refuses entirely, which is why the run above goes quiet instead of
-finishing — submitting work is a tool call. A fake result would be
-indistinguishable in the log from a real one, and the log is the truth.
+Missing still: the **inbox** — somewhere a question can outlive the process.
+`AskHuman` refuses entirely, which is why the run above still goes quiet
+instead of finishing: submitting work is a tool call, and a call that resolves
+to `ask` has nowhere to wait. A fake result would be indistinguishable in the
+log from a real one, and the log is the truth. Refusing loudly is the only
+option that keeps that sentence honest.
 
 The trigger **scheduler** exists as of this change, and is worth describing
 precisely because the split is the interesting part. `internal/trigger` decides,
