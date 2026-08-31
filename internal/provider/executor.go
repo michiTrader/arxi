@@ -8,6 +8,8 @@ import (
 
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
+	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/tool"
 )
 
 // asAPIError reports whether err is a provider refusal, and binds it.
@@ -51,6 +53,15 @@ type Executor struct {
 	// Members is the frozen roster, so a turn can find the model its member
 	// declared. Taken from kernel.Config at wiring time.
 	Members []kernel.MemberConfig
+
+	// ToolPolicy holds per-agent policy overrides, keyed by agent then tool.
+	//
+	// Nil is the normal case and means "the defaults decide", which is the
+	// safe direction: no entry resolves to deny for an ungranted tool and ask
+	// for a granted mutating one. Entries exist because `arxi agent tool
+	// policy --agent backend --allow bash` is a written decision, and the
+	// remedy `run why` prints has to actually change something.
+	ToolPolicy map[string]map[string]surface.Policy
 
 	// Prompt is the run's opening instruction. It joins the volatile half of
 	// every context, because it is what the run was started to do.
@@ -245,22 +256,71 @@ func (x *Executor) id(scope, kind string) string {
 	return fmt.Sprintf("ev-%s-%s-%d", scope, kind, x.ids[key])
 }
 
-// CallTool refuses, loudly.
+// CallTool enforces the policy, and refuses only what it cannot yet do safely.
 //
-// A tool runner is a separate piece of work: it needs the resolved per-tool
-// policy from §20.2 (allow/ask/deny), a sandbox for `bash`, and the workspace
-// isolation the blueprint already declares. None of that exists yet.
+// The permission half of the tool runner is real now; the execution half is not.
+// That split is not a halfway measure, it is the useful order: two of the three
+// policy outcomes are decisions rather than work, and they are exactly the two
+// where getting it wrong is unrecoverable.
 //
-// Refusing is the honest answer and the safe one. Returning a successful
+//	deny  -> tool.call_denied. A decision. Nothing runs, and the log records
+//	         why, so `run why` can name the tool and the member.
+//	ask   -> tool.call_denied with policy=ask, which the reducer turns into an
+//	         inbox item and a blocked_ref (applyToolDenied). Per spec this is
+//	         NOT an error: it is a question.
+//	allow -> still refused, loudly, because running it needs a sandbox for
+//	         `bash` and the workspace isolation the blueprint declares.
+//
+// Refusing an ALLOW is the honest answer. Returning a successful
 // tool.call_completed would make the reducer advance a stage on the strength of
 // work nobody did, and the log would record a result that never existed -- which
 // is unrecoverable, because the log is what `run why` and every replay trust.
+//
+// Emitting the denial as an EVENT rather than returning an error is the point of
+// doing this half first. A denial is a domain fact: it happened, it is the
+// correct outcome, and the run should continue knowing it. Returning an error
+// would abort the effect and leave no trace of the decision, so the one case
+// where the policy did its job would look identical to a broken executor.
 func (x *Executor) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event, error) {
-	return nil, fmt.Errorf("tool %q was requested by %s, but this build has no tool runner: "+
-		"a real one needs the resolved per-tool policy (allow/ask/deny), a sandbox for "+
-		"bash and the declared workspace isolation.\n"+
-		"  what works today: arxi run start ... --sim, which fakes tools deliberately",
-		e.Tool, e.Agent)
+	policy := x.policyFor(e.Agent, e.Tool)
+
+	if policy == surface.PolicyAllow {
+		return nil, fmt.Errorf("tool %q is allowed for %s, but this build has no tool "+
+			"runner: running it needs a sandbox for bash and the declared workspace "+
+			"isolation.\n"+
+			"  a faked result would advance the stage on work nobody did.\n"+
+			"  what works today: arxi run start ... --sim, which fakes tools deliberately",
+			e.Tool, e.Agent)
+	}
+
+	// One event, carrying the policy, because the reducer reads that field to
+	// decide whether this is a dead end or a question. Losing it would collapse
+	// "not allowed" and "not yet approved" into one outcome, and those have
+	// different remedies -- one needs a policy change, the other an approval.
+	return []kernel.Event{{
+		ID:     x.id(e.Agent, "tool"),
+		Type:   kernel.ToolCallDenied,
+		Source: kernel.SourceAgent,
+		Actor:  e.Agent,
+		Payload: map[string]any{
+			"tool":   e.Tool,
+			"policy": string(policy),
+		},
+	}}, nil
+}
+
+// policyFor resolves the effective policy for one tool on one member.
+//
+// A member absent from the roster gets deny, not allow. That case means the
+// effect named someone the frozen blueprint does not contain, and the safe
+// reading of "I cannot find out what you are permitted" is "nothing".
+func (x *Executor) policyFor(agent, name string) surface.Policy {
+	for _, m := range x.Members {
+		if m.Name == agent {
+			return tool.Resolve(m.Tools, x.ToolPolicy[agent], name)
+		}
+	}
+	return surface.PolicyDeny
 }
 
 // AskHuman refuses for the same reason, with a sharper consequence.

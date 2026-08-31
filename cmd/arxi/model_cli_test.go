@@ -737,6 +737,28 @@ func TestTheUsageScreenListsWhatIsActuallyImplemented(t *testing.T) {
 			len(listed), listed, help.out)
 	}
 
+	// EVERY line must have produced an entry, and this is the correction that
+	// matters most in this test.
+	//
+	// The parser skips a line it cannot resolve against the registry, and a
+	// skipped line is indistinguishable from a line that passed. That is not
+	// hypothetical: `why`, `surface` and `version` were all implemented,
+	// advertised, and undeclared, so three of eleven lines were skipped and this
+	// guard examined eight of the eleven commands it appeared to examine — while
+	// reporting success.
+	//
+	// Counting lines against entries turns that class of hole from invisible into
+	// a failure, which is the only difference between a guard and a decoration.
+	if n := linesInImplementedBlock(help.out); n != len(listed) {
+		t.Errorf("the IMPLEMENTED TODAY block has %d lines but only %d resolved to a command: %q\n"+
+			"  the unresolved ones were SKIPPED, not checked, so this test was "+
+			"quietly examining less than it claims.\n"+
+			"  a line goes unresolved when its leading words are neither a declared "+
+			"path nor a declared CLIAlias -- so either the screen advertises "+
+			"something undeclared, or something real is missing from the registry.\nscreen:\n%s",
+			n, len(listed), listed, help.out)
+	}
+
 	firstWords := make([]string, 0, len(listed))
 	for _, e := range listed {
 		firstWords = append(firstWords, strings.Fields(e)[0])
@@ -820,6 +842,35 @@ func commandsListedAsImplemented(help string) []string {
 	return out
 }
 
+// linesInImplementedBlock counts the non-blank lines of the IMPLEMENTED TODAY
+// block, so the caller can tell "checked" from "skipped".
+//
+// It shares no code with commandsListedAsImplemented on purpose. The point is a
+// second, dumber opinion about how many commands are on the screen: a counter
+// that reused the same resolution logic would agree with it about exactly the
+// lines it got wrong, which is precisely the agreement that hid three of them.
+func linesInImplementedBlock(help string) int {
+	lines := strings.Split(help, "\n")
+	start := -1
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) == "IMPLEMENTED TODAY" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return 0
+	}
+	n := 0
+	for _, ln := range lines[start:] {
+		if strings.TrimSpace(ln) == "" {
+			break
+		}
+		n++
+	}
+	return n
+}
+
 // isPathWord is a cheap filter so placeholders and prose never reach the
 // registry lookup: real path words are lowercase letters and hyphens.
 func isPathWord(w string) bool {
@@ -835,8 +886,14 @@ func isPathWord(w string) bool {
 }
 
 // isKnownPrefix reports whether p is a declared command or the start of one.
+//
+// LookupCLI, not Lookup, and that one word is the whole reason Cmd.CLIAlias
+// exists. `why` is a real, implemented, advertised invocation that has no Path
+// of its own, so Lookup returned nil, so the `why <file>` line of the usage
+// screen matched nothing and produced no entry. This function reporting false
+// did not fail the guard — it made the guard SKIP a line and pass.
 func isKnownPrefix(p []string) bool {
-	if surface.Lookup(p...) != nil {
+	if surface.LookupCLI(p...) != nil {
 		return true
 	}
 	if len(p) == 1 {

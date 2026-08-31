@@ -76,6 +76,31 @@ type Cmd struct {
 	Idempotent   bool
 	Since        int
 	DeprecatedIn int
+
+	// CLIAlias is a shorter CLI spelling of this same command, as a single
+	// top-level word. `run why` declares "why", so `arxi why` works.
+	//
+	// It is a FIELD on the command rather than its own registry entry because an
+	// alias is not a second capability. Two entries would mean two Since
+	// versions, two descriptions and two tool names for one behaviour, and the
+	// day they disagreed there would be no way to tell which was the promise.
+	//
+	// This exists because an UNDECLARED alias is invisible to every mechanism
+	// that keeps this surface honest, and that was not hypothetical. `why` was
+	// implemented in the dispatcher, advertised on the usage screen, and absent
+	// from this registry. TestTheUsageScreenListsWhatIsActuallyImplemented parses
+	// that screen by asking the registry which leading words it recognises, so
+	// the `why` line matched nothing and was silently SKIPPED: the guard checked
+	// ten of the eleven commands it appeared to check, and reported success.
+	//
+	// A test that quietly examines less than it claims is worse than a missing
+	// test, because it also occupies the space where somebody would have written
+	// a real one.
+	//
+	// The alias is deliberately one word and not a path. A multi-word alias is a
+	// second grammar, and the point is to spell an existing command shorter, not
+	// to invent a parallel vocabulary.
+	CLIAlias string
 }
 
 // Name is the name as a tool: arxi_run_start.
@@ -161,9 +186,16 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("run", "string", "run id"))}},
 	// `run why` is the reason the structured log exists: it answers "why is
 	// nothing happening?" by walking the wait graph.
+	//
+	// It declares the alias `arxi why`, which the dispatcher has accepted since
+	// before this field existed. Declaring it is a correction, not a feature: the
+	// spelling was real, advertised on the usage screen, and unknown to the
+	// registry, which made it invisible to the guard that checks the screen tells
+	// the truth.
 	{Path: []string{"run", "why"}, Desc: "explain why a run is not advancing, and how to unblock it",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "run id"))}},
+		CLIAlias: "why",
+		Params:   []Param{pos(p("run", "string", "run id"))}},
 	{Path: []string{"run", "tree"}, Desc: "view the tree of runs and its spend",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "root run id"))}},
@@ -464,6 +496,27 @@ var Registry = []Cmd{
 	{Path: []string{"serve"}, Desc: "serve the NDJSON protocol over stdio or socket",
 		Kind: CLIOnly, Since: 1,
 		Params: []Param{def(p("listen", "string", "address; empty = stdio"), "")}},
+
+	// `surface` and `version` were implemented, advertised on the usage screen,
+	// and undeclared. They are added here because the line-count assertion in
+	// TestTheUsageScreenListsWhatIsActuallyImplemented found them the moment it
+	// stopped letting unresolved lines pass in silence.
+	//
+	// Worth being precise about the failure, because it is the same one three
+	// times. The guard parsed the screen by asking this registry to recognise the
+	// leading words of each line, and SKIPPED what it could not resolve. Three of
+	// eleven lines resolved to nothing, so three advertised commands were never
+	// probed at all, and the test reported success. I went looking for one missing
+	// declaration (`why`) and the counter found three.
+	//
+	// CLIOnly, not AgentTool: an agent has `schema` for the same information in a
+	// form it can parse, and `version` of the binary it is already running
+	// answers a question it cannot act on.
+	{Path: []string{"surface"}, Desc: "see the whole surface, human readable",
+		Kind: CLIOnly, Idempotent: true, Since: 1,
+		Params: []Param{def(p("flags", "boolean", "print the short-flag assignment instead"), "false")}},
+	{Path: []string{"version"}, Desc: "version of the binary and of the surface",
+		Kind: CLIOnly, Idempotent: true, Since: 1},
 }
 
 // ToolDecl is a tool as an agent or an MCP client sees it.
@@ -621,6 +674,41 @@ func LookupProtocol(msgType string) *Cmd {
 		return nil
 	}
 	return c
+}
+
+// LookupCLI resolves a CLI invocation, accepting a declared alias.
+//
+// The alias is tried ONLY when the path is a single word that Lookup does not
+// already resolve. That order is the load-bearing part: a real command always
+// wins over an alias, so adding an alias can never change the meaning of an
+// invocation that already worked. TestNoCLIAliasCollidesWithATopLevelWord keeps
+// the two sets disjoint so the precedence never has to be exercised, and this
+// order means that even if that test were deleted the failure would be a
+// shadowed alias rather than a hijacked command.
+func LookupCLI(path ...string) *Cmd {
+	if c := Lookup(path...); c != nil {
+		return c
+	}
+	if len(path) != 1 {
+		return nil
+	}
+	for i := range Registry {
+		if Registry[i].CLIAlias != "" && Registry[i].CLIAlias == path[0] {
+			return &Registry[i]
+		}
+	}
+	return nil
+}
+
+// Aliases lists the declared CLI aliases and the command each abbreviates.
+func Aliases() map[string]string {
+	out := map[string]string{}
+	for i := range Registry {
+		if Registry[i].CLIAlias != "" {
+			out[Registry[i].CLIAlias] = Registry[i].CLI()
+		}
+	}
+	return out
 }
 
 // Lookup finds a command by its path.

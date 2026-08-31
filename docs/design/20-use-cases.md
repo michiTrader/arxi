@@ -712,7 +712,7 @@ message type are three **mechanical projections of one registry entry** —
 synonym anywhere would fork the vocabulary and require a hand-maintained mapping
 forever.
 
-Of 47 declared capabilities, **33 are exposed as agent tools**. The 14 that are
+Of 49 declared capabilities, **33 are exposed as agent tools**. The 16 that are
 not are a security boundary, not an oversight:
 
 | not an agent tool | why an agent must not have it |
@@ -723,6 +723,7 @@ not are a security boundary, not an oversight:
 | `inbox approve`, `inbox reject`, `inbox reply` | these are the human's side of the conversation. An agent that could approve its own inbox item turns `ToolPolicy: ask` into `allow` |
 | `run attach` | a blocking stream that burns a turn while waiting (§20.1) |
 | `design`, `serve` | operator surface: an interactive designer and a socket server |
+| `surface`, `version` | operator surface, and redundant besides: `schema` already gives an agent the same capability list in a form it can parse, so exposing the human-readable rendering adds a second answer to one question. `version` describes the binary the agent is already running inside, which is a fact it cannot act on |
 | `trigger run` | the only **transitive** exclusion: it starts whatever every stored trigger's `--then` names, unattended. An agent granted this one verb is granted the union of every action anybody ever scheduled, which no human reading the request can reconstruct |
 
 Note two that *are* tools and might look like they should not be. `agent create`

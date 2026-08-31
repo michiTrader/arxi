@@ -644,3 +644,89 @@ func TestAnEnumeratedParameterHasADefaultOrIsRequired(t *testing.T) {
 			"nothing. Either the registry lost its enums or Param.Enum was renamed")
 	}
 }
+
+// TestEveryCLIAliasResolvesToADeclaredCommand is the cheap half of keeping an
+// alias from becoming a lie.
+//
+// An alias whose command is not reachable by its own path is not a shortcut, it
+// is a dangling pointer with a friendly name.
+func TestEveryCLIAliasResolvesToADeclaredCommand(t *testing.T) {
+	checked := 0
+	for alias, target := range Aliases() {
+		checked++
+
+		if alias == "" {
+			t.Fatalf("an empty alias is declared on %q; an empty string would make "+
+				"LookupCLI answer for the invocation `arxi` with no arguments at all", target)
+		}
+		if len(strings.Fields(alias)) != 1 {
+			t.Errorf("alias %q of %q is not exactly one word\n"+
+				"  an alias is a shorter spelling of an existing command, not a "+
+				"second grammar; the dispatcher only ever tries a single word",
+				alias, target)
+		}
+		if Lookup(strings.Fields(target)...) == nil {
+			t.Errorf("alias %q points at %q, which is not declared\n"+
+				"  consequence: `arxi %s` would resolve to a command the rest of "+
+				"the surface has never heard of, so schema, the protocol and the "+
+				"usage guard would all disagree with the dispatcher",
+				alias, target, alias)
+		}
+		if got := LookupCLI(alias); got == nil || got.CLI() != target {
+			t.Errorf("LookupCLI(%q) did not return %q\n"+
+				"  the declaration and the resolver disagree, which means the "+
+				"registry says one thing and the CLI does another",
+				alias, target)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no CLI aliases were found, so this test proves nothing. Either " +
+			"the registry lost its aliases or Cmd.CLIAlias was renamed")
+	}
+}
+
+// TestNoCLIAliasCollidesWithATopLevelWord is the half that matters.
+//
+// If an alias equals a real first word, one invocation has two meanings and the
+// winner is decided by lookup order — which is exactly the failure the short
+// flag table refused to accept for letters, for the same reason: the script that
+// used it does not fail, it silently does something else.
+//
+// Both directions are checked. An alias must not shadow a declared group
+// (`arxi run`), and it must not shadow one of the dispatcher's own top-level
+// words either, because those are real invocations a registry entry may not
+// cover.
+func TestNoCLIAliasCollidesWithATopLevelWord(t *testing.T) {
+	// Words main() dispatches itself, before any registry lookup happens.
+	dispatcherOwned := []string{"help", "version", "schema", "surface", "serve"}
+
+	seen := map[string]string{}
+	for alias, target := range Aliases() {
+		if prev, dup := seen[alias]; dup {
+			t.Errorf("alias %q is declared by both %q and %q\n"+
+				"  one word cannot abbreviate two commands; the winner would be "+
+				"whichever the registry happens to list first",
+				alias, prev, target)
+		}
+		seen[alias] = target
+
+		if len(SubcommandsOf(alias)) > 0 {
+			t.Errorf("alias %q of %q is also a declared group\n"+
+				"  `arxi %s` would mean two things, and lookup order would pick",
+				alias, target, alias)
+		}
+		if Lookup(alias) != nil {
+			t.Errorf("alias %q of %q is also a declared command on its own\n"+
+				"  the alias is unreachable, so it is dead weight that reads as a promise",
+				alias, target)
+		}
+		for _, w := range dispatcherOwned {
+			if alias == w {
+				t.Errorf("alias %q of %q collides with %q, which main() handles itself\n"+
+					"  the dispatcher's switch runs first, so the alias would never "+
+					"fire and the registry would document a spelling that does nothing",
+					alias, target, w)
+			}
+		}
+	}
+}
