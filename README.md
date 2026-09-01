@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1048 tests, no dependencies**.
+Underneath, every package is done and tested — **1060 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -192,7 +192,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 228 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 240 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -360,22 +360,22 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**26 of 49 declared capabilities are wired — 53.1%.** That figure is measured,
+**27 of 49 declared capabilities are wired — 55.1%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
 counts the ones that do not answer *"is declared in the surface but not
 implemented yet"*. It reads the fraction above out of this file, so the sentence
 you are reading cannot go stale without a test failing. That is not a
-hypothetical: wiring `run list` moved this figure from 24 to 25 and `run show`
-moved it to 26, and both times the number above was corrected because **the
-suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 23 that remain are mostly
+hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
+moved it to 26 and `run why` to 27, and every time the number above was
+corrected because **the suite failed**, not because anybody remembered to check.
+It is deliberately unflattering — the 22 that remain are mostly
 `run *`, `agent *`, `state *` and `event *`, which want a way to read the log
 rather than the executor, the tool runner or the inbox. The implemented
-twenty-six are
+twenty-seven are
 `provider add`, `model list` /
-`enable` / `disable`, `run start`, `run list`, `run show`, `run unpause`, `agent tool policy`,
+`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run unpause`, `agent tool policy`,
 `blueprint validate`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
@@ -406,7 +406,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-53.1% is the CLI surface, and quoting it alone would be misleading in **both**
+55.1% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -414,12 +414,12 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **26 / 49 — 53.1%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **27 / 49 — 55.1%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 1048 tests live. What is missing is almost entirely
+that is where most of the 1060 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
@@ -444,13 +444,13 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 53.1% understates and 100% overstates. Ten of the
-23 unwired capabilities are `run *` verbs — `tree`, `result`, `pause`,
-`cancel`, `fork`, `replay`, `attach`, `prompt`, `steer`, `why` — and each is a
+That shape is also why 55.1% understates and 100% overstates. Nine of the
+22 unwired capabilities are `run *` verbs — `tree`, `result`, `pause`,
+`cancel`, `fork`, `replay`, `attach`, `prompt`, `steer` — and each is a
 **projection of a log that already exists and is already correct**. They are not
-ten features; they are ten readings of one finished mechanism.
+nine features; they are nine readings of one finished mechanism.
 
-`run list` and `run show` were the first two, and building them is the evidence
+`run list`, `run show` and `run why` were the first three, and building them is the evidence
 for that claim rather than a restatement of it: neither needed a new store, an
 index, or a `runs.json`. `inbox.OpenRun` already read the log and folded it without taking
 the writer lock, and the whole command is a caller asking for every run instead
@@ -458,25 +458,48 @@ of one. Had it needed an index, the claim would have been wrong and the right
 response would have been to say so rather than build the index.
 
 What the projections cost instead is *judgement about what the state means*, and
-that is not free. Both commands compiled, read correctly, and were wrong in ways
-only visible by pointing them at a real run that had gone wrong. `run list`
+that is not free. All three commands compiled, read correctly, and were wrong in
+ways only visible by pointing them at a real run that had gone wrong. `run list`
 counted answered questions as pending, so it contradicted `arxi inbox` about the
 same run. `run show` announced "a turn is queued" for members on a run whose
 budget had broken — true of `Member.Runnable()`, false of the run, because the
 reducer parks those causes instead of spawning them — and printed a twentyfold
-overspend as the ordinary-looking fraction `0.02 of 0.001`. A projection is easy
-to build and easy to make say something false; the log being correct does not
-make the reading of it correct.
+overspend as the ordinary-looking fraction `0.02 of 0.001`. `run why` — whose
+declared purpose is "explain why a run is not advancing, **and how to unblock
+it**" — printed a cause tree with an empty remedy list on exactly the runs that
+needed one, because `Explain` built remedies only from members in
+`MemberWaiting` and a run halted by its budget has nobody waiting: the reducer
+parks the causes and every member sits idle. The wait graph was empty while the
+run was still stuck, so the command answered the one question it exists to
+answer with silence. A projection is easy to build and easy to make say
+something false; the log being correct does not make the reading of it correct.
+
+That last one is the sharpest version of the lesson, because the missing half
+was the half named in the declaration. A test on `Explain` had existed since the
+kernel was written and passed throughout — it asserted remedies on a run with a
+member blocked on approval, which is a state where the wait graph *is* populated.
+The defect lived in the states that test never described.
 
 The one number worth committing to, if only one is wanted: **the system can
 reason about a run end to end, can do the work inside one, and can now be
 picked back up after a human has answered it.**
 
 That last clause is new, and earning it is what the section below is about.
-There were three gaps of the worst kind — a remedy this project *prints* and the
+There were four gaps of the worst kind — a remedy this project *prints* and the
 binary *refuses* — and they are now zero: `AskHuman`, then `agent tool policy`,
-then **`run unpause`**. A gap of that kind is discovered by the person already in
-trouble, which is why closing them came before building anything new.
+then `run unpause`, then **`run why`**. A gap of that kind is discovered by the
+person already in trouble, which is why closing them came before building
+anything new.
+
+The fourth is worth its own sentence, because it says something about how these
+are found. `arxi run why <id>` was printed as advice by *three* separate
+commands — including `run show`, added in the step immediately before — and
+following that advice answered `arxi run why is declared in the surface but not
+implemented yet`. Nothing in the suite noticed, because every test that
+mentioned the string printed it rather than ran it. It was found by typing what
+the tool said to type. The guard that now covers it lifts the suggestion out of
+`run show`'s own output and executes it, so the advice and the implementation
+cannot drift apart again.
 
 Both surface numbers moved for an unglamorous reason worth recording: `surface`
 and `version` were always implemented, were always on the first screen, and were

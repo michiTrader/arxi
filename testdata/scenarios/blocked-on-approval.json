@@ -93,6 +93,10 @@
       },
       {
         "depth": 1,
+        "text": "question inbox-1 (tool_approval) waits on you: approve bash for backend? -- asked by backend"
+      },
+      {
+        "depth": 1,
         "text": "budget: 0.4200 of 5.0000 USD spent in the tree"
       }
     ],
