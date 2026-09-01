@@ -78,6 +78,10 @@ func main() {
 			cmdRunUnpause(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "list" {
+			cmdRunList(args[2:])
+			return
+		}
 	case "trigger":
 		cmdTrigger(args[1:])
 		return

@@ -11,7 +11,11 @@ import (
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
-// The README's "24 of 49 declared capabilities are wired" figure, measured.
+// The README's "N of 49 declared capabilities are wired" figure, measured.
+//
+// The figure is deliberately not written into this comment. It moves every
+// time a verb is wired, and a comment stating it would be one more copy to
+// forget -- which is the failure this whole file exists to prevent.
 //
 // # Why this file exists
 //
@@ -220,7 +224,8 @@ func surfaceRegistryPaths() [][]string {
 	return out
 }
 
-// readmeClaimRe finds "24 of 49" or "24 / 49" wherever the README states it.
+// readmeClaimRe finds "<impl> of <total>" or "<impl> / <total>" wherever the
+// README states it.
 var readmeClaimRe = regexp.MustCompile(`(\d+)\s*(?:of|/)\s*(\d+) declared capabilities`)
 
 // readmeCapabilityClaim reads the claim out of README.md.
@@ -234,7 +239,7 @@ func readmeCapabilityClaim(t *testing.T) (impl, total int) {
 	all := readmeClaimRe.FindAllStringSubmatch(readmeText(t), -1)
 	if len(all) == 0 {
 		t.Fatalf("README.md no longer states the capability count in a form this test can read (%q)\n"+
-			"  the claim is expected to read like \"24 of 49 declared capabilities\".\n"+
+			"  the claim is expected to read like \"<impl> of <total> declared capabilities\".\n"+
 			"  consequence: if the sentence was reworded, this guard stops "+
 			"checking it and the figure is unverified again -- silently, which "+
 			"is how it went stale before. Update the pattern with the wording.",
