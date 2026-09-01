@@ -423,6 +423,41 @@ func (s *Store) WriteSnapshot(st kernel.State, atSeq int64) error {
 // delete it and prove the log stands alone.
 func (s *Store) SnapshotPath() string { return filepath.Join(s.dir, snapshotFileName) }
 
+// BatchInFlight reports whether a batch write is in progress in a run directory,
+// or was interrupted by a writer that died.
+//
+// For a reader that does NOT hold the lock and follows the log from outside the
+// package -- `arxi run attach` is the one -- this is the only way to tell durable
+// bytes from provisional ones. The ordering in Append is what makes it usable:
+// the marker is written and fsynced BEFORE the batch and removed only after the
+// batch is fsynced, so observing "no marker" AFTER reading some bytes proves
+// every byte then on disk is past the commit point. Observing the marker means
+// the tail may still be rolled back by the next Open, and a follower that had
+// already printed those lines would have shown an event that ends up never
+// having existed.
+//
+// It takes a directory rather than being a method because the caller is precisely
+// the process that must not open the Store: Open takes the writer lock, and it
+// truncates a rolled-back tail. A viewer is not allowed to do either -- following
+// a live run must not be able to interfere with the run.
+//
+// An unreadable directory answers false, not an error. The consequence of a wrong
+// answer here is bounded on both sides (a spurious true delays a line; a spurious
+// false shows a line early), and a follower that aborted because it could not
+// stat one file would be a worse tool than one that keeps printing events.
+func BatchInFlight(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, pendingFileName))
+	return err == nil
+}
+
+// EventsPath is the log inside a run directory, for readers outside this package
+// that must not Open the Store. Exported for the same reason BatchInFlight is.
+func EventsPath(dir string) string { return filepath.Join(dir, eventsFileName) }
+
+// LockPath is the writer lock inside a run directory. A follower reads it to
+// name the process it is waiting on, and to learn that nothing is appending.
+func LockPath(dir string) string { return filepath.Join(dir, lockFileName) }
+
 func (s *Store) eventsPath() string  { return filepath.Join(s.dir, eventsFileName) }
 func (s *Store) pendingPath() string { return filepath.Join(s.dir, pendingFileName) }
 func (s *Store) lockPath() string    { return filepath.Join(s.dir, lockFileName) }

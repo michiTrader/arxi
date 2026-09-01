@@ -112,6 +112,46 @@ type Event struct {
 	Payload map[string]any `json:"payload,omitempty"`
 }
 
+// MatchEventType reports whether an event type matches a pattern.
+//
+// Exact match, `*` for everything, and a single trailing segment wildcard
+// (`stage.*`). There is no full glob on purpose: a pattern nobody can read at a
+// glance is a pattern that is going to wake agents nobody expected.
+//
+// It is EXPORTED because the reducer is no longer the only thing that matches a
+// type against a pattern. `arxi event log --type stage.*` asks the same question
+// a watcher asks, and a CLI that reimplemented the rule would be a second
+// dialect of it: the day one gained partial globs the other would answer
+// differently about the same log, and the user would have no way to tell which
+// spelling belonged to which. internal/blueprint's validator already refuses the
+// shapes this does not support (load.go:pattern) by describing THIS function's
+// semantics, so there is exactly one rule and three places that agree about it.
+func MatchEventType(pattern, typ string) bool {
+	if pattern == typ || pattern == "*" {
+		return true
+	}
+	if strings_HasSuffix(pattern, ".*") {
+		return strings_HasPrefix(typ, pattern[:len(pattern)-1])
+	}
+	return false
+}
+
+// strings_HasSuffix and strings_HasPrefix are spelled out rather than imported.
+//
+// Not purism, and not a preference: internal/arch_test.go asserts the kernel's
+// import graph, and event.go is the file that already declines to import
+// encoding/json for json_Number for the same reason. Two three-line comparisons
+// are cheaper than widening the graph the architecture test is there to keep
+// narrow -- and decide.go, which does import strings, is where the reducer's own
+// uses live.
+func strings_HasSuffix(s, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+func strings_HasPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
 // Str reads a string from the payload. Returns "" if it is missing or of another
 // type.
 //
