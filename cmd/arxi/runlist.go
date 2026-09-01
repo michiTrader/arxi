@@ -130,7 +130,7 @@ func cmdRunList(args []string) {
 		rows = append(rows, runListRow{
 			id: id, dir: dir, actor: st.Actor, status: st.Status,
 			stage: st.Stage, seq: st.Seq, spent: st.SpentUSD,
-			budget: st.BudgetUSD, turns: st.Turns, asks: len(st.Inbox),
+			budget: st.BudgetUSD, turns: st.Turns, asks: pendingAsks(st),
 		})
 	}
 
@@ -277,6 +277,33 @@ func formatSpend(spent, budget float64) string {
 		return fmt.Sprintf("%.4f/%.4f", spent, budget)
 	}
 	return fmt.Sprintf("%.2f/%.2f", spent, budget)
+}
+
+// pendingAsks counts the questions still waiting on a human.
+//
+// It is not len(st.Inbox), and that difference is a defect this command shipped
+// with. An answered question STAYS in the inbox with Replied set -- the log is
+// append-only and the reducer marks rather than removes, which is correct and
+// is what makes `event trace` able to show that somebody answered. Counting the
+// slice therefore counted history as work outstanding.
+//
+// Found by running the binary, not by reading it: a run whose single approval
+// had been answered printed ASKS=1 while `arxi inbox`, in the same binary,
+// printed "no pending questions". Two commands contradicting each other about
+// the same run is worse than either being wrong alone, because whichever the
+// user happens to trust, the other one teaches them the tool is unreliable.
+//
+// printRunSummary already filters on !Replied; this is the same rule, applied
+// where it was missed. The JSON field was called "pending_asks" all along,
+// which is the intent it was failing to honour.
+func pendingAsks(st kernel.State) int {
+	n := 0
+	for _, it := range st.Inbox {
+		if !it.Replied {
+			n++
+		}
+	}
+	return n
 }
 
 func dashIfEmpty(s string) string {
