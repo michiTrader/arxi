@@ -185,11 +185,27 @@ func (x *Executor) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.
 		"cost_usd":  cost,
 		"coalesced": e.Coalesced,
 		"model":     res.Provider + "/" + res.Model,
-		"in_tokens": in,
 		// The token counts travel into the log next to the dollars they produced.
 		// A cost with no counts cannot be audited: nobody can tell an expensive
 		// model from a long prompt, and those have opposite fixes.
-		"out_tokens": out,
+		//
+		// tokens_in / tokens_out is spec/events.md:111's spelling, and it was NOT
+		// this code's: it wrote in_tokens/out_tokens for the whole life of the live
+		// executor. The divergence was found by reading the catalogue against the
+		// tree, and it had already cost something by then --
+		// cmd/arxi/event_cli_test.go:46 hand-writes an llm.response fixture, and
+		// whoever wrote it took the keys from the spec, so the tree carries a test
+		// log no executor in the tree could have produced. That is the cheap version
+		// of the failure; the expensive one is a cost report written against the
+		// catalogue that finds no counts on any real run and reports zero.
+		//
+		// The alternative was to widen the spec to this spelling, and it was
+		// refused: the catalogue is the contract every reader is written against, so
+		// when one writer disagrees with it, the writer is what moves. Nothing
+		// outside this file's own test read these keys -- measured across the tree,
+		// not assumed -- which is why this is a rename and not a migration.
+		"tokens_in":  in,
+		"tokens_out": out,
 	}
 	if apiErr != nil {
 		// The refusal is recorded as an outcome of the turn, with its status, so

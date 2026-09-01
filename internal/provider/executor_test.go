@@ -142,11 +142,16 @@ func TestTheTurnReportsWhatItCost(t *testing.T) {
 
 	// The counts must travel too: a cost with no counts cannot be audited,
 	// because an expensive model and a long prompt have opposite fixes.
-	if llm.Payload["in_tokens"] != 10_000 && llm.Payload["in_tokens"] != float64(10_000) {
-		t.Errorf("in_tokens = %v, expected 10000", llm.Payload["in_tokens"])
+	//
+	// The keys are the catalogue's (spec/events.md:111). This test asserted
+	// in_tokens/out_tokens until the two were read against each other, which is
+	// the reason a wrong spelling survived: the only reader of these keys was the
+	// test written from the same code it was checking.
+	if llm.Payload["tokens_in"] != 10_000 && llm.Payload["tokens_in"] != float64(10_000) {
+		t.Errorf("tokens_in = %v, expected 10000", llm.Payload["tokens_in"])
 	}
-	if llm.Payload["out_tokens"] != 1_000 && llm.Payload["out_tokens"] != float64(1_000) {
-		t.Errorf("out_tokens = %v, expected 1000", llm.Payload["out_tokens"])
+	if llm.Payload["tokens_out"] != 1_000 && llm.Payload["tokens_out"] != float64(1_000) {
+		t.Errorf("tokens_out = %v, expected 1000", llm.Payload["tokens_out"])
 	}
 }
 
