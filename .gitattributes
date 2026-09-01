@@ -1,0 +1,40 @@
+# Line endings are decided here, not by whoever cloned the repository.
+#
+# Two tests fail on a CRLF checkout and on nothing else, and both are right to:
+#
+#   internal/kernel TestGolden marshals a folded State in-process — which emits
+#   LF — and compares it byte for byte against testdata/scenarios/
+#   blocked-on-approval.json read off the disk. In a CRLF working tree the two
+#   differ on every line, and the diff it prints is a wall of identical-looking
+#   JSON.
+#
+#   internal/blueprint TestDesignDocBlueprintsStillLoad scans
+#   docs/design/20-use-cases.md for "```yaml\n". In a CRLF file the fence is
+#   "```yaml\r\n", so it matches zero blocks and the test reports that the doc
+#   stopped showing blueprints — which is true of the bytes it was handed and
+#   false of the file in the repository.
+#
+# Neither test is going to be loosened. They read committed bytes on purpose; it
+# is the checkout that changed them, and a suite that tolerates a mangled
+# checkout stops being able to tell you the checkout is mangled.
+#
+# eol=lf, not text=auto on its own: text=auto normalizes what goes into the
+# index and then hands the working tree back to core.autocrlf, which is exactly
+# the setting that differs between machines (it is true in this one). Naming the
+# ending here is what makes the tree the same everywhere.
+#
+# Safe as a blanket rule because every tracked file in this repository is text —
+# Go, Markdown, YAML, one shell script, go.mod, one JSON fixture, .gitignore —
+# with no binary among them to corrupt. No Go code in the tree reads a CR, and
+# scripts/bootstrap.sh would break under CRLF anyway.
+#
+# This does not repair a checkout that already exists: git normalizes on the way
+# in, not retroactively, so a tree cloned before this file keeps its CRLF and
+# keeps failing those two tests. Once, per clone, with nothing uncommitted —
+# the last command discards uncommitted work:
+#
+#     git add --renormalize .
+#     git status                                  # expect no diff; the index was already LF
+#     git rm --cached -r . && git reset --hard    # rewrites the working tree
+#
+* text=auto eol=lf
