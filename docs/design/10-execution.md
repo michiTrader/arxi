@@ -226,7 +226,7 @@ same time**. The two are different facts:
 
 | Situation | Event written | Error returned |
 |---|---|---|
-| Tool ran, exited non-zero | `tool.call_completed` `ok=false` | no |
+| Tool ran, exited non-zero | `tool.call_completed`, the exit status in `result` | no |
 | Provider refused the prompt | `agent.failed` | no |
 | Connection reset before the call landed | none | yes |
 | Context cancelled | none | yes |
@@ -234,6 +234,14 @@ same time**. The two are different facts:
 A domain failure **happened**, so it belongs in the log. A transport failure
 means nothing can be said about what happened, and the log is the one place that
 may not contain guesses.
+
+The first row carries no `ok` flag, and that is deliberate rather than an
+omission: `tool.call_completed`'s payload is `{tool, result?}` and a non-zero exit
+is an **answer**, not an error — "the tests fail" is precisely what the agent
+asked to find out, so it travels as text the next turn reads. A bool could not
+carry it anyway. `bash` has three outcomes, not two, and the third is a timeout,
+where nothing was learned about whether the command would have succeeded; every
+tool without an exit code would report success unconditionally.
 
 **A control failure aborts the step before anything is spent.** If an `Emit`
 cannot be written, the independent tail never runs. The tail was decided under

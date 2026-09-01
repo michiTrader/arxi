@@ -423,19 +423,28 @@ func attachEventDetail(e kernel.Event) string {
 		return attachJoin(e.Str("tool"), e.Str("args"))
 
 	case kernel.ToolCallCompleted:
-		// A failed call must not render as a bare tool name, because that is
-		// exactly what a successful one renders as. Both spellings are read
-		// because the two executors in the tree disagree, and this is not the
-		// command that gets to settle it: the catalogue and the LIVE executor say
-		// `result` (spec/events.md:108, internal/provider/executor.go:352), and the
-		// simulated one writes `ok` with `output` or `error`
-		// (internal/exec/fake.go:387). Reading one spelling would render half the
-		// logs in this tree as a bare tool name -- and the half it broke would be
-		// whichever executor the reader was not using.
-		if ok, present := e.Payload["ok"].(bool); present && !ok {
-			return attachJoin(e.Str("tool"), "failed:", e.Str("error"))
-		}
-		return attachJoin(e.Str("tool"), e.Str("result"), e.Str("output"))
+		// One key, because there is finally one spelling. This case read BOTH
+		// `result` and `ok`/`output`/`error` and said so in a comment -- "the two
+		// executors in the tree disagree, and this is not the command that gets to
+		// settle it" -- because the catalogue and the live executor said `result`
+		// (spec/events.md:109, internal/provider/executor.go:369) while the
+		// simulated one wrote `ok` with `output` or `error`. The fake now writes the
+		// catalogue's payload too (internal/exec/fake.go:428), so the branch that
+		// existed to cover the disagreement has nothing left to cover, and keeping
+		// it would leave the tree claiming a divergence it no longer has.
+		//
+		// A failed call must not render as a bare tool name, since that is exactly
+		// what a successful one renders as -- and that is now the WRITER's job, not
+		// this renderer's: the live path carries bash's own "exit 1 (failure)" line
+		// in the result, and the fake prefixes "failed:". Both arrive here as text
+		// that says what happened, which is the only shape this row can show.
+		//
+		// A sim log written before that correction keeps its `ok`/`output` and loses
+		// only this one summary line. Nothing on disk becomes unreadable: `event
+		// log` prints every key of every payload, `run replay` folds it identically
+		// because the reducer reads no key here, and this command follows a run from
+		// now on -- so the log it renders is the one the current binary is writing.
+		return attachJoin(e.Str("tool"), e.Str("result"))
 
 	case kernel.ToolCallDenied:
 		// A denial with `policy: ask` is not an error, it is a question
