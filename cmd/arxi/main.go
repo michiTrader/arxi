@@ -1,7 +1,8 @@
 // Command arxi is the binary.
 //
 // Today it implements schema, surface, why, blueprint validate, run start
-// (live, calling real models, or --sim), serve, the trigger group, the eval
+// (live, calling real models, or --sim), run list, run show, run why,
+// run unpause, serve, the trigger group, the eval
 // group (--sim only), provider add and the
 // model group; for everything else it answers "declared but not implemented"
 // with the exact name of the capability. That is on purpose: the surface is
@@ -9,15 +10,18 @@
 // command is implementing something that was already promised, not inventing a
 // new promise.
 //
-// The measured figure, rather than this list, is the one to trust: 16 of 47
-// declared capabilities are wired. See the README, where a probe that walks the
-// registry against the built binary produces it.
+// The measured figure, rather than this list, is the one to trust. See the
+// README, where a probe that walks the registry against the built binary
+// produces it -- and where a test fails if the number written down disagrees
+// with the binary. No count is repeated here on purpose: this comment has no
+// such test, so a figure in it can only rot.
 //
-// This paragraph has already been wrong twice. It claimed three commands after
-// six existed, and it said `run start` was --sim only after the live executor
-// had landed. A doc comment that overstates what is missing is the kind of stale
-// documentation that costs a reader nothing and a contributor everything: they
-// reimplement what is already in the tree.
+// This paragraph has already been wrong three times. It claimed three commands
+// after six existed, it said `run start` was --sim only after the live executor
+// had landed, and it carried "16 of 47" through six wirings and two registry
+// corrections. A doc comment that overstates what is missing is the kind of
+// stale documentation that costs a reader nothing and a contributor everything:
+// they reimplement what is already in the tree.
 //
 // Note that the measured figure did NOT move when the executor landed, because
 // `run start` already counted as wired when only --sim worked. The number and
@@ -84,6 +88,10 @@ func main() {
 		}
 		if len(args) > 1 && args[1] == "show" {
 			cmdRunShow(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "why" {
+			cmdRunWhy(args[2:])
 			return
 		}
 	case "trigger":
@@ -330,55 +338,27 @@ func cmdWhy(args []string) {
 		}
 	}
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "usage: arxi why <file.json> [--json]\n\n"+
-			"The file can be {\"state\":..., \"config\":...} or a bare State.\n"+
+		fmt.Fprintln(os.Stderr, "usage: arxi why <run|file.json> [--json]\n\n"+
+			"A run id, or a file holding {\"state\":..., \"config\":...} or a bare State.\n"+
 			"short: -J json\n"+
 			"Try: testdata/scenarios/blocked-on-approval.json")
 		os.Exit(2)
 	}
-	raw, err := os.ReadFile(path)
+
+	// A run id is accepted here too, and this is a fix rather than a feature.
+	// Every message in this binary that mentions why prints a RUN ID after it,
+	// so the argument a user arrives with is far more often an id than a path.
+	// This spelling used to answer "open <id>: no such file or directory",
+	// which describes somebody's stuck run as a missing file and sends them
+	// looking for one. whySubject tries the run first and reports both
+	// readings when neither works.
+	st, cfg, err := whySubject(path)
 	if err != nil {
-		fatal(err)
+		fmt.Fprintf(os.Stderr, "arxi why: %v\n", err)
+		os.Exit(1)
 	}
 
-	var wrap struct {
-		State  *kernel.State  `json:"state"`
-		Config *kernel.Config `json:"config"`
-	}
-	var st kernel.State
-	var cfg kernel.Config
-	if err := json.Unmarshal(raw, &wrap); err == nil && wrap.State != nil {
-		st = *wrap.State
-		if wrap.Config != nil {
-			cfg = *wrap.Config
-		}
-	} else if err := json.Unmarshal(raw, &st); err != nil {
-		fatal(err)
-	}
-
-	w := kernel.Explain(st, cfg)
-	if asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(w); err != nil {
-			fatal(err)
-		}
-		return
-	}
-
-	for _, l := range w.Lines {
-		if l.Depth == 0 {
-			fmt.Println(l.Text)
-			continue
-		}
-		fmt.Printf("%s└─ %s\n", strings.Repeat("   ", l.Depth-1), l.Text)
-	}
-	if len(w.Fix) > 0 {
-		fmt.Println("\npossible remedies:")
-		for _, f := range w.Fix {
-			fmt.Printf("  $ %s\n", f)
-		}
-	}
+	emitWhy(kernel.Explain(st, cfg), asJSON)
 }
 
 // onExit holds work that must happen before the process dies.
