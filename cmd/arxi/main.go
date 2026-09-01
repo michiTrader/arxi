@@ -82,6 +82,10 @@ func main() {
 			cmdRunList(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "show" {
+			cmdRunShow(args[2:])
+			return
+		}
 	case "trigger":
 		cmdTrigger(args[1:])
 		return
