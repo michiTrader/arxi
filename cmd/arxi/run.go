@@ -541,9 +541,16 @@ func parseStartFlags(args []string) (startFlags, error) {
 			}
 			f.dir = v
 		case "--attach":
-			// Accepted and ignored: with a virtual clock the run finishes before
-			// anything could be followed. Rejecting it would be worse, since the
-			// surface declares it and a declared flag that errors reads like a bug.
+			// Accepted and ignored, still. `arxi run attach` is built now, so the
+			// following it promises does exist -- but it is a separate process
+			// watching from another terminal, and this flag would have to become
+			// that follower inside the run's own writer lock to mean anything.
+			//
+			// Rejecting it would be worse, since the surface declares it and a
+			// declared flag that errors reads like a bug. Silently doing nothing is
+			// honest here in a way it usually is not: the events the flag would show
+			// are all in the log, and `arxi run attach <run>` from a second terminal
+			// shows them arriving.
 		default:
 			if strings.HasPrefix(a, "-") {
 				return f, fmt.Errorf("unknown flag %s", a)

@@ -137,8 +137,8 @@ func isBool(c *surface.Cmd, name string) bool {
 // unknownShort explains a letter this command does not have.
 //
 // The interesting case is a letter that IS a short flag, just not here: -r is
-// `run` on thirteen commands, so a user who learned it there will try it on the
-// fourteenth. "unknown flag -r" sends them looking for a typo; naming what the
+// `run` on fourteen commands, so a user who learned it there will try it on the
+// fifteenth. "unknown flag -r" sends them looking for a typo; naming what the
 // letter means elsewhere tells them the truth, which is that this command has no
 // such parameter.
 func unknownShort(c *surface.Cmd, letter string) error {

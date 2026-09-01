@@ -1,9 +1,11 @@
 // Command arxi is the binary.
 //
 // Today it implements schema, surface, why, blueprint validate, run start
-// (live, calling real models, or --sim), run list, run show, run why,
-// run unpause, serve, the trigger group, the eval
-// group (--sim only), provider add and the
+// (live, calling real models, or --sim), run list, run show, run why, run tree,
+// run prompt, run result, run pause, run unpause, run cancel, run fork,
+// run replay, run attach, event emit, event log, serve,
+// the trigger group, the inbox group, agent tool policy, the
+// eval group (--sim only), provider add and the
 // model group; for everything else it answers "declared but not implemented"
 // with the exact name of the capability. That is on purpose: the surface is
 // frozen and verified by tests BEFORE the executor exists, so adding a new
@@ -16,12 +18,18 @@
 // with the binary. No count is repeated here on purpose: this comment has no
 // such test, so a figure in it can only rot.
 //
-// This paragraph has already been wrong three times. It claimed three commands
+// This paragraph has already been wrong five times. It claimed three commands
 // after six existed, it said `run start` was --sim only after the live executor
-// had landed, and it carried "16 of 47" through six wirings and two registry
-// corrections. A doc comment that overstates what is missing is the kind of
-// stale documentation that costs a reader nothing and a contributor everything:
-// they reimplement what is already in the tree.
+// had landed, it carried "16 of 47" through six wirings and two registry
+// corrections, it omitted `run prompt` for that verb's entire life -- found
+// only when `run tree` was added to the same sentence -- and it was silently
+// missing `event emit`, the whole inbox group and `agent tool policy` until
+// `run replay` landed and the coverage guard's own list of wired paths was read
+// against it. That last one is the tell: the only reason those three were found
+// is that a DIFFERENT, tested figure printed the truth beside them. A doc comment
+// that overstates what is missing is the kind of stale documentation that costs a
+// reader nothing and a contributor everything: they reimplement what is already
+// in the tree.
 //
 // Note that the measured figure did NOT move when the executor landed, because
 // `run start` already counted as wired when only --sim worked. The number and
@@ -82,6 +90,10 @@ func main() {
 			cmdRunUnpause(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "pause" {
+			cmdRunPause(args[2:])
+			return
+		}
 		if len(args) > 1 && args[1] == "list" {
 			cmdRunList(args[2:])
 			return
@@ -94,12 +106,39 @@ func main() {
 			cmdRunWhy(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "tree" {
+			cmdRunTree(args[2:])
+			return
+		}
 		if len(args) > 1 && args[1] == "prompt" {
 			cmdRunPrompt(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "result" {
+			cmdRunResult(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "cancel" {
+			cmdRunCancel(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "fork" {
+			cmdRunFork(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "replay" {
+			cmdRunReplay(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "attach" {
+			cmdRunAttach(args[2:])
+			return
+		}
 	case "trigger":
 		cmdTrigger(args[1:])
+		return
+	case "event":
+		cmdEvent(args[1:])
 		return
 	case "eval":
 		cmdEval(args[1:])
@@ -236,7 +275,14 @@ IMPLEMENTED TODAY
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
   run start <bp> <prompt>    run a blueprint, calling real models (or --sim)
+  run result <run>           the recorded result, and an exit code to gate on
+  run pause <run>            stop opening turns; a turn already open finishes
   run unpause <run>          pick a run back up (--budget raises the ceiling)
+  run cancel <run>           end a run for good (--reason lands in the log)
+  run fork <run>             branch a run into a new one at --at-seq
+  run replay <run>           fold the log again, no executor, at --until-seq
+  run attach <run>           follow a live run: the events from now on
+  event log <run>            the log itself: what every other verb reads
   inbox                      questions an agent cannot continue without
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them

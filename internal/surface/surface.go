@@ -219,10 +219,38 @@ var Registry = []Cmd{
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id")),
 			p("reason", "string", "reason, stays in the log")}},
+	// `budget` and `blueprint` were ADDED when this verb was wired, and both were
+	// missing for the same reason the `run` positional was missing from `event
+	// emit`: the entry was written from the reducer's side, where a fork is just a
+	// prefix of a log, and the two things a human forks in order to CHANGE were
+	// never parameters at all.
+	//
+	// docs/design/20-use-cases.md:541 shows the command this registry could not
+	// express:
+	//
+	//	$ arxi run fork r1 --at-seq 44 --budget 8.00
+	//	run r4 forked from r1 at seq 44 (blueprint: ./team.yaml, re-read)
+	//
+	// So --budget was in the documentation and not in the surface, which makes the
+	// documented invocation an error. It has to be a parameter and not a copy of
+	// the parent's ceiling, because §20.9's premise is that the fork is where you
+	// change your mind, and the most common thing to change about a run that ran
+	// out of money is how much it may spend.
+	//
+	// --blueprint is the "re-read" in that output line, and it is unimplementable
+	// without a parameter: run.started records the blueprint's NAME and SHA and
+	// never its path (cmd/arxi/run.go:227), so nothing in the parent's log can
+	// tell this command which file to read again. Absent, the frozen snapshot is
+	// copied verbatim -- which is the honest default, since a fork with a
+	// different config than the events it inherits is a log that folds against
+	// rules its own history never saw.
 	{Path: []string{"run", "fork"}, Desc: "fork a run from a seq",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id")),
-			p("at-seq", "number", "seq to fork from")}},
+			p("at-seq", "number", "seq to fork from"),
+			p("budget", "number", "spend ceiling for the fork"),
+			p("blueprint", "string", "blueprint to re-read; absent copies the frozen snapshot"),
+			p("run-id", "string", "id for the fork")}},
 	{Path: []string{"run", "replay"}, Desc: "replay a run from its log, without executing effects",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id")),
@@ -300,9 +328,25 @@ var Registry = []Cmd{
 			p("ttl", "string", "lock expiry")}},
 
 	// ---- events ------------------------------------------------------------
+	// The `run` positional was ADDED when this verb was wired, and the omission is
+	// worth recording because it was not an oversight in the usual sense.
+	//
+	// This entry was declared from the agent's point of view, where the run is
+	// AMBIENT: a tool call arrives inside a turn, and the turn already knows which
+	// run it belongs to. Read that way, a `run` parameter is noise. But the same
+	// declaration is projected to the CLI, and a shell has no ambient run --
+	// resolveRunDir has no "the latest one" default, deliberately, because guessing
+	// which run a write lands in is the one guess an append-only log cannot take
+	// back. So `arxi event emit custom.x` had no run to write to at all.
+	//
+	// Positional and FIRST, matching the thirteen other run-taking commands --
+	// fourteen counting this one, which is what `-r` now reaches. A parameter
+	// that is positional on thirteen commands and a flag on the fourteenth is
+	// the per-command dialect shortFlags exists to prevent.
 	{Path: []string{"event", "emit"}, Desc: "emit a custom.* event",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
-		Params: []Param{pos(p("type", "string", "type; agents can only use custom.*")),
+		Params: []Param{pos(p("run", "string", "run id")),
+			pos(p("type", "string", "type; agents can only use custom.*")),
 			p("payload", "string", "JSON payload")}},
 	{Path: []string{"event", "log"}, Desc: "view the event log of a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
@@ -822,9 +866,9 @@ func SubcommandsUnder(prefix ...string) []string {
 // a second thing to memorize.
 var shortFlags = map[string]string{
 	// The ones that appear over and over across the surface.
-	"run":    "r", // 13 commands
+	"run":    "r", // 14 commands
 	"name":   "n", // 8
-	"budget": "b", // 4
+	"budget": "b", // 5
 	"key":    "k", // 3
 	"text":   "t", // 3
 	"model":  "m", // 3
@@ -852,7 +896,7 @@ var shortFlags = map[string]string{
 // -p (prompt), -f (path) and -r (run) abbreviate parameters declared with pos(),
 // whose identity is arguably their position. The first attempt therefore refused
 // short flags for positionals — and that deleted exactly the useful cases: -r
-// reaches thirteen commands, and -p and -f are the two a person types most.
+// reaches fourteen commands, and -p and -f are the two a person types most.
 //
 // So the rule is the other way round: a declared parameter is ALWAYS reachable
 // by name, and the position is a convenience layered on top. `--actor` is not a

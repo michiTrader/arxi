@@ -125,7 +125,7 @@ func cmdRunPrompt(args []string) {
 		fmt.Fprintf(os.Stderr, "arxi run prompt: run %s is %s, which is final.\n"+
 			"  a finished run cannot take a new cause: its result is already "+
 			"recorded, and work after that point would contradict it.\n"+
-			"  to continue from here: arxi run fork %s --from-seq %d\n",
+			"  to continue from here: arxi run fork %s --at-seq %d\n",
 			pre.RunID, pre.Status, pre.RunID, pre.Seq)
 		os.Exit(1)
 	}
@@ -235,7 +235,14 @@ func cmdRunPrompt(args []string) {
 				"happened since you looked.\n"+
 				"  nothing was written. read what changed and decide again:\n"+
 				"    arxi run show %s\n"+
-				"    arxi event log %s --from-seq %d\n",
+				// --since-seq, not --from-seq: the registry declares since-seq
+				// on `event log`, and the flag is INCLUSIVE (event.go:208 keeps
+				// e.Seq >= sinceSeq), so Expected+1 is the first event the
+				// caller has not seen. Printing a flag the recommended command
+				// refuses is the same defect as the `run fork --from-seq` hints,
+				// and it is worse here because it appears in a message whose
+				// whole purpose is to tell somebody how to catch up.
+				"    arxi event log %s --since-seq %d\n",
 				cas.Expected, pre.RunID, cas.Actual, cas.Actual-cas.Expected,
 				pre.RunID, pre.RunID, cas.Expected+1)
 
