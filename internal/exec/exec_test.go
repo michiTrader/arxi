@@ -567,9 +567,10 @@ func TestDomainFailureBecomesAnEventAndTransportFailureDoesNot(t *testing.T) {
 	if len(res.Events) != 1 || len(res.Errs) != 0 {
 		t.Fatalf("a DOMAIN failure produced %d events and %d errors, want 1 and 0. "+
 			"A tool that ran and refused is something that HAPPENED, so it belongs "+
-			"in the log as tool.call_completed with ok=false; reporting it only as "+
-			"a Go error erases it from history and `run why` can no longer explain "+
-			"why the agent stopped.", len(res.Events), len(res.Errs))
+			"in the log as tool.call_completed carrying the trouble in its result; "+
+			"reporting it only as a Go error erases it from history and `run why` "+
+			"can no longer explain why the agent stopped.",
+			len(res.Events), len(res.Errs))
 	}
 
 	r2, _, _, _ := newRunner()
@@ -586,6 +587,58 @@ func TestDomainFailureBecomesAnEventAndTransportFailureDoesNot(t *testing.T) {
 			"happened, so writing an event would put a guess into the log, and "+
 			"the log is the one place that may not contain guesses.",
 			len(res2.Events), len(res2.Errs))
+	}
+}
+
+// TestASimulatedToolCallWritesTheCatalogueSPayload pins the one thing this fake
+// got wrong for its whole life: the keys.
+//
+// It wrote `ok` with `output` or `error`, while the catalogue (spec/events.md:109)
+// and the live executor wrote {tool, result?}. Nothing ever failed over it,
+// because the reducer reads no payload key on this event -- so the only reader
+// that noticed was `run attach`, which carried a branch per executor to cover the
+// disagreement. A divergence that costs nothing at the time is the kind that
+// survives, which is why the spelling is asserted here rather than left for the
+// next reader to rediscover. The live half is pinned in internal/provider by
+// TestAnAllowedToolRunsAndReportsWhatHappened, on the same two keys.
+func TestASimulatedToolCallWritesTheCatalogueSPayload(t *testing.T) {
+	r, _, fake, _ := newRunner()
+	fake.ToolResults["read"] = "exit 0 (success)\n\nok\n"
+	fake.FailTools["build"] = "exit status 1"
+
+	res, err := r.Run(context.Background(), []kernel.Effect{
+		kernel.CallTool{Agent: "a", Tool: "read"},
+		kernel.CallTool{Agent: "a", Tool: "build"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected step error: %v", err)
+	}
+	if len(res.Events) != 2 {
+		t.Fatalf("got %d events, want 2 (one per call)", len(res.Events))
+	}
+
+	want := map[string]string{
+		"read":  "exit 0 (success)\n\nok\n",
+		"build": "failed: exit status 1",
+	}
+	for _, e := range res.Events {
+		tool, _ := e.Payload["tool"].(string)
+		if _, known := want[tool]; !known {
+			t.Fatalf("an event names tool %q: the payload must carry `tool`, which is "+
+				"what matches a completed call to the call it answers", tool)
+		}
+		if got := e.Payload["result"]; got != want[tool] {
+			t.Errorf("%s: result = %q, want %q\n"+
+				"  a failed call must not be indistinguishable from a successful one "+
+				"in the only key a reader has", tool, got, want[tool])
+		}
+		for _, dead := range []string{"ok", "output", "error"} {
+			if v, present := e.Payload[dead]; present {
+				t.Errorf("%s: the payload still carries %s=%v. The catalogue declares "+
+					"{tool, result?}, and a key no reader is written against is a key "+
+					"that silently stops being read", tool, dead, v)
+			}
+		}
 	}
 }
 

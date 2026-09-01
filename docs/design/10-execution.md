@@ -226,14 +226,40 @@ same time**. The two are different facts:
 
 | Situation | Event written | Error returned |
 |---|---|---|
-| Tool ran, exited non-zero | `tool.call_completed` `ok=false` | no |
-| Provider refused the prompt | `agent.failed` | no |
+| Tool ran, exited non-zero | `tool.call_completed`, the exit status in `result` | no |
+| Provider refused the prompt | `llm.response` with `ok: false`, then `agent.turn_done` | no |
 | Connection reset before the call landed | none | yes |
 | Context cancelled | none | yes |
 
 A domain failure **happened**, so it belongs in the log. A transport failure
 means nothing can be said about what happened, and the log is the one place that
 may not contain guesses.
+
+The first row carries no `ok` flag, and that is deliberate rather than an
+omission: `tool.call_completed`'s payload is `{tool, result?}` and a non-zero exit
+is an **answer**, not an error — "the tests fail" is precisely what the agent
+asked to find out, so it travels as text the next turn reads. A bool could not
+carry it anyway. `bash` has three outcomes, not two, and the third is a timeout,
+where nothing was learned about whether the command would have succeeded; every
+tool without an exit code would report success unconditionally.
+
+The second row said `agent.failed` until it was read against the code. What a
+refusal actually writes is `llm.response` carrying `ok: false`, `error`, `status`
+and `retryable`, followed by `agent.turn_done`
+(`internal/provider/executor.go:210`). The `turn_done` is not optional: the turn
+is over either way, and a member left `thinking` after a refusal is a run that
+goes silent with no diagnosis — §10.4's failure mode arrived at by a bug instead
+of by a blueprint. The status travels separately from the message because `run
+why` has to tell a rate limit from a bad key, and only one of those is worth
+retrying.
+
+`agent.failed` is declared (`internal/kernel/event.go:38`), reduced to
+`MemberFailed` (`internal/kernel/decide.go:87`) and catalogued
+(`spec/events.md:76`) — and nothing in the tree emits it. The arm stays: a member
+permanently out of a run is a real state, and an executor that can distinguish
+"this agent is finished" from "this turn failed" will need it. But the gap is
+recorded here because it is invisible in the worst direction — a watcher on
+`agent.failed` loads, validates, and never fires.
 
 **A control failure aborts the step before anything is spent.** If an `Emit`
 cannot be written, the independent tail never runs. The tail was decided under

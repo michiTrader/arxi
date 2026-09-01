@@ -36,14 +36,14 @@ type Fake struct {
 	// nobody exercises until a real run hits them.
 	TurnCostUSD float64
 
-	// ToolResults maps tool name to the output to return. A tool with no entry
-	// still succeeds with empty output, because the common case in a test is
+	// ToolResults maps tool name to the result to return. A tool with no entry
+	// still succeeds with an empty result, because the common case in a test is
 	// caring that the call happened, not what it printed.
 	ToolResults map[string]string
 
 	// FailTools maps tool name to a DOMAIN failure. The result is an event of
-	// type tool.call_completed with ok=false, not a Go error: the tool ran and
-	// refused, and that is a fact the log must keep.
+	// type tool.call_completed carrying the failure as its `result`, not a Go
+	// error: the tool ran and refused, and that is a fact the log must keep.
 	FailTools map[string]string
 
 	// BreakTools maps tool name to a TRANSPORT failure, returned as a Go error
@@ -376,6 +376,28 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 		}}, nil
 	}
 
+	// Both outcomes below write the catalogue's payload -- {tool, result?}, per
+	// spec/events.md:109 -- which is also what the live executor writes. This fake
+	// wrote `ok` with `output` or `error` instead, for its whole life, and the two
+	// spellings were only ever reconciled by the one renderer downstream:
+	// cmd/arxi/attach.go read both and said in a comment that it was not the
+	// command that got to settle it. This is where it gets settled.
+	//
+	// A bool cannot say what the live path has to say, which is why the catalogue
+	// has no `ok` to conform to. `bash` has three outcomes and the middle one is
+	// not a failure of the tool at all: internal/toolrun's formatBash writes
+	// "exit 1 (failure)" INTO the result text, because a test suite that fails is
+	// precisely the answer the agent asked for, and a timeout writes "nothing was
+	// learned about whether it would have succeeded", which is neither true nor
+	// false. Every tool without an exit code -- all of them but `bash` -- would
+	// carry ok=true unconditionally, so a reader that branched on the field learned
+	// nothing from it.
+	//
+	// Correcting it was safe for a reason worth writing down: the reducer never
+	// read it. decide.go's ToolCallCompleted arm looks at the actor and moves the
+	// member from tool back to thinking, and touches no payload key. So `ok=false`
+	// never once changed a decision in this tree -- it changed one line of `run
+	// attach` output, and that line is preserved below.
 	if reason, ok := f.FailTools[e.Tool]; ok {
 		return []kernel.Event{{
 			ID:     f.id(e.Agent, "tool-"+e.Tool),
@@ -384,7 +406,14 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 			Actor:  e.Agent,
 			Payload: map[string]any{
 				"agent": e.Agent, "tool": e.Tool,
-				"ok": false, "error": reason, "simulated": true,
+				// The prefix is the fake standing in for a runner it does not have.
+				// A failed call must not render as a bare tool name, which is what a
+				// successful one renders as; the live path gets that from bash's own
+				// "exit 1 (failure)" line, and this has to say it itself. It renders
+				// as `<tool> failed: <reason>`, character for character what the
+				// ok=false spelling rendered as -- the check that this commit moved
+				// the payload and not what the simulation shows.
+				"result": "failed: " + reason, "simulated": true,
 			},
 		}}, nil
 	}
@@ -396,7 +425,7 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 		Actor:  e.Agent,
 		Payload: map[string]any{
 			"agent": e.Agent, "tool": e.Tool,
-			"ok": true, "output": f.ToolResults[e.Tool], "simulated": true,
+			"result": f.ToolResults[e.Tool], "simulated": true,
 		},
 	}}, nil
 }
