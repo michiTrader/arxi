@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1028 tests, no dependencies**.
+Underneath, every package is done and tested — **1030 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -192,7 +192,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 208 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 210 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -361,9 +361,12 @@ implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
 **24 of 49 declared capabilities are wired — 49.0%.** That figure is measured,
-not estimated: a probe walks `surface.Registry`, invokes every declared path
-against the built binary, and counts the ones that do not answer *"declared but
-not implemented"*. It is the honest denominator, and it is deliberately
+not estimated, and as of this step it is measured *by the suite* rather than by
+hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
+`surface.Registry`, invokes every declared path against the built binary, and
+counts the ones that do not answer *"is declared in the surface but not
+implemented yet"*. It reads the fraction above out of this file, so the sentence
+you are reading cannot go stale without a test failing. It is deliberately
 unflattering — the 25 that remain are mostly `run *`, `agent *`, `state *` and
 `event *`, which now want a way to read the log rather than the executor, the
 tool runner or the inbox. The implemented twenty-four are
@@ -373,13 +376,29 @@ tool runner or the inbox. The implemented twenty-four are
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
 
-That probe is worth *running* rather than trusting, and a botched run of it is
-the reason for saying so: an early attempt this step reported **22 / 47**,
-because the shell loop it ran in let `serve` read the paths list off stdin and
-swallow two lines. A measurement that quietly loses part of its own denominator
-still looks like a result. The fixed probe redirects stdin per invocation and
-reports the total it actually walked, so a repeat of that failure is visible in
-the output instead of hidden in it.
+That probe is worth *running* rather than trusting, and two botched runs of it
+are the reason it is now a test instead of a shell loop.
+
+The first reported **22 / 47**, because the loop let `serve` read the paths list
+off stdin and swallow two lines. A measurement that quietly loses part of its
+own denominator still looks like a result, so the test asserts the number of
+paths it walked against `len(surface.Registry)` and closes stdin on every
+invocation.
+
+The second was worse, and it was caused by this document. The paragraph above
+used to describe the probe as counting paths that do not answer *"declared but
+not implemented"* — a paraphrase. The binary says *"is declared in the surface
+but not implemented yet"*. Rebuilding the probe from the README's wording, which
+is exactly what checking the claim from the outside looks like, produces a
+pattern that matches nothing at all: all 49 paths fall into the "implemented"
+bucket and the probe reports **49 / 49 — 100.0%**. It was caught only because 25
+unwired commands do not appear in an afternoon.
+
+The lesson generalises past this one number. **A verification tool that cannot
+fail reports total success**, and it reports it in the flattering direction. So
+the test does not merely count — it first probes a path known to be unwired and
+*requires* the sentinel to appear. If that phrase ever stops matching the
+binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
@@ -391,12 +410,12 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **24 / 49 — 49.0%** | every declared path probed against the built binary |
+| the CLI surface | **24 / 49 — 49.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 1028 tests live. What is missing is almost entirely
+that is where most of the 1030 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
