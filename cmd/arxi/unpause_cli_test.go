@@ -93,6 +93,68 @@ func lastEvent(t *testing.T, dir, run string) map[string]any {
 	return ev
 }
 
+// eventOfType returns the last event of one type in a run's log.
+//
+// It exists because lastEvent stopped being the right question once a resume
+// DRIVES the run: the event a test wants to inspect is no longer at the tip,
+// because executing it appended everything it caused. A test that keeps reading
+// the tip is then asserting against run.result and reporting the wrong failure
+// -- "last event is run.result, want run.unpaused" says nothing about the field
+// the test was actually checking.
+//
+// The last of its type rather than the first, so a test that resumes twice sees
+// the resume it just performed.
+func eventOfType(t *testing.T, dir, run, typ string) map[string]any {
+	t.Helper()
+
+	var found map[string]any
+	for _, ev := range allEvents(t, dir, run) {
+		if ev["type"] == typ {
+			found = ev
+		}
+	}
+	if found == nil {
+		t.Fatalf("run %s has no %s event in its log", run, typ)
+	}
+	return found
+}
+
+// countEvents counts events of one type in a run's log.
+func countEvents(t *testing.T, dir, run, typ string) int {
+	t.Helper()
+
+	n := 0
+	for _, ev := range allEvents(t, dir, run) {
+		if ev["type"] == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// allEvents decodes a run's whole log.
+func allEvents(t *testing.T, dir, run string) []map[string]any {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(dir, "runs", run, "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("run %s has an unreadable log line: %v\n%s", run, err, line)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
 // TestOneCeilingIsPrintedAsOneNumber is the first walk defect.
 //
 // A run started with --budget 0.005 had its ceiling reported three ways: the
@@ -167,8 +229,26 @@ func TestASuccessfulResumeReleasesTheWriterLock(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "runs", run, "writer.lock")); err == nil {
 		t.Errorf("writer.lock survived the command that took it")
 	}
-	if got := arxi(t, dir, "run", "unpause", run, "--budget", "9"); got.code != 0 {
-		t.Fatalf("the next command was refused: exit %d\n%s", got.code, got.out)
+
+	// The next command reaches the run rather than being turned away at the
+	// door. It is REFUSED -- the raise let the rehearsal finish, and a finished
+	// run has no work to hand back -- and that refusal is the proof: it is a
+	// judgement about the run's status, which can only be made by a command that
+	// got far enough to read the log.
+	//
+	// This used to assert exit 0, back when a simulated resume appended and
+	// stopped so the run stayed resumable forever. Asserting the exit code alone
+	// would now pass for the wrong reason if the lock DID survive, since a lock
+	// refusal also exits non-zero -- so the message is what is checked.
+	got := arxi(t, dir, "run", "unpause", run, "--budget", "9")
+	if strings.Contains(got.out, "writer.lock") ||
+		strings.Contains(got.out, "open for writing") {
+		t.Fatalf("the next command was refused by a leftover lock: exit %d\n%s",
+			got.code, got.out)
+	}
+	if !strings.Contains(got.out, "final") {
+		t.Errorf("the next command did not reach the run's state: exit %d\n%s",
+			got.code, got.out)
 	}
 }
 
@@ -267,10 +347,9 @@ func TestTheRaiseReachesTheLogWhereTheReducerReadsIt(t *testing.T) {
 		t.Fatalf("exit %d: %s", got.code, got.out)
 	}
 
-	ev := lastEvent(t, dir, run)
-	if ev["type"] != "run.unpaused" {
-		t.Fatalf("last event is %v, want run.unpaused", ev["type"])
-	}
+	// Looked up by type rather than taken off the tip: the resume DRIVES the
+	// run, so the events it caused sit above the run.unpaused it wrote.
+	ev := eventOfType(t, dir, run, "run.unpaused")
 	// SourceHuman is load-bearing: raising a ceiling is an authorisation, and an
 	// audit that cannot say whether a human or the runtime raised a budget
 	// cannot answer the only question anybody asks about a bill.
@@ -358,20 +437,24 @@ func TestResumingABudgetBlockWithoutARaiseSaysWhatWillHappen(t *testing.T) {
 // has nobody to talk to, and the CLI is where a person is told why.
 func TestALowerCeilingIsRefusedAndSaysWhy(t *testing.T) {
 	dir := workdir(t)
-	run := budgetBlockedRun(t, dir)
 
-	if got := arxi(t, dir, "run", "unpause", run, "--budget", "5"); got.code != 0 {
-		t.Fatalf("raise: exit %d\n%s", got.code, got.out)
-	}
+	// The run's OWN ceiling is what a lower one is compared against, so no
+	// preparatory raise is needed. There used to be one -- a raise to 5, then a
+	// refused lower to 1 -- which stopped working when a simulated resume began
+	// driving: the raise let the rehearsal finish, and the second command was
+	// then refused for being terminal, which is a different refusal than the one
+	// under test. Comparing against the ceiling the run started with tests the
+	// same rule with nothing in between to go wrong.
+	run := budgetBlockedRun(t, dir) // started with --budget 0.005
 
-	got := arxi(t, dir, "run", "unpause", run, "--budget", "1")
+	got := arxi(t, dir, "run", "unpause", run, "--budget", "0.001")
 	if got.code != 2 {
 		t.Fatalf("lowering a ceiling exited %d, want 2 (misuse):\n%s",
 			got.code, got.out)
 	}
 	// Both numbers, so the user can see the comparison that was made rather
 	// than being told their number was wrong.
-	for _, want := range []string{"1.00", "5.00", "not above"} {
+	for _, want := range []string{"0.0010", "0.0050", "not above"} {
 		if !strings.Contains(got.out, want) {
 			t.Errorf("the refusal does not mention %q:\n%s", want, got.out)
 		}
@@ -430,17 +513,38 @@ func TestAFinishedRunIsNotResumed(t *testing.T) {
 	}
 }
 
-// TestASimulatedRunIsNotDrivenByAResume.
+// TestASimulatedRunIsResumedByTheSameFakeExecutor.
 //
 // A log whose run.started says simulated:true was produced by exec.Fake.
-// Driving it with a live executor would call real models and charge real money
-// for the continuation of a rehearsal.
+// Driving it with a LIVE executor would call real models and charge real money
+// for the continuation of a rehearsal. That is the danger, and it is what this
+// guard is about.
 //
 // The flag comes off the LOG and not from a --sim on this command, because the
 // run already answered the question when it started. Re-asking would let the two
 // answers differ, and the direction that costs money is the one a user hits by
 // forgetting a flag.
-func TestASimulatedRunIsNotDrivenByAResume(t *testing.T) {
+//
+// # Why this test was rewritten
+//
+// It used to be TestASimulatedRunIsNotDrivenByAResume, and it asserted that the
+// resume stopped at the append: no turns, nothing driven. That assertion was
+// wider than the reason above supports. The reason forbids a LIVE executor; the
+// assertion forbade driving at all, and the two are only the same thing if the
+// fake executor is not an option -- which it is, because `run start --sim`
+// already uses it.
+//
+// The gap that overreach left was measured, not theorised. Nothing else in the
+// binary drives a run: `run unpause` was the only verb that did, and it refused
+// to for a rehearsal. So a simulated run could never be advanced after `run
+// start` returned, and `run prompt` on one appended a cause that was silently
+// discarded -- while `run why` went on recommending the prompt the user had
+// just sent. A rehearsal that cannot be rehearsed past its first stop is not a
+// rehearsal of the thing it claims to simulate.
+//
+// So the property pinned here is the one the rationale actually states: the
+// continuation is taken by the fake, no model is called, and the run advances.
+func TestASimulatedRunIsResumedByTheSameFakeExecutor(t *testing.T) {
 	dir := workdir(t)
 	run := budgetBlockedRun(t, dir)
 
@@ -449,20 +553,36 @@ func TestASimulatedRunIsNotDrivenByAResume(t *testing.T) {
 		t.Fatalf("exit %d: %s", got.code, got.out)
 	}
 	if !strings.Contains(got.out, "--sim") {
-		t.Errorf("the resume does not say why it stopped at the append:\n%s\n\n"+
-			"A user who is not told concludes the command half-worked.", got.out)
+		t.Errorf("the resume does not say which executor continued it:\n%s\n\n"+
+			"A user who is not told cannot know whether that output cost money.",
+			got.out)
 	}
-	// The resume is still recorded, which is the honest half: the event happened,
-	// only the driving did not.
-	if !strings.Contains(got.out, "in the log") {
-		t.Errorf("the resume does not say the event was written:\n%s", got.out)
+	// It says the thing that makes the drive safe, in the terms a user cares
+	// about. "fake executor" alone is jargon; the money is the point.
+	if !strings.Contains(got.out, "no money is spent") {
+		t.Errorf("the resume does not say the continuation is free:\n%s", got.out)
 	}
-	if ev := lastEvent(t, dir, run); ev["type"] != "run.unpaused" {
-		t.Errorf("a simulated run's resume was not written at all: %v", ev["type"])
+	// The resume reached the log AND was acted on. Asserting only the event
+	// would pass against the defect this rewrite exists to fix, because the
+	// broken version appended too.
+	if !strings.Contains(got.out, "turns:") {
+		t.Errorf("the simulated run was not driven, so the resume resumed "+
+			"nothing:\n%s\n\nNothing else in the binary drives a run, so a "+
+			"rehearsal that stops here can never be advanced.", got.out)
 	}
-	// And nothing was driven: no new turns, so no cost.
-	if strings.Contains(got.out, "turns:") {
-		t.Errorf("a simulated run was driven by the resume:\n%s", got.out)
+
+	// And it really moved: the log has turns the resume produced, not just the
+	// run.unpaused it wrote. Read off the log rather than the banner, because
+	// the banner's wording is a thing other tests may change.
+	if n := countEvents(t, dir, run, "agent.turn_done"); n < 3 {
+		t.Errorf("the resumed rehearsal produced %d turns in total, want more "+
+			"than the 2 the blocked run already had", n)
+	}
+	// Every response came from the fake. A live provider is unreachable in the
+	// test environment anyway, but that is an accident of the sandbox and not a
+	// guarantee, so the log is checked instead.
+	if n := countEvents(t, dir, run, "llm.response"); n < 3 {
+		t.Errorf("expected simulated responses from the fake executor, got %d", n)
 	}
 }
 
@@ -551,8 +671,10 @@ func TestARunCanBeNamedByItsDirectory(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("naming a run by its directory failed: exit %d\n%s", got.code, got.out)
 	}
-	if ev := lastEvent(t, dir, run); ev["type"] != "run.unpaused" {
-		t.Errorf("the resume did not reach the run named by path: %v", ev["type"])
+	// By type, not off the tip: the resume drives, so run.unpaused is followed
+	// by everything it caused.
+	if ev := eventOfType(t, dir, run, "run.unpaused"); ev["source"] != "human" {
+		t.Errorf("the resume did not reach the run named by path: %v", ev)
 	}
 }
 
@@ -574,11 +696,27 @@ func TestTheRemedyTheToolRecommendsIsImplemented(t *testing.T) {
 			"the binary will not run.", got.code, got.out)
 	}
 
-	// And it did the thing it claims: the ceiling the run is now judged by is
-	// the new one, which is visible in what a further resume compares against.
-	got := arxi(t, dir, "run", "unpause", run, "--budget", "3")
-	if got.code != 2 || !strings.Contains(got.out, "5.00") {
-		t.Errorf("after raising to 5, the run is not judged by 5:\n%s\n"+
-			"(a further raise to 3 should be refused as not above 5.00)", got.out)
+	// And it did the thing it claims. This used to be checked by raising again
+	// to a lower figure and reading the refusal, which stopped working once a
+	// simulated resume drove the run: the first raise now lets the rehearsal
+	// FINISH, so the second command is refused for being terminal instead.
+	//
+	// Finishing is a better proof than the refusal ever was. The remedy exists
+	// to end a budget block, and a run that reached a terminal status did more
+	// than accept the number -- it spent under it and got somewhere. The old
+	// check only established that a second command remembered the figure.
+	st := arxi(t, dir, "run", "show", run)
+	if st.code != 0 {
+		t.Fatalf("run show after the remedy: exit %d\n%s", st.code, st.out)
+	}
+	if strings.Contains(st.out, "blocked") {
+		t.Errorf("the remedy was accepted but the run is still blocked:\n%s\n\n"+
+			"Raising the ceiling that stopped it is supposed to let it continue.",
+			st.out)
+	}
+	// The ceiling in the log is the raised one, read where the reducer reads it.
+	pl, _ := eventOfType(t, dir, run, "run.unpaused")["payload"].(map[string]any)
+	if pl == nil || pl["budget_usd"] != float64(5) {
+		t.Errorf("the raise did not reach the log as 5: %v", pl)
 	}
 }

@@ -160,7 +160,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1060 tests, no dependencies**.
+Underneath, every package is done and tested — **1070 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -192,7 +192,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 240 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 250 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
@@ -360,7 +360,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**27 of 49 declared capabilities are wired — 55.1%.** That figure is measured,
+**28 of 49 declared capabilities are wired — 57.1%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -368,14 +368,15 @@ counts the ones that do not answer *"is declared in the surface but not
 implemented yet"*. It reads the fraction above out of this file, so the sentence
 you are reading cannot go stale without a test failing. That is not a
 hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
-moved it to 26 and `run why` to 27, and every time the number above was
+moved it to 26, `run why` to 27 and `run prompt` to 28, and every time the
+number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 22 that remain are mostly
+It is deliberately unflattering — the 21 that remain are mostly
 `run *`, `agent *`, `state *` and `event *`, which want a way to read the log
 rather than the executor, the tool runner or the inbox. The implemented
-twenty-seven are
+twenty-eight are
 `provider add`, `model list` /
-`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run unpause`, `agent tool policy`,
+`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run prompt`, `run unpause`, `agent tool policy`,
 `blueprint validate`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
@@ -406,7 +407,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-55.1% is the CLI surface, and quoting it alone would be misleading in **both**
+57.1% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -414,12 +415,12 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **27 / 49 — 55.1%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **28 / 49 — 57.1%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 1060 tests live. What is missing is almost entirely
+that is where most of the 1070 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
@@ -444,11 +445,18 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 55.1% understates and 100% overstates. Nine of the
-22 unwired capabilities are `run *` verbs — `tree`, `result`, `pause`,
-`cancel`, `fork`, `replay`, `attach`, `prompt`, `steer` — and each is a
+That shape is also why 57.1% understates and 100% overstates. Eight of the
+21 unwired capabilities are `run *` verbs — `tree`, `result`, `pause`,
+`cancel`, `fork`, `replay`, `attach`, `steer` — and each is a
 **projection of a log that already exists and is already correct**. They are not
-nine features; they are nine readings of one finished mechanism.
+eight features; they are eight readings of one finished mechanism.
+
+`run prompt` is the exception that proves the rule, and it is why the sentence
+above says *projection* rather than *command*. It is the first `run *` verb
+built here that **writes**, and the difference showed up immediately: a
+projection cannot corrupt a log, so `run list`, `run show` and `run why` could
+be wrong only on screen. `run prompt` appends, so every refusal has to happen
+*before* the write — an append-only log offers no way to unsay something.
 
 `run list`, `run show` and `run why` were the first three, and building them is the evidence
 for that claim rather than a restatement of it: neither needed a new store, an
@@ -485,11 +493,24 @@ reason about a run end to end, can do the work inside one, and can now be
 picked back up after a human has answered it.**
 
 That last clause is new, and earning it is what the section below is about.
-There were four gaps of the worst kind — a remedy this project *prints* and the
+There were five gaps of the worst kind — a remedy this project *prints* and the
 binary *refuses* — and they are now zero: `AskHuman`, then `agent tool policy`,
-then `run unpause`, then **`run why`**. A gap of that kind is discovered by the
-person already in trouble, which is why closing them came before building
-anything new.
+then `run unpause`, then `run why`, then **`run prompt`**. A gap of that kind is
+discovered by the person already in trouble, which is why closing them came
+before building anything new.
+
+The fifth was **created by closing the fourth**, and that is worth stating
+plainly because it is the pattern rather than the accident. Wiring `run why`
+made `kernel.Explain`'s quiescence branch reachable for the first time, and the
+top line of the advice it prints there is `arxi run prompt <run> "..."` — which
+the binary refused. Closing a gap does not only remove a gap; it *runs code that
+nothing had run before*, and that code has its own advice.
+
+Quiescence is also the sharpest of the five, because it is the one state with
+no other way out. Every member is idle, no cause is pending, and the advance
+rule cannot be met by anybody left. `run unpause` does not apply — the run is
+not paused. The inbox does not apply — there is no question. Until this step the
+tool could diagnose that state precisely and then offer nothing that worked.
 
 The fourth is worth its own sentence, because it says something about how these
 are found. `arxi run why <id>` was printed as advice by *three* separate
@@ -500,6 +521,76 @@ mentioned the string printed it rather than ran it. It was found by typing what
 the tool said to type. The guard that now covers it lifts the suggestion out of
 `run show`'s own output and executes it, so the advice and the implementation
 cannot drift apart again.
+
+### The command that printed success and did nothing
+
+Closing the fifth gap produced the most useful defect of the project so far, and
+it is a new shape. The previous lessons were *a passing test can describe only
+the states where the code works* and *100% coverage of a switch says nothing
+about the arms nobody reaches*. This one is one layer further out:
+
+> **A command that reports what it INTENDED cannot be caught by reading its
+> output. It has to be caught by reading the state.**
+
+`arxi run prompt <run> "please submit what you have"` answered
+`run <run> prompted (seq 16), to backend`. The event was in the log, the seq was
+real, the recipient was correctly resolved. Every word of it was true, and the
+run was **bit-for-bit as quiescent as before**: `run why` went on printing the
+very remedy the user had just followed.
+
+The cause is a single line in the reducer. `applyInjection` hands an idle
+member's cause to `spawnCauses`, which *parks* it only when `spendingHalted` —
+false on a running run. On every other path it returns a transient `SpawnTurn`
+that lives in `Decide`'s return value and is **discarded if nobody is executing
+effects**. The first draft of the command deliberately did not drive, on the
+reasoning that `arxi inbox` sets the precedent: answering a question is not the
+same act as paying for the turns it unblocks.
+
+That reasoning is sound for the inbox and false here, and the difference is what
+the append *leaves behind*. An inbox reply is durable in the state — the fold
+sets `Replied=true`, so a user who answers and stops can see that they answered.
+A prompt to an idle member on a running run leaves **nothing at all**.
+
+The closing line could not rescue it either. It said
+`drive it: arxi run unpause <run>` — and `run unpause` refuses a running run
+outright, exit 1. So the command written to close the fifth printed-and-refused
+gap *printed a sixth*. Not driving did not defer the decision to the user; it
+removed it.
+
+Three more defects fell out of fixing that one, all measured rather than
+reasoned:
+
+- **A rehearsal could not be rehearsed.** `driveResumedRun` built a live
+  executor unconditionally, so every caller had to check `simulated` and print
+  *"not driven here"* instead. That protected the user's money and cost them the
+  run: nothing else drives, so a `--sim` run could never be advanced after
+  `run start` returned. It now drives with the same fake executor `run start`
+  uses — no model called, no money spent, same loop, same reducer, same log.
+- **The outlook line read the wrong actor.** It said *"it opens a turn for
+  backend now"* on a budget-blocked run and then parked the cause instead,
+  because `spawnCauses` asks `spendingHalted` **before** it looks at the member
+  at all. A line that reads the member alone describes a decision the reducer
+  never makes.
+- **A refused CAS bricked the run.** The refusal exits 1 directly rather than
+  through `fatal()`, so it ran neither the deferred `Close` nor the `atExit`
+  hooks. One mis-guarded `--if-seq` left `writer.lock` holding a dead pid, and
+  every later command on that run was refused with advice to delete a lock file
+  by hand — for a run that had merely been guarded *correctly*. A CAS miss is
+  the most ordinary failure this command has; it must not be the one that
+  bricks the run.
+
+One test had to be **rewritten rather than fixed**, and the distinction matters.
+`TestASimulatedRunIsNotDrivenByAResume` asserted that a simulated resume stopped
+at the append. Its own stated rationale forbade a **live** executor; the
+assertion forbade driving **at all**. The two are the same thing only if the
+fake executor is not an option — and it is, because `run start --sim` already
+uses it. The test was pinning more than its reason supported, and that surplus
+was the thing keeping a rehearsal un-advanceable. It now pins what the rationale
+actually says: the continuation is taken by the fake, and the run moves.
+
+Ten guards cover this, and all ten were confirmed to fail against a deliberate
+mutation of the line each one documents — including the two that matter most:
+removing the drive, and reverting the executor choice.
 
 Both surface numbers moved for an unglamorous reason worth recording: `surface`
 and `version` were always implemented, were always on the first screen, and were

@@ -225,24 +225,21 @@ func cmdRunUnpause(args []string) {
 		fmt.Printf("run %s resumed (seq %d)\n", pre.RunID, at)
 	}
 
-	// Driving is the second half, and it is skipped for a simulated run. A log
-	// whose run.started says simulated:true was produced by exec.Fake, and
-	// resuming it with a live executor would call real models and charge real
-	// money for the continuation of a run that was explicitly a rehearsal. The
-	// event is already appended, so the resume is recorded either way.
+	// Driving is the second half, and a simulated run is driven too -- with the
+	// fake executor, which is what --sim means. This used to return here and
+	// print "not driven", which protected the user's money and cost them the
+	// run: nothing else drives, so a rehearsal could never be resumed.
 	//
 	// The flag comes from the LOG and not from a --sim on this command, because
 	// the run already answered this question when it started. Asking again would
 	// let the two answers differ, and the direction that costs money is the one
 	// a user would hit by simply forgetting the flag.
 	if simulated {
-		fmt.Printf("  this run was started with --sim, so it is not driven here: " +
-			"resuming it live would call real models on a rehearsal.\n" +
-			"  the resume is in the log.\n")
-		return
+		fmt.Printf("  this run was started with --sim, so it is continued with " +
+			"the same fake executor: no model is called and no money is spent.\n")
 	}
 
-	driveResumedRun(dir, cfg, store, pre.RunID)
+	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
 }
 
 // driveResumedRun folds the log forward and carries out what the reducer decides.
@@ -252,32 +249,78 @@ func cmdRunUnpause(args []string) {
 // same rules as a fresh one. Duplicating the wiring is a real risk -- if the two
 // drift, a resumed run and a new run behave differently on the same blueprint,
 // which is the class of bug nobody thinks to look for.
-func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID string) {
-	overrides, err := openPolicies().LoadAll()
-	if err != nil {
-		fatal(err)
-	}
+//
+// # simulated is honoured here rather than by refusing to drive
+//
+// This used to build a live executor unconditionally, and every caller therefore
+// had to check the flag itself and print "this run was started with --sim, so it
+// is not driven here" instead of driving. That was correct about the danger --
+// resuming a rehearsal with a live executor charges real money for a run that
+// was explicitly not real -- and wrong about the remedy, because it left a
+// simulated run with NO way to be driven at all after `run start` returned.
+//
+// Measured, and the reason this moved: `run prompt` on a quiescent simulated run
+// appended the cause, printed success, and changed nothing; its own closing line
+// then sent the user to `run unpause`, which refuses a running run outright. A
+// rehearsal that cannot be advanced is not a rehearsal of anything.
+//
+// The fake executor and the virtual clock are what --sim means, and they are
+// already what `run start` uses. Driving with them is the honest continuation:
+// no provider is called, no money is spent, and the loop, the reducer and the
+// log are the same ones a real run would use -- which is the property that makes
+// --sim worth trusting in the first place.
+func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID string, simulated bool) {
+	var (
+		clock    exec.Clock
+		timekeep exec.Timekeeper
+		executor exec.Executor
+		now      func() string
+	)
 
-	rc := exec.NewRealClock()
-	executor := &provider.Executor{
-		Resolver: providerResolver{openProviders()},
-		Members:  cfg.Members,
-		// No Prompt. The run's opening instruction is already in its log, and
-		// inventing one here would inject a second cause into a run that asked
-		// only to continue.
-		ToolPolicy: overrides,
-		Tools: &toolrun.Runner{
-			Root:   filepath.Join(dir, "workspace"),
-			Shared: cfg.Workspace == "shared",
-		},
+	if simulated {
+		// Built exactly as cmdRunStart builds it for --sim, and with the same
+		// clock: VirtualTime JUMPS to the next deadline instead of waiting for
+		// it, so a stage timeout that a real run would sit out for thirty
+		// minutes is exercised here in microseconds.
+		//
+		// Now reads the VIRTUAL clock and not the wall clock. Stamping a
+		// simulated continuation with real timestamps would make the log jump
+		// from simulated time to now and back, and `event trace` reads those
+		// timestamps.
+		vc := exec.NewVirtualClock()
+		clock, timekeep, executor = vc, exec.VirtualTime{C: vc}, exec.NewFake()
+		now = func() string {
+			return time.UnixMilli(vc.NowMs()).UTC().Format(time.RFC3339Nano)
+		}
+	} else {
+		overrides, err := openPolicies().LoadAll()
+		if err != nil {
+			fatal(err)
+		}
+
+		rc := exec.NewRealClock()
+		clock, timekeep = rc, exec.RealTime{C: rc}
+		executor = &provider.Executor{
+			Resolver: providerResolver{openProviders()},
+			Members:  cfg.Members,
+			// No Prompt. The run's opening instruction is already in its log,
+			// and inventing one here would inject a second cause into a run
+			// that asked only to continue.
+			ToolPolicy: overrides,
+			Tools: &toolrun.Runner{
+				Root:   filepath.Join(dir, "workspace"),
+				Shared: cfg.Workspace == "shared",
+			},
+		}
+		now = func() string { return nowFunc().UTC().Format(time.RFC3339Nano) }
 	}
 
 	runner := &exec.Runner{
 		Log:      store,
-		Clock:    rc,
+		Clock:    clock,
 		Executor: executor,
 		Config:   cfg,
-		Now:      func() string { return nowFunc().UTC().Format(time.RFC3339Nano) },
+		Now:      now,
 	}
 
 	// Cursor is the log tip MINUS the event just appended, so run.unpaused is
@@ -296,7 +339,7 @@ func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID
 	loop := &exec.Loop{
 		Runner: runner,
 		Log:    store,
-		Time:   exec.RealTime{C: rc},
+		Time:   timekeep,
 		Config: cfg,
 		Cursor: cursor,
 	}

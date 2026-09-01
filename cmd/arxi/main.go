@@ -94,6 +94,10 @@ func main() {
 			cmdRunWhy(args[2:])
 			return
 		}
+		if len(args) > 1 && args[1] == "prompt" {
+			cmdRunPrompt(args[2:])
+			return
+		}
 	case "trigger":
 		cmdTrigger(args[1:])
 		return
