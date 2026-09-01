@@ -163,8 +163,16 @@ func cmdRunUnpause(args []string) {
 	// about because the far more common case is somebody who read the remedy and
 	// dropped the flag, and a run that blocks again three seconds later with no
 	// explanation looks like the command failed.
-	if pre.Status == kernel.StatusBlocked && budgetIsExhausted(pre) && budget == 0 {
-		fmt.Printf("warning: run %s is blocked because the budget ran out "+
+	//
+	// The condition asks about the CEILING and not about Status, and that is a
+	// fix that `run pause` exposed. This used to require
+	// `pre.Status == kernel.StatusBlocked`, and a pause overwrites Status: pause
+	// a budget-blocked run, unpause it without --budget, and the warning was
+	// skipped entirely on the one run where the user had the least context about
+	// why it stopped. budgetIsExhausted reads TreeSpentUSD against BudgetUSD and
+	// is true whatever the status says, which is the fact the warning is about.
+	if budgetIsExhausted(pre) && budget == 0 {
+		fmt.Printf("warning: run %s: the budget ran out "+
 			"(%s of %s USD in the tree), and no new ceiling was given.\n"+
 			"  it will resume and block again on the next cost.\n"+
 			"  raise it in the same command: arxi run unpause %s --budget <higher>\n",
@@ -379,59 +387,118 @@ func resolveRunDir(arg string) string {
 // being resumed may still be held by another process, and failing with a lock
 // error would say nothing about the run.
 //
-// The third return is whether the run was simulated. It is read off run.started
-// and not off the State, because kernel.State does not carry it: the reducer has
-// no use for the distinction (that is exactly what makes --sim worth trusting),
-// so the only place it exists is the event. Measured before writing this, rather
-// than assumed -- the field was almost given a State that has no such field.
+// The third return is whether the run was simulated; runWasSimulated says where
+// that comes from and why it is not on the State.
 func foldRunDir(dir string) (kernel.State, kernel.Config, bool, error) {
+	st, cfg, sim, _, err := foldRunDirEvents(dir)
+	return st, cfg, sim, err
+}
+
+// foldRunDirEvents is foldRunDir, also handing back the events it folded.
+//
+// It exists because `run result` needs two things the State does not keep: which
+// stage.submitted came last (that is what result_from: last_submit points at) and
+// the reason on run.cancelled, which the reducer reads no key from at all -- it
+// sets Status and drops the payload (internal/kernel/decide.go:59).
+//
+// Returning the events instead of letting the caller read the log a second time
+// is the whole point. Two reads of a file that is being appended to right now can
+// legitimately disagree: the fold would report seq 18 and the rescan seq 20, and
+// the command would print one run's status beside another moment's submission.
+// One read, one decode, one fold means every figure on screen comes from the same
+// bytes.
+//
+// foldRunDir stays as the three-value wrapper so the callers that only want the
+// state -- `run show`, `run tree`, `run unpause` -- are not touched, and so there
+// remains exactly one place that knows how a run directory is read.
+//
+// One caller does not go through here: `run attach` needs the byte offset the log
+// was read to, so it composes the same three steps -- readRunLog, runFrozenConfig,
+// decodeRunEvents -- itself. They were split out of this function for that, which
+// is why the wording of each failure still has one home.
+func foldRunDirEvents(dir string) (kernel.State, kernel.Config, bool, []kernel.Event, error) {
+	raw, err := readRunLog(dir)
+	if err != nil {
+		return kernel.State{}, kernel.Config{}, false, nil, err
+	}
+
+	cfg, err := runFrozenConfig(dir)
+	if err != nil {
+		return kernel.State{}, kernel.Config{}, false, nil, err
+	}
+
+	events, err := decodeRunEvents(dir, raw)
+	if err != nil {
+		return kernel.State{}, kernel.Config{}, false, nil, err
+	}
+
+	st, _ := kernel.Fold(kernel.State{}, events, cfg)
+	return st, cfg, runWasSimulated(events), events, nil
+}
+
+// readRunLog reads a run's events.ndjson, or says why it could not.
+//
+// Split out of foldRunDirEvents for `run attach`, which needs the same bytes AND
+// the offset it stopped at -- a follower that folds through one read and then
+// reopens to find its join point would miss whatever was appended in between.
+// Sharing the read means the two commands cannot disagree about what a run
+// directory is, and in particular that "you passed something that is not a run"
+// is phrased once. That sentence names ./runs/<id> and `arxi inbox`, and a second
+// copy of it in attach.go would be the copy that keeps saying --dir after the
+// flag is renamed.
+func readRunLog(dir string) ([]byte, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "events.ndjson"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return kernel.State{}, kernel.Config{}, false, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"%s holds no event log, so it is not a run directory.\n"+
 					"  runs live under ./%s/<run-id> unless --dir said otherwise\n"+
 					"  see what is waiting: arxi inbox", dir, runsDir)
 		}
-		return kernel.State{}, kernel.Config{}, false, fmt.Errorf("read the log of %s: %w", dir, err)
+		return nil, fmt.Errorf("read the log of %s: %w", dir, err)
 	}
+	return raw, nil
+}
 
-	cfg := kernel.Config{}
+// runFrozenConfig loads the blueprint snapshot a run was started with.
+//
+// A missing snapshot is not fatal, matching internal/inbox: the events still
+// fold. What is lost is the roster, so the reducer cannot resume a member it
+// cannot find -- and driveResumedRun would then spawn nothing. Refusing to
+// invent a Config is the honest half of that.
+func runFrozenConfig(dir string) (kernel.Config, error) {
 	snap, err := os.ReadFile(filepath.Join(dir, "blueprint.snapshot.yaml"))
 	switch {
 	case err == nil:
 		bp, berr := blueprint.Load(snap)
 		if berr != nil {
-			return kernel.State{}, kernel.Config{}, false, fmt.Errorf(
+			return kernel.Config{}, fmt.Errorf(
 				"the frozen blueprint of %s does not parse, so this run cannot be "+
 					"folded: %w", dir, berr)
 		}
-		cfg = bp.Config
+		return bp.Config, nil
 	case !os.IsNotExist(err):
-		return kernel.State{}, kernel.Config{}, false, fmt.Errorf(
+		return kernel.Config{}, fmt.Errorf(
 			"read the frozen blueprint of %s: %w", dir, err)
 	}
-	// A missing snapshot is not fatal, matching internal/inbox: the events still
-	// fold. What is lost is the roster, so the reducer cannot resume a member it
-	// cannot find -- and driveResumedRun would then spawn nothing. Refusing to
-	// invent a Config is the honest half of that.
+	return kernel.Config{}, nil
+}
 
-	events, err := decodeRunEvents(dir, raw)
-	if err != nil {
-		return kernel.State{}, kernel.Config{}, false, err
-	}
-
-	simulated := false
+// runWasSimulated reads --sim off run.started.
+//
+// It is read off the event and not off the State, because kernel.State does not
+// carry it: the reducer has no use for the distinction (that is exactly what
+// makes --sim worth trusting), so the only place it exists is the event. Measured
+// before writing this, rather than assumed -- the field was almost given a State
+// that has no such field.
+func runWasSimulated(events []kernel.Event) bool {
 	for _, e := range events {
 		if e.Type == kernel.RunStarted {
 			b, _ := e.Payload["simulated"].(bool)
-			simulated = b
-			break
+			return b
 		}
 	}
-
-	st, _ := kernel.Fold(kernel.State{}, events, cfg)
-	return st, cfg, simulated, nil
+	return false
 }
 
 // decodeRunEvents parses the NDJSON log.

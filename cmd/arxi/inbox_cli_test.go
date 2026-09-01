@@ -380,3 +380,137 @@ func TestADirectoryThatIsNotARunIsIgnoredRatherThanWarnedAbout(t *testing.T) {
 		t.Errorf("a directory with no log was reported as a broken run:\n%s", got.out)
 	}
 }
+
+// The three tests below are one defect, seen from the three places a user meets
+// it. `arxi run cancel` reaches a terminal run in a single command while a
+// question is outstanding, and a question does not leave State.Inbox when its run
+// ends -- the log is not edited. So the question stays pending, forever, and
+// answering it appends an event the reducer folds into nothing
+// (internal/kernel/decide.go:32). The command used to print
+// "approved. backend unblocked (r1 seq 5)" for that, a sentence in which only the
+// seq was true, and anybody waiting on backend waited forever.
+//
+// They live in the CLI suite as well as the package suite because the wrong
+// answer was assembled here: the package returned an error and this file's job is
+// that the error reaches the user as an exit code, a remedy, and the ABSENCE of a
+// success line.
+
+func TestAnsweringAQuestionInACancelledRunIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	blockedRun(t, dir, "r1")
+
+	if out, errb, code := arxiStreams(t, dir, "run", "cancel", "r1",
+		"--reason", "the requirement moved"); code != 0 {
+		t.Fatalf("cancelling: exit %d\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	}
+
+	out, errb, code := arxiStreams(t, dir, "inbox", "approve", "inbox-1")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	}
+	// Not a usage error: the id was right, the command was right, and the run
+	// ended between listing it and answering it. Exit 2 would tell a script to
+	// stop retrying something it typed correctly.
+	if strings.Contains(out, "unblocked") {
+		t.Errorf("a refused answer still printed that the member was unblocked:\n%s\n"+
+			"  consequence: nothing folded the reply, so the member is not working "+
+			"and whoever is waiting on it waits forever.", out)
+	}
+	if !strings.Contains(errb, "cancelled") {
+		t.Errorf("the refusal does not say the run was cancelled:\n%s", errb)
+	}
+	// The remedy, because "the run has ended" without "what ended it" leaves the
+	// user with nowhere to go: the work either moves to a new run or is dropped,
+	// and which one depends on how this run finished.
+	if !strings.Contains(errb, "arxi run result r1") {
+		t.Errorf("the refusal does not point at what ended the run:\n%s", errb)
+	}
+
+	// And the reply is not in the log. An inert inbox.replied is a human decision
+	// recorded where nothing reads it, which is worse than no record at all: a
+	// later audit reads it as an approval that took effect.
+	for _, ev := range allEvents(t, dir, "r1") {
+		if ev["type"] == "inbox.replied" {
+			t.Fatalf("the refused answer was appended anyway:\n%v", ev)
+		}
+	}
+}
+
+func TestTheListingMarksAQuestionWhoseRunHasEnded(t *testing.T) {
+	dir := t.TempDir()
+	blockedRun(t, dir, "r1")
+	if out, errb, code := arxiStreams(t, dir, "run", "cancel", "r1"); code != 0 {
+		t.Fatalf("cancelling: exit %d\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	}
+
+	got := arxi(t, dir, "inbox")
+	if got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.out)
+	}
+	// Still listed -- the log is not edited, so pretending otherwise would mean
+	// hiding a row that IS in the state.
+	if !strings.Contains(got.out, "inbox-1") {
+		t.Fatalf("the question vanished from the listing:\n%s", got.out)
+	}
+	for _, want := range []string{"not answerable", "cancelled"} {
+		if !strings.Contains(got.out, want) {
+			t.Errorf("the listing does not say %q:\n%s\n"+
+				"  consequence: the row is indistinguishable from actionable work, so "+
+				"a human spends their attention on a question nothing will read.",
+				want, got.out)
+		}
+	}
+}
+
+func TestTheJSONListingSaysWhetherAQuestionCanStillBeAnswered(t *testing.T) {
+	dir := t.TempDir()
+	blockedRun(t, dir, "r1")
+	blockedRun(t, dir, "r2")
+	if out, errb, code := arxiStreams(t, dir, "run", "cancel", "r2"); code != 0 {
+		t.Fatalf("cancelling: exit %d\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	}
+
+	got := arxi(t, dir, "inbox", "--json")
+	if got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.out)
+	}
+	var payload struct {
+		Items []struct {
+			Run        string `json:"run"`
+			RunStatus  string `json:"run_status"`
+			Answerable bool   `json:"answerable"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(got.out), &payload); err != nil {
+		t.Fatalf("the --json listing is not JSON: %v\n%s", err, got.out)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("got %d items, want 2 (both runs are blocked): %s",
+			len(payload.Items), got.out)
+	}
+	// Both keys, and not one derived from the other by the consumer: run_status is
+	// what happened, answerable is what to do about it. A caller filtering on a
+	// status list of its own would treat a status added later as actionable.
+	for _, it := range payload.Items {
+		switch it.Run {
+		case "r1":
+			if !it.Answerable {
+				t.Errorf("the live run's question reads as unanswerable: %+v", it)
+			}
+			if it.RunStatus == "cancelled" {
+				t.Errorf("the live run reads as cancelled: %+v", it)
+			}
+		case "r2":
+			if it.Answerable {
+				t.Errorf("the cancelled run's question reads as answerable: %+v\n"+
+					"  consequence: an automation approving everything it sees spends a "+
+					"turn's worth of nothing on it and reports success.", it)
+			}
+			if it.RunStatus != "cancelled" {
+				t.Errorf("run_status = %q, want cancelled: %+v", it.RunStatus, it)
+			}
+		default:
+			t.Errorf("unexpected run %q in the listing: %s", it.Run, got.out)
+		}
+	}
+}

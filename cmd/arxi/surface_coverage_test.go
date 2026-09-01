@@ -94,23 +94,30 @@ var blockingPaths = map[string]bool{
 func TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes(t *testing.T) {
 	// Job 2 first, because job 1's answer is meaningless if it fails.
 	//
-	// `run replay` is used as the canary because it is declared, has no
-	// executor, and is one of twelve `run *` verbs that all want a log reader
-	// -- the least likely single path to be wired without this file being
-	// touched. If it ever IS wired, this test fails with an instruction to pick
-	// another, which is the correct amount of noise: it is a demand to
-	// re-verify the sentinel, not a bug.
+	// `run steer` is used as the canary because it is declared, has no executor,
+	// and is the unwired verb whose implementation is least like the work already
+	// done here: it does not project a fold at all, it injects an event into a run
+	// somebody else is driving, which needs the writer lock this binary hands to
+	// one process at a time. This repository wires verbs one per change, so the
+	// canary that survives longest is the one that is not a variation on a
+	// projection.
+	//
+	// It has moved twice, from `run replay` to `run attach` to here, and both moves
+	// happened because the verb got built. The test failed exactly as designed each
+	// time, with the instruction below naming the fix, which is the right amount of
+	// noise: a demand to re-verify the sentinel against a path that is genuinely
+	// unwired, not a bug.
 	dir := workdir(t)
-	canary := arxi(t, dir, "run", "replay")
+	canary := arxi(t, dir, "run", "steer")
 	if !strings.Contains(canary.out, notImplementedSentinel) {
 		t.Fatalf("the sentinel this test counts with does not appear for a path known to be unimplemented.\n"+
-			"  probed:   arxi run replay\n  expected: %q\n  got:\n%s\n"+
+			"  probed:   arxi run steer\n  expected: %q\n  got:\n%s\n"+
 			"  consequence: if the sentinel is wrong, NOTHING matches it, every "+
 			"declared path counts as implemented, and this test certifies 100%% "+
 			"coverage while passing. That already happened once with the README's "+
 			"paraphrase of this phrase.\n"+
 			"  fix: copy the wording from notImplemented in main.go -- or, if "+
-			"run replay is now built, point this canary at another unimplemented path.",
+			"run steer is now built, point this canary at another unimplemented path.",
 			notImplementedSentinel, canary.out)
 	}
 

@@ -1140,17 +1140,16 @@ func wakeWatchers(out *State, e Event, c Config) []Effect {
 	return fx
 }
 
-// matchPattern supports exact match and a single suffix wildcard (`stage.*`).
-// There is no full glob on purpose: a pattern nobody can read at a glance is a
-// pattern that is going to wake agents nobody expected.
+// matchPattern is the reducer's spelling of MatchEventType (event.go).
+//
+// It delegates rather than reimplementing, and that is the whole point: `arxi
+// event log --type stage.*` matches with the exported function, so the CLI and a
+// watcher cannot come to disagree about what `stage.*` selects. The body used to
+// live here, which made the reducer's rule the only rule -- fine while the
+// reducer was the only caller, and a second dialect waiting to happen the moment
+// a command needed the same question answered.
 func matchPattern(pattern, typ string) bool {
-	if pattern == typ || pattern == "*" {
-		return true
-	}
-	if strings.HasSuffix(pattern, ".*") {
-		return strings.HasPrefix(typ, strings.TrimSuffix(pattern, "*"))
-	}
-	return false
+	return MatchEventType(pattern, typ)
 }
 
 // spendingHalted reports that no new paid turn may be opened right now, and it

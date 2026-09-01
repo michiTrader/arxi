@@ -256,6 +256,78 @@ func TestAnUnrecognisedDecisionIsRefusedRatherThanDefaulted(t *testing.T) {
 	}
 }
 
+// endRun appends a terminal event to a run written by blocked, leaving its
+// question pending and unanswerable.
+//
+// run.cancelled rather than run.succeeded, because that is the state a human can
+// reach deliberately in one command (`arxi run cancel`) while a question is
+// outstanding -- which is how this defect was found.
+func endRun(t *testing.T, dir string) {
+	t.Helper()
+	store, err := logstore.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Append([]kernel.Event{{
+		ID: "cancel-1", Type: kernel.RunCancelled, Source: kernel.SourceHuman,
+		Payload: map[string]any{"reason": "the requirement moved"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAnsweringAQuestionInARunThatEndedIsRefused.
+//
+// The append would succeed and change nothing: the reducer folds every event
+// arriving at a terminal run into nothing (internal/kernel/decide.go:32). Before
+// this check the CLI printed "approved. backend unblocked (r1 seq 7)" for it -- a
+// sentence in which only the seq was true, and one that leaves whoever is waiting
+// on that member waiting forever.
+func TestAnsweringAQuestionInARunThatEndedIsRefused(t *testing.T) {
+	dir := blocked(t)
+	endRun(t, dir)
+
+	_, err := Answer(dir, "inbox-1", Reply{Decision: DecisionApprove})
+	if !errors.Is(err, ErrRunOver) {
+		t.Fatalf("answering in a cancelled run returned %v, want ErrRunOver", err)
+	}
+	if errors.Is(err, ErrAlreadyAnswered) {
+		t.Error("a terminal run also matches ErrAlreadyAnswered, and the remedies have " +
+			"nothing in common: one says look at the log, the other says the work needs " +
+			"a new run")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("the error does not say HOW the run ended: %v", err)
+	}
+
+	// And nothing was written. An inert inbox.replied in the log is a human
+	// decision recorded where nothing reads it.
+	r, err2 := OpenRun(dir)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if pending := r.List(true); len(pending) != 1 {
+		t.Errorf("the refused answer changed the log: %d pending, want 1", len(pending))
+	}
+}
+
+// TestATypoIsStillATypoInARunThatEnded pins the ORDER of the two refusals.
+//
+// The terminal check is deliberately after the item lookup: "no such question" is
+// the more precise answer when it applies, and a user who mistyped an id in a
+// cancelled run needs to hear about the typo rather than be told the run is over
+// and go on believing the id was right.
+func TestATypoIsStillATypoInARunThatEnded(t *testing.T) {
+	dir := blocked(t)
+	endRun(t, dir)
+
+	_, err := Answer(dir, "inbox-99", Reply{Decision: DecisionApprove})
+	if !errors.Is(err, ErrNoSuchItem) {
+		t.Fatalf("an unknown id in a terminal run returned %v, want ErrNoSuchItem", err)
+	}
+}
+
 func TestAnsweredQuestionsAreStillReadable(t *testing.T) {
 	dir := blocked(t)
 	if _, err := Answer(dir, "inbox-1", Reply{Decision: DecisionApprove}); err != nil {

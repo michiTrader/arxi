@@ -19,29 +19,46 @@ Pure. It does not look at the clock, does not touch the network, does not write
 anything. Everything it wants to happen in the world it **describes** as an
 `Effect` and returns; somebody else runs it.
 
-That restriction is not aesthetic. It is what makes four features be one fold
+That restriction is not aesthetic. It is what makes five features be one fold
 over the same reducer, differing only in what is plugged into it:
 
 | feature | what it is | state |
 |---|---|---|
 | `arxi run --sim` | fold + fake executor | **works** |
 | `arxi why` | read the `State` that came out of the fold | **works** |
-| `arxi run start` | fold + real executor | fold works, executor absent |
-| `run replay` | fold over an old log, with no executor | declared, not built |
+| `arxi run start` | fold + real executor | **works** |
+| `run replay` | fold over an old log, with no executor | **works** |
+| `run attach` | fold over a log somebody else is still appending to | **works** |
 
-The `state` column was added after this table was caught overclaiming. It listed
-all four as features; `arxi run replay` and `arxi run why` both answer *"declared
-in the surface but not implemented yet"*, and `Replay` appears nowhere in the
-source except inside a comment. What is real is `arxi why` — a different command,
-taking a state file rather than a run id — and the fold itself, which `--sim`
-drives end to end.
+The `state` column was added after this table was caught overclaiming: it listed
+all four as features while `arxi run replay` and `arxi run why` both answered
+*"declared in the surface but not implemented yet"*, and `Replay` appeared
+nowhere in the source except inside a comment. Both are built now, so every row
+reads **works** — and the column stays, because a table that has only ever said
+"works" is a table no reader can catch. It also rotted in the *other* direction,
+which is the better argument for keeping it: the `run start` row still said
+"executor absent" long after the live executor had landed, and was found only
+when wiring `run replay` made somebody read all four rows at once.
 
-The architectural claim survives that correction, and is worth separating from
-the delivery claim: in a design where the reducer calls the network, `replay` is
-a second program that reimplements the logic of the first, always out of date and
-nobody notices until the moment they need it. Here it is a fold with the executor
-left out, which is why it is a small job that has not been done rather than a
-parallel implementation that has to be kept honest.
+The fifth row arrived with `run attach`, and it is the row that makes the claim
+falsifiable rather than decorative. If the fold were not pure, following a live
+run would need a second implementation of it — a streaming reducer, kept in step
+with the batch one by hand. It needed neither: `cmd/arxi/attach.go` folds to the
+join point and then calls the same `kernel.Decide` once per arriving event, and
+the only thing it adds is a byte offset.
+
+
+What the correction bought is that the architectural claim was left standing as a
+**prediction**, separate from the delivery claim, and the prediction can now be
+checked. In a design where the reducer calls the network, `replay` is a second
+program reimplementing the logic of the first, always out of date, and nobody
+notices until the moment they need it. Here it was supposed to be a fold with the
+executor left out. It is: `cmd/arxi/replay.go` folds with `kernel.Decide`, the
+same function the run loop calls, and needed no new kernel entry point to do it.
+The one thing it adds is a counter — the effects the fold produced and nobody
+executed. That the executor really is absent is **measured rather than asserted**:
+the run directory is hashed before and after, so an executor sneaking back in
+turns the suite red.
 
 And the purity is **verified, not promised**: `internal/arch_test.go` runs
 `go list` over the package and fails if the kernel imports `time`, `net`, `os`
@@ -118,7 +135,7 @@ Short flags exist, and they are the surface's, not each command's:
 $ arxi run start -a ./examples/feature-team.yaml -p "add rate limiting" -b 2.00 -S
 $ arxi surface --flags        # the whole assignment, and what each letter reaches
   -b  --budget         4 commands
-  -r  --run            13 commands
+  -r  --run            14 commands
   -p  --prompt         run start
   -f  --path           blueprint validate
 ```
@@ -140,7 +157,7 @@ when it breaks — the script silently does something else with the number.
 
 So there is one global name→letter map, and one expander that rewrites `-p` into
 `--prompt` before any parser runs. A letter is only valid on a command that *has*
-that parameter: `-r` is `--run` on the thirteen commands that take a run id and
+that parameter: `-r` is `--run` on the fourteen commands that take a run id and
 an **error** on the rest, because binding it to something else would discard the
 value while the command reported success. The refusal says so rather than
 guessing:
@@ -160,7 +177,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1070 tests, no dependencies**.
+Underneath, every package is done and tested — **1207 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -175,7 +192,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
 | package | what it owns | tests |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 48 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 50 |
 | `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
 | `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
@@ -190,10 +207,18 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 24 |
 | `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 13 |
 | `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
-| `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 21 |
+| `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 23 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 250 |
+| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 383 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
+
+Those cells add up to the total, and that is now the point of printing them: an
+earlier version of this table did **not** sum to the figure above it — the total
+was corrected each time it was measured and the nineteen cells were not, so they
+drifted 108 cases behind while looking authoritative. Per-package numbers nobody
+adds up are nineteen more places for a stale figure to hide, so they are only
+worth keeping if the sum is checked. `cmd/arxi` is where the drift had collected;
+it was the row that grew every time a verb was wired.
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
@@ -360,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**28 of 49 declared capabilities are wired — 57.1%.** That figure is measured,
+**37 of 49 declared capabilities are wired — 75.5%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -368,18 +393,21 @@ counts the ones that do not answer *"is declared in the surface but not
 implemented yet"*. It reads the fraction above out of this file, so the sentence
 you are reading cannot go stale without a test failing. That is not a
 hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
-moved it to 26, `run why` to 27 and `run prompt` to 28, and every time the
-number above was
+moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
+`run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
+`event emit` to 34, `run fork` to 35, `run replay` to 36 and `run attach` to 37,
+and every time the number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 21 that remain are mostly
-`run *`, `agent *`, `state *` and `event *`, which want a way to read the log
-rather than the executor, the tool runner or the inbox. The implemented
-twenty-eight are
+It is deliberately unflattering — the 12 that remain are mostly
+`agent *`, `state *`, `blueprint *` and `event trace`, which want the tool
+runner, a state store or a tracer rather than a way to read the log. The
+implemented thirty-seven are
 `provider add`, `model list` /
-`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run prompt`, `run unpause`, `agent tool policy`,
-`blueprint validate`, `trigger create` /
+`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent tool policy`,
+`blueprint validate`, `event emit`, `event log`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
+
 
 That probe is worth *running* rather than trusting, and two botched runs of it
 are the reason it is now a test instead of a shell loop.
@@ -407,7 +435,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-57.1% is the CLI surface, and quoting it alone would be misleading in **both**
+75.5% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -415,12 +443,12 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **28 / 49 — 57.1%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **37 / 49 — 75.5%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
 arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 1070 tests live. What is missing is almost entirely
+that is where most of the 1207 tests live. What is missing is almost entirely
 *the last mile*: CLI verbs that would read state the runners already produce.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
@@ -445,11 +473,356 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 57.1% understates and 100% overstates. Eight of the
-21 unwired capabilities are `run *` verbs — `tree`, `result`, `pause`,
-`cancel`, `fork`, `replay`, `attach`, `steer` — and each is a
-**projection of a log that already exists and is already correct**. They are not
-eight features; they are eight readings of one finished mechanism.
+That shape is also why 75.5% understates and 100% overstates. One of the
+12 unwired capabilities is a `run *` verb — `steer` — and it is the first one
+that is **not** a projection of a log that already exists. The list used to name
+three, all of them readings of one finished mechanism, and all three have now
+been built: `replay`, then `attach`, each one file in `cmd/arxi` with no part of
+the reducer moved to accommodate it. That the claim was checkable and checked
+three times is the point; what is left is the case it never covered. `steer`
+injects an event into a run somebody else is driving, so it needs the writer
+lock this binary hands to one process at a time — a different problem from
+reading, and the honest reason the remaining twelve will not fall as quickly as
+the last three.
+
+`run attach` is the one just built, and it is the only verb here that reads a log
+while somebody else is writing to it. It joins at the head — the events that
+already exist are *not* reprinted, because `event log`, `run replay` and
+`run show` each print history better, and backfilling would scroll the arriving
+events out of view. Then it prints each event as it lands, folds it with
+`kernel.Decide`, and stops on one of two things: the run reaching a terminal
+state, exit 0, or the writer lock going away, exit 3.
+
+**It takes no lock and opens nothing for writing**, which is what makes it safe
+to point at a run that is mid-turn. It also never signals the writer, and does
+not probe whether that pid is alive — deliberately, since a viewer that could
+reap the process it is watching is a viewer that can break the run.
+
+Following a file another process is appending to is where the interesting
+correctness lives, and two cases are easy to get wrong in the flattering
+direction, because both look fine until the day they do not:
+
+**A read can land mid-write.** Bytes are made durable by the writer's `fsync`,
+not atomic against a concurrent reader, so a read can return half a JSON object.
+Decoding that half is a parse error, and the follow would die on a log that is
+perfectly healthy. So only whole lines — up to the last newline — are ever
+decoded, and the remainder is held for the next read.
+
+**A batch that was never committed must not be shown.** `logstore` writes
+`pending.commit`, then the events, then removes the marker; the next `Open` rolls
+an uncommitted tail back. A follower that printed those bytes would report an
+event that a later `arxi event log` on the same run does not have — the follower
+would be its only witness. So `logstore.BatchInFlight` is consulted **after** each
+read, which is what makes the answer sound: no marker *now* proves the bytes just
+read are durable. When the writer dies mid-batch, the footer names the byte count
+being withheld and says the next command will roll it back, rather than printing
+lines that are about to stop existing or going quiet, which reads as the log
+simply stopping.
+
+The lock is sampled **before** each read, and the order is the whole argument for
+why the tail cannot be lost: if the lock is gone at time T, nothing appends after
+T, so a read at any later time has already seen everything there is.
+
+**Nothing is writing to it** is a symptom, not an answer, so the two exits that
+are not a finished run end with the same diagnosis `run show` would give: paused,
+with `run unpause`; blocked on a question, with `arxi inbox`; a log with no
+`run.started`, with `run start`. And when the run says *running* but no process
+holds its lock, it says exactly that — the driver is gone — and pointedly does
+**not** suggest `run unpause`, because the run was never paused and unpausing it
+would not put a writer back.
+
+`run replay` came before it, and it is the verb the whole arrangement was
+for: fold the log again, at `--until-seq`, with the executor left out. What it
+prints is the state at that seq, the event that produced it, and a count of the
+effects the fold returned and nobody ran.
+
+It folds **event by event** with `kernel.Decide` rather than calling
+`logstore.Fold`, and that is not a style preference. `Fold` returns the final
+state only, which throws away both things this verb exists to show: the event
+*at* the target seq, which goes on the headline, and the effects, which are the
+whole point of a fold with no executor.
+
+**"No executor" is measured, not asserted.** The run directory is hashed file by
+file before and after, and the two trees must be byte-identical — a stray
+`os.WriteFile` in the command turns the suite red. That guard is why the verb can
+also be pointed at a *live* run: it takes no writer lock and opens nothing for
+writing, so a stuck run can be replayed while it is still stuck, which is exactly
+when somebody wants to.
+
+Running it settled four things that reading it would not have:
+
+**Two spend figures, not one.** §20.9's own transcript prints a single
+`spend: 0.0000 USD`, which conflates what the *replay* spent — always zero, by
+construction — with what the *run* recorded. On a 21-event sim log the recorded
+figure is 0.02 at seq 11 and 0.04 at seq 21. One number would have reported zero
+for a run that had a bill, so both are printed, labelled, with the reason on the
+line: `replay spend: 0.0000 USD (replay does not execute effects)`.
+
+**The closing suggestions named the wrong run.** They echoed the *resolved* run
+id, so replaying a directory copied aside printed `fold all of it: arxi run
+replay rmtizyc28-ba2261a1` — naming the pristine original rather than the copy
+the reader had just been looking at. Every suggestion now echoes the argument as
+typed, and a test asserts it by replaying a copy under a different name.
+
+**A missing frozen blueprint is not a small problem.** Delete
+`blueprint.snapshot.yaml` and the fold still produces a plausible-looking state —
+but the member roster comes back empty and the effect tally drops from 11 to 2,
+because with no config there is nobody to spawn a turn for. Quietly folding on
+would print a confident, wrong answer, so the file is named in a warning and the
+fold continues anyway, which is what makes the state still worth reading.
+
+**`--until-seq` refuses more than it accepts.** It is inclusive; `0` means the
+same as absent; a seq past the head is **refused rather than clamped**, because
+silently folding the whole log answers a question nobody asked; a negative is
+refused rather than clamped; a malformed value is refused *before the log is
+opened*, so a typo cannot look like a slow command; and a gap is reported —
+`this log holds no seq 5, so the fold stopped at seq 4` — rather than passed off
+as the seq requested. One wrinkle is worth writing down: `expandShort` claims any
+leading-dash token first, so `--until-seq -1` is answered by the short-flag
+expander and only `--until-seq=-1` reaches the negative guard. Both are errors;
+they are just different errors, and the second is the one the guard is for.
+
+Fourteen deliberate mutations were introduced to check the tests were worth
+having — the `→` in the headline turned to `->`, `tally.add(effs)` replaced with
+`_ = effs`, the past-the-head refusal disabled, the missing-snapshot warning
+disabled, `head_seq` in the JSON pointed at the reached seq, `os.Getpid()`
+printed. All fourteen were caught; none survived.
+
+`run fork` came before it, and it is the only wired verb that is **not** a
+projection and not an append to a run either: it writes a *new* run directory
+holding a frozen `blueprint.snapshot.yaml` and a re-appended copy of the parent's
+events up to `--at-seq`. There is no `run.forked` event type and none was added —
+a fork is not something that happens to the parent, and recording it there would
+put a row in an append-only log describing a decision made outside it.
+
+It was built because two commands already printed it as *the* remedy for their
+own refusals. `run result` and `run prompt` both refuse a finished run and both
+answer `arxi run fork <run> --at-seq <n>`, which until this step replied *"is
+declared in the surface but not implemented yet"*. That is the fifth instance of
+the same defect class in this project — a remedy the tool recommends and the
+binary declines — and it is the worst kind, because the refusal is otherwise
+correct and the user has nowhere left to go.
+
+**The copied events keep the parent's seqs and the parent's ids**, and that falls
+out of `logstore` rather than being arranged: `Append` requires `Seq == 0` and
+assigns sequences itself, so a *contiguous prefix* starting at 1 necessarily
+comes back numbered 1..N — the same numbers. Ids are copied verbatim, which keeps
+`caused_by` chains walkable across the fork boundary; renaming them would have
+produced a history that references antecedents no log contains. Exactly one event
+is rewritten, `run.started`, gaining `run_id`, `forked_from` and `forked_at_seq`,
+and its payload map is **copied rather than mutated** — the caller folds the same
+decoded slice, so editing in place would alter the parent's history mid-fold.
+
+**Nothing is driven, and that is the one design decision worth arguing with.**
+Every other writer in this binary drives, and `run prompt`'s first draft shipped
+the opposite mistake. The asymmetry is the reducer's own guarantee: `Decide` is
+pure, so a fork whose events are the parent's events reaches the parent's
+decisions. Driving immediately would re-run history at full model price to arrive
+where the parent already is. So the closing line names what makes a fork differ —
+`arxi run prompt <fork> "what you want instead"` — and branches instead when the
+inherited state cannot proceed on its own: `run unpause` for an inherited pause,
+`run unpause --budget <more than the ceiling>` for an inherited exhausted budget.
+Each of those was **followed by hand** and does what it says, which is the check
+this verb exists to earn the right to skip.
+
+Running it also settled two things reading could not. A refusal must happen
+**before `MkdirAll`**, so the prefix is folded in memory first and no rejected
+fork leaves a half-built `runs/<id>` behind. And the parent's `workspace/` is
+deliberately *not* copied, with a line saying so: those are its files as they are
+**now**, not as they were at the fork point, so copying them would hand the fork
+a future it never had.
+
+`event emit` came before it, and it is the only verb in the binary that
+lets something outside a run put a **cause** into it. Every other wired verb
+either reads the log or asks the run's own machinery to act; this one appends a
+row and lets `wakeWatchers` decide what that row means. It exists because a
+blueprint could already declare `{pattern: custom.*, action: notify}` and
+nothing in the system could produce a `custom.*` event — the reaction was
+declarable and unreachable.
+
+Wiring it found a defect in the **declaration**, not in the command, and it is
+the most interesting thing this step produced. `event emit` declared `type` and
+`payload` and no `run`, because the entry had been written from the agent's point
+of view, where the run is *ambient*: a tool call arrives inside a turn and the
+turn already knows which log it belongs to. The same declaration is projected to
+the CLI, and a shell has no ambient run — `resolveRunDir` deliberately has no
+"the latest one" default, because guessing which run a write lands in is the one
+guess an append-only log cannot take back. So `arxi event emit custom.x` had no
+run to write to at all. The fix was in the registry rather than in the command:
+`run` is now the first positional, matching the fourteen other run-taking
+commands, and `-r` went from thirteen commands to fourteen. A parameter that is
+positional on thirteen commands and a flag on the fourteenth is precisely the
+per-command dialect `shortFlags` exists to prevent.
+
+**`custom.*` is enforced against people too**, not only against agents, and that
+is a decision rather than an inherited restriction. Each of the other 32 event
+types has a verb that maintains the fields the reducer indexes —
+`stage.advanced`'s `to_index`, `agent.blocked`'s `blocked_ref` — so a
+hand-written one produces a log its own readers disagree about; a caller who can
+write `stage.advanced` can walk a run straight past the quorum its blueprint
+declares, and the log will look like it advanced legitimately. `custom.*` is the
+one namespace with no invariant, which is exactly why it is the one an outsider
+may write in. The refusal that matters most is not `stage.advanced`, though: it
+is **`custom.*` itself**, which passes the prefix check and is the string the
+user most recently had in their hands, because this command's own output
+recommends `arxi event log <run> --type 'custom.*'` for seeing what was written.
+Emitting it would mint one event whose literal type contains a `*` and which no
+readable pattern matches.
+
+The halted guard is **asymmetric on purpose**, and copying `run prompt` here
+would have been wrong. A prompt always spends money, so a paused run refuses it
+unconditionally. An emit has two legitimate purposes: it is a cause when a
+watcher matches and a *record* when none does. So it refuses only when something
+would have acted — a parked cause exits 0 and starts nothing, which is
+indistinguishable from the command failing — and it records freely into a paused
+run when nothing is watching. Refusing that second case would teach people to
+unpause a run in order to write a note in it, which is the opposite of what
+pausing is for. The message branches on *which* halt: `run unpause` for paused,
+`run why` for blocked, because unpausing a blocked run reports success and leaves
+it just as blocked.
+
+Running it also proved that **driving is load-bearing**, which is the same defect
+`run prompt` shipped in its first draft. Effects are transient: `wakeWatchers`
+returns `SpawnTurn` inside `Decide`'s return value, and a command that appends
+the cause and exits has produced a log in which a watcher matched and nothing
+happened — while printing a success line and exiting 0. Emitting
+`custom.contract_frozen` into a live run whose blueprint watches `custom.*` wrote
+seq 11 and then seq 12–15 (`agent.activated`, `llm.response`, `stage.submitted`,
+`agent.turn_done`, all `security`): four events that exist only because
+`driveResumedRun` executed the effect. And when nothing matches, the output
+spends the *most* words, because both outcomes exit 0 and the only thing
+distinguishing "nothing is watching `custom.deploy`" from "`custom.deploy` woke
+`qa`" is that paragraph — so it names the patterns the run really declares, or
+says the run declares none, since "your pattern did not match" and "this run
+reacts to nothing at all" send a reader to different files.
+
+`event log` came before it, and it is the verb every other verb has been
+quoting. `run show`, `run why`, `run tree` and `run result` are all folds of the
+same bytes; this is the bytes. It computes nothing, which makes it look like the
+one command where a defect cannot matter, and the opposite is true: it is what a
+person opens when they have stopped believing the summaries, so a column it
+drops is evidence that exists on disk and cannot be found. That is the whole
+design rule — **values are elided, keys never are** — and every elision prints a
+note naming `--json`, which marshals `kernel.Event` itself so the wire shape *is*
+the file's shape.
+
+Running it against a real 21-event `--sim` log decided four things that no amount
+of reading the spec would have. There is **no TS column**, because there is no
+usable timestamp: `run.started` carries `"ts":""` and every later event carries
+`1970-01-01T00:00:00Z`, so a simulated run has an order and no times, and a
+column of identical epoch strings would be six wasted characters per row
+pretending to be information. **Selection is by directory and never by scope**,
+because `scope` is *empty on every executor event* — `agent.activated`,
+`llm.response`, `stage.submitted` and `agent.turn_done` all leave it unset, and
+only reducer events carry `scope: "run:<id>"`. A `--scope` filter would have
+silently dropped the majority of a real log while looking like it worked. And
+`DEPTH` is a column precisely because **the causal chain is broken through the
+executor**: reducer events carry `correlation_id`, `caused_by` and depth 1;
+executor events carry none of the three and depth 0. That is a gap in the
+producers rather than in this reader, and the footer names it instead of
+apologising for the column.
+
+The two defects running it found were both in what it *said*, not in what it
+computed. `dashIfZero` — right for every other optional column in this binary —
+turned all seventeen executor events into `-` while the footer directly
+underneath announced a chain "broken at depth 0", a note about a value that
+appeared nowhere in the table above it; 0 is not a missing depth, it is the depth
+of a root cause. And the timestamp note printed **"1 are empty"** — the *common*
+branch, since exactly one event in a real log is written before the clock exists.
+A footer whose only job is to be trusted about what the table omitted cannot get
+that count's grammar wrong in the same breath. A third landed from the test
+rather than the run: on a log where *nothing* carries a ts, the note offered
+`--json` as the place to find them, which is a false promise and exactly how a
+reader concludes the view is hiding something.
+
+Two smaller decisions are worth stating because both are the less obvious
+option. `--since-seq` is **inclusive** and `0` means *no bound*, because the
+intended use is a tailer resuming from the last seq it saw, and a script
+computing that bound off an empty log passes 0 and must still get everything. A
+filter matching nothing **exits 0 with stdout empty** and diagnoses on stderr,
+listing the types the log really holds: nothing found is an answer, so
+`arxi event log r1 --type 'tool.*' && deploy` must not refuse to deploy a run
+that merely used no tools, and the likeliest cause of a miss is a typo the reader
+can only fix if they are shown the real spellings. `kernel.MatchEventType` is now
+exported and the reducer's `matchPattern` delegates to it, so a watcher and
+`--type` cannot come to disagree about what `stage.*` selects.
+
+`run cancel` came before it, and it is the smallest verb in the binary in
+the same way `run pause` is — `case RunCancelled` sets `Status` and returns **no
+effects** — with one difference that changes everything about the command around
+it: cancelling is *final*. An append-only log has no way to unsay it, and the
+reducer folds every event arriving at a terminal run into nothing
+(`internal/kernel/decide.go`), so a second `run.cancelled` carrying a better
+reason would sit in the file where no reading of the log will ever show it. The
+command therefore refuses the second cancel and quotes the reason already on
+record, and it says at the one moment `--reason` can still be supplied that it
+cannot be supplied later.
+
+What running it found was not in this command at all. Cancel a run with a
+question outstanding and the question is still in `State.Inbox`, still unanswered,
+and now unanswerable — and `arxi inbox approve` printed
+*"approved. backend unblocked (r1 seq 7)"* for it, a sentence in which only the
+seq was true. Nothing folded that reply, so the member was not working and
+anybody waiting on it waited forever. `internal/inbox` now has `ErrRunOver`,
+checked **under the writer lock** against the state `Answer` folds itself rather
+than the one the caller listed from — because the run can reach a terminal status
+between a human reading `arxi inbox` and answering it, which is precisely the race
+a cancel creates. The listing gained the other half: a question whose run has
+ended is still shown, because the log is not edited, and it is marked
+`[run cancelled -- not answerable]` with `answerable: false` in the JSON. A row
+that looks exactly like actionable work and is not is how a human's attention
+gets spent on nothing.
+
+`run pause` came before it, and it is the smallest verb in the binary:
+`case RunPaused` sets `Status` and returns **no effects**, so unlike `run unpause`
+there is no loop to drive and the command is finished the moment one payload-less
+event hits the log. What that byte buys is `spendingHalted`, which is true for
+paused as well as blocked, so every site that would open a turn parks its cause
+instead. What it does *not* buy is the reading most likely to cost somebody
+money: a pause cannot reach into a turn that is already open, because a turn runs
+inside whichever process drives the loop and this is not that process. So the
+output says which member's turn survives, by name, and refuses to print "none
+interrupted" as a constant.
+
+Running it found two things. The turn count in the promised headline —
+§20.6's "2 turns finished, none interrupted" — cannot be `State.Turns`:
+`applyActivated` increments that when a turn *opens* and nothing decrements it,
+so the fixture with one activation and no `turn_done` printed **"1 turn finished,
+backend still open"**, a line contradicting itself in nine words. Finished is
+`Turns` minus the turns still open. The second was in `run unpause`: its
+exhausted-budget warning was gated on `Status == blocked`, and a pause overwrites
+`Status`, so the sequence a user actually performs — block on money, pause to
+think, resume — skipped the warning entirely and re-blocked on the next cost with
+nothing said. Pausing a blocked run also costs the diagnosis, since
+`kernel.Explain` returns early for a paused run, so the pause prints what the run
+was stuck on as of the event before it: this is the last moment anything in the
+binary can still name it.
+
+`run result` was the verb before it, and it is the sharpest counter-example to
+"already correct" this project has produced. §20.1 of the design shows the verb
+printing a code review's findings; the log cannot supply them. `stage.submitted`
+declares **no payload at all** (`spec/events.md`), the only producer writes
+`{agent, stage, simulated}`, and both success paths in the reducer write
+*constants* — `"all stages completed"`. So `result_from: last_submit` resolves to
+a real event that carries no text, and there is no field anywhere in a run
+directory for an agent-authored answer. The verb therefore prints what is
+recorded, names the member whose answer it would have been, and says in one line
+that the summary is the run's own record rather than that member's work. Printing
+"all stages completed" alone and letting it pass for a delegated review is the
+failure §10.7 calls the worst kind: a sentence that is still displayed and is
+simply untrue. Reading it also found that the reducer sets `StatusCancelled`
+without reading the `reason` `spec/events.md` declares, so a cancelled run's
+reason survives only in the log — this command is the only place it surfaces.
+
+`run tree` came before it, and it makes the "already correct" half of that
+sentence exactly as sharp as it deserves to be. The tree is a projection and
+nothing had to be added to the engine to draw it — but the projection is only as
+true as what it reads, and reading it found that `applyCost` charges each run's
+own ceiling and never rolls a child's spend up into its parent. So the verb
+prints the total it measures itself, by summing each run's own spend, and says
+out loud when the root's own `tree_spent_usd` disagrees. A projection cannot
+corrupt a log; it can still be the first thing to notice that the log does not
+say what the design documents claim.
 
 `run prompt` is the exception that proves the rule, and it is why the sentence
 above says *projection* rather than *command*. It is the first `run *` verb

@@ -87,6 +87,26 @@ var now = time.Now
 // duplicate reply buys a duplicate turn, and turns cost money.
 var ErrAlreadyAnswered = errors.New("inbox item is already answered")
 
+// ErrRunOver means the run holding the question has already ended.
+//
+// Found by wiring `arxi run cancel`, which is the command that makes this state
+// easy to reach on purpose: cancel a run with a question outstanding and the
+// question is still in State.Inbox, still unanswered, and now unanswerable. The
+// reducer folds every event arriving at a terminal run into nothing
+// (internal/kernel/decide.go:32), so the reply appended fine, changed no state,
+// and the CLI printed "approved. backend unblocked (r1 seq 7)" -- a sentence in
+// which only the seq was true.
+//
+// Refused rather than tolerated for the same reason as a duplicate, one step
+// worse: a duplicate reply buys a turn that was not wanted, and this one buys
+// nothing at all while telling the user a member is working. Somebody waiting on
+// that member waits forever.
+//
+// It is separate from ErrAlreadyAnswered because the remedies have nothing in
+// common. "Already answered" means look at the log; this means the run is over,
+// and if the work still matters it needs a new run.
+var ErrRunOver = errors.New("the run has ended, so a reply would change nothing")
+
 // Item is a question as a human needs to see it, which is the folded InboxItem
 // plus the run it belongs to.
 //
@@ -277,6 +297,20 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 	if !found {
 		return kernel.Event{}, fmt.Errorf("inbox: %q in run %s: %w",
 			id, st.RunID, ErrNoSuchItem)
+	}
+
+	// Checked AFTER the item, and under the lock, with the state this function
+	// folded rather than the one the caller listed from.
+	//
+	// After the item because "no such question" and "already answered" are more
+	// precise answers when they apply: a terminal run whose id was mistyped
+	// should still report the typo. Under the lock because the run can reach a
+	// terminal status between a human reading `arxi inbox` and answering it --
+	// that is precisely the race a cancel creates -- and a check against the
+	// stale fold would pass while the log says otherwise.
+	if st.Status.Terminal() {
+		return kernel.Event{}, fmt.Errorf("inbox: %q in run %s is %s: %w",
+			id, st.RunID, st.Status, ErrRunOver)
 	}
 
 	ev := kernel.Event{

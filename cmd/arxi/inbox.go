@@ -86,6 +86,13 @@ func cmdInboxList(args []string) {
 	type row struct {
 		item inbox.Item
 		dir  string
+		// over records that the run holding this question has reached a terminal
+		// status. A question does not leave State.Inbox when its run ends -- the
+		// log is not edited -- so without this the list shows a row that looks
+		// exactly like actionable work and is not. Found by wiring `run cancel`,
+		// which reaches this state in one command.
+		over   bool
+		status string
 	}
 	var rows []row
 	// unreadable is collected rather than fatal. One damaged run directory must
@@ -100,8 +107,10 @@ func cmdInboxList(args []string) {
 			unreadable = append(unreadable, fmt.Sprintf("%s: %v", dir, err))
 			continue
 		}
+		st := r.State()
 		for _, it := range r.List(true) {
-			rows = append(rows, row{item: it, dir: dir})
+			rows = append(rows, row{item: it, dir: dir,
+				over: st.Status.Terminal(), status: string(st.Status)})
 		}
 	}
 
@@ -112,6 +121,11 @@ func cmdInboxList(args []string) {
 				"id": rw.item.ID, "run": rw.item.RunID, "dir": rw.dir,
 				"agent": rw.item.Agent, "kind": rw.item.Kind,
 				"question": rw.item.Question, "on_timeout": rw.item.OnTimeout,
+				// Both, and not one derived from the other by the consumer:
+				// run_status is what happened, answerable is what to do about it.
+				// A caller that filtered on a status list of its own would start
+				// treating a status added later as actionable.
+				"run_status": rw.status, "answerable": !rw.over,
 			})
 		}
 		payload := map[string]any{"items": out}
@@ -130,10 +144,33 @@ func cmdInboxList(args []string) {
 		fmt.Printf("  looked in %s (%d run%s)\n", runsDir, len(runs), plural(len(runs)))
 	} else {
 		fmt.Printf("%-9s %-12s %-9s %-14s %s\n", "ID", "RUN", "AGENT", "KIND", "QUESTION")
+		dead := 0
 		for _, rw := range rows {
+			// The marker goes on the QUESTION column because it is the last one
+			// and has no width to break; putting it in RUN would push every
+			// following column out of alignment on one row and make the table
+			// harder to read than the fact is worth.
+			q := rw.item.Question
+			if rw.over {
+				dead++
+				q += fmt.Sprintf("  [run %s -- not answerable]", rw.status)
+			}
 			fmt.Printf("%-9s %-12s %-9s %-14s %s\n",
 				rw.item.ID, truncateCol(rw.item.RunID, 12), truncateCol(rw.item.Agent, 9),
-				truncateCol(rw.item.Kind, 14), rw.item.Question)
+				truncateCol(rw.item.Kind, 14), q)
+		}
+		if dead > 0 {
+			// Said once, under the table, because the marker says WHICH and this
+			// says why they are still here at all -- which is the question a user
+			// asks when a cancelled run's question keeps appearing in a list of
+			// things to do.
+			subject := fmt.Sprintf("%d questions belong", dead)
+			if dead == 1 {
+				subject = "1 question belongs"
+			}
+			fmt.Printf("\n%s to a run that has ended: the log is not edited, so "+
+				"they stay listed. Answering one is refused rather than folded "+
+				"into nothing.\n", subject)
 		}
 	}
 
@@ -220,6 +257,27 @@ func cmdInboxAnswer(verb string, args []string) {
 
 	ev, err := inbox.Answer(dirs[0], id, reply)
 	if err != nil {
+		// A run that has ended is its own case, because the generic message
+		// ("inbox: "inbox-1" in run r1 is cancelled: the run has ended...") does
+		// not say what to do, and what to do is the whole difficulty: nothing in
+		// this run will ever read the answer, so the work has to move or be
+		// dropped.
+		if errors.Is(err, inbox.ErrRunOver) {
+			// runID comes from the fold above and is empty only if that read
+			// failed; the directory is then the only handle the user has, and a
+			// remedy line reading "arxi run result " is worse than a long path.
+			subject := runID
+			if subject == "" {
+				subject = dirs[0]
+			}
+			fmt.Fprintf(os.Stderr, "arxi inbox %s: %v\n"+
+				"  the reducer folds every event arriving at a terminal run into "+
+				"nothing, so the reply would be written and read by no one.\n"+
+				"  what ended it: arxi run result %s\n"+
+				"  the question stays listed because it is in the log, and the log "+
+				"is not edited.\n", verb, err, subject)
+			os.Exit(1)
+		}
 		// A usage mistake and an operational failure get different exit codes,
 		// because a script that separates them should not file a broken-storage
 		// report for a missing --reason.
