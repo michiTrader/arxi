@@ -424,9 +424,14 @@ func attachEventDetail(e kernel.Event) string {
 
 	case kernel.ToolCallCompleted:
 		// A failed call must not render as a bare tool name, because that is
-		// exactly what a successful one renders as. Both spellings are read: the
-		// catalogue says `result` (spec/events.md), and both executors in the tree
-		// write `ok` with `output` or `error`.
+		// exactly what a successful one renders as. Both spellings are read
+		// because the two executors in the tree disagree, and this is not the
+		// command that gets to settle it: the catalogue and the LIVE executor say
+		// `result` (spec/events.md:108, internal/provider/executor.go:352), and the
+		// simulated one writes `ok` with `output` or `error`
+		// (internal/exec/fake.go:387). Reading one spelling would render half the
+		// logs in this tree as a bare tool name -- and the half it broke would be
+		// whichever executor the reader was not using.
 		if ok, present := e.Payload["ok"].(bool); present && !ok {
 			return attachJoin(e.Str("tool"), "failed:", e.Str("error"))
 		}
