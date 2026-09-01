@@ -1452,8 +1452,11 @@ func spawnsFor(fx []Effect, agent string) int {
 // progress table that this package can actually contradict.
 //
 // The table exists because a single percentage was misleading in both
-// directions: 49.0% of the CLI surface is wired while 100% of the reducer is
-// done, and quoting either alone tells a different lie. But a table of measured
+// directions: roughly half of the CLI surface is wired while 100% of the
+// reducer is done, and quoting either alone tells a different lie. The CLI
+// figure is not repeated here on purpose -- it moves whenever a verb is wired,
+// and cmd/arxi's surface coverage test is what holds the README to it. But a
+// table of measured
 // numbers rots exactly like a headline does, and this one rots in the
 // flattering direction — nobody revisits "100%" after adding the 33rd event.
 //
