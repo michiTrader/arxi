@@ -315,7 +315,8 @@ is mid-flight.
 
 ```
 $ arxi run steer r1 "rate-limit by API key, not by IP — we are behind a CDN"
-steered → coordinator (queued: backend is busy)
+run r1 steered (seq 42), to coordinator
+  it is queued: coordinator is mid-turn, and the cause is drained when that turn finishes
 ```
 
 Queued, not applied, and not interrupting. Interrupting the turn would throw away
@@ -333,18 +334,26 @@ $ arxi run prompt r1 "also add a metrics counter" --to backend
 ```
 
 `steer` **corrects the course** of work in flight; `prompt` **injects a new
-cause**. Their defaults differ accordingly — `steer` defaults to
-`--on-busy=steer`, `prompt` to `--on-busy=queue`. Internally they are the same
-mechanism (`applyInjection`), which is the point of ADR-0005: `on_busy: queue`,
-follow-up and coalescing are one mechanism, not three features. But the user is
-stating a different intent, and the log records which one, so `event trace` can
-later show whether a change of direction or a new requirement caused a turn.
+cause**. Their defaults do *not* differ: both default to `--on-busy=queue`,
+because queueing is the only mode `applyInjection` implements and
+`--on-busy=steer` names precisely the alternative ADR-0005 discarded. `steer`
+therefore refuses that mode and cites the ADR, rather than accepting a flag it
+would ignore. Internally they are the same mechanism (`applyInjection`), which is
+the point of ADR-0005: `on_busy: queue`, follow-up and coalescing are one
+mechanism, not three features. But the user is stating a different intent, and
+the log records which one (`agent.steered` against `run.prompt`), so `event
+trace` can later show whether a change of direction or a new requirement caused a
+turn.
 
 For a script rather than a human, the write must be conditional:
 
 ```
 $ arxi run steer r1 "use a sliding window" --if-seq 41
-rejected: run r1 is at seq 47, not 41. re-read and retry.
+arxi run steer: not appended -- the run moved.
+  you guarded on seq 41 and run r1 is at seq 47, so 6 event(s) happened since you looked.
+  nothing was written. read what changed and decide again:
+    arxi run show r1
+    arxi event log r1 --since-seq 42
 ```
 
 CAS on `seq`, not on the turn: `seq` identifies a *version of the state*, a turn
@@ -352,6 +361,13 @@ spans many states (ADR-0006). A CAS on the turn would sometimes pass when it
 should fail, which is the worst thing a CAS can do. Without `--if-seq` the
 semantics are last-write-wins, which is fine for a human at a terminal and wrong
 for automation.
+
+A guard the run has passed and a guard it never reached are different mistakes,
+and the refusals say so differently. Above, six events landed and re-reading the
+tail is the fix. A guard *ahead* of the head cannot be caught up to at all — the
+seq came from another run or was mistyped — so that refusal says the run never
+reached that seq, and offers the whole log rather than a `--since-seq` slice past
+the end, which would print nothing.
 
 Five steers arriving while `backend` is busy produce **one** turn carrying five
 causes, and `SpawnTurn.Coalesced` records that it was five. That number is a
