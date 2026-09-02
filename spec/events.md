@@ -124,6 +124,32 @@ creates an inbox item and leaves `blocked_ref` so the remedy is automatic.
 nobody observes, it stays recorded and quiescence detects it later. Failing here
 would let a trivial merge conflict kill half an hour of work.
 
+## Shared state
+
+| type | payload |
+|---|---|
+| `state.set` | `key`, `value` |
+
+The run's key/value store is folded from the log like everything else, and that
+is the whole reason it is an event. A KV file living beside the log would make
+`state = fold(decide, state0, events)` false: the fold would rebuild every
+member, lock and inbox item from August and then read **today's** value for a
+key an agent set last Tuesday, so a replay would not be a replay.
+
+The last write wins and the state keeps no history of a key. That is not a loss
+of information — `arxi event log <run> --type state.set` **is** the history, and
+a second copy of it inside the state is a copy that can disagree with the log.
+
+There is deliberately no `state.get`: a read changes nothing, so an event for it
+would be a row nothing can fold. There is no delete either — no verb declares
+one, and a key that vanished from the fold could not be told from a key nobody
+ever set.
+
+`state.set` is **not** runtime-derived, so watchers fire on it. That is the
+point: a blueprint declaring `watchers: [{agent: backend, pattern: state.*}]`
+gets a turn when the contract it was waiting for lands, instead of somebody
+paying for a turn to say so.
+
 ## Budget
 
 | type | payload |
