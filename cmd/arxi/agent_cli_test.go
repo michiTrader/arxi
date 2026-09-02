@@ -331,20 +331,40 @@ func TestABareAgentToolDoesNotContradictItself(t *testing.T) {
 	}
 }
 
-// TestADeclaredAgentSubcommandIsNotCalledUnknown.
+// TestAnUnknownAgentSubcommandListsWhatAgentAccepts.
 //
-// `agent list`, `agent create` and `agent show` are declared and unbuilt. The
-// surface publishes them, so blaming the user for a typo they did not make is
-// the worst available answer.
-func TestADeclaredAgentSubcommandIsNotCalledUnknown(t *testing.T) {
+// This test used to assert the opposite of its name: that `agent list`, `agent
+// create` and `agent show` answered "declared in the surface but not implemented
+// yet". All three are wired now. The promise it was really about -- that a
+// declared path is never called unknown -- is measured across all fifty of them
+// in TestEveryDeclaredPathAnswersAboutItselfOneWayOrTheOther, so a third copy
+// aimed at whichever verbs happen to be unbuilt this week would need retargeting
+// every time one gets built and would pin nothing the surface walk does not.
+//
+// What is pinned only here is the notImplemented fall-through at the end of
+// cmdAgent's switch. With every declared agent verb wired it looks like dead
+// code, and deleting it would send a mistyped `arxi agent lst` out of the group's
+// dispatcher to be reported as an unknown top-level command -- telling the user
+// to check the spelling of `agent`, the one word they got right.
+func TestAnUnknownAgentSubcommandListsWhatAgentAccepts(t *testing.T) {
 	dir := workdir(t)
-	for _, sub := range []string{"list", "create", "show"} {
-		r := arxi(t, dir, "agent", sub)
-		if strings.Contains(r.out, "unknown") {
-			t.Errorf("arxi agent %s is declared but reported as unknown:\n%s", sub, r.out)
-		}
-		if !strings.Contains(r.out, "not implemented yet") {
-			t.Errorf("arxi agent %s does not say it is declared and unbuilt:\n%s", sub, r.out)
+	r := arxi(t, dir, "agent", "lst")
+
+	if r.code == 0 {
+		t.Fatalf("a mistyped agent subcommand succeeded:\n%s", r.out)
+	}
+	if strings.Contains(r.out, "does not exist in the surface") {
+		t.Errorf("`agent lst` is blamed on the whole path:\n%s\n"+
+			"  consequence: `agent` is a real group and the user is told it is "+
+			"not, so they check the group's spelling instead of the verb's.\n"+
+			"  fix: keep the notImplemented fall-through at the end of cmdAgent.", r.out)
+	}
+	for _, want := range []string{"create", "list", "show", "tool"} {
+		if !strings.Contains(r.out, want) {
+			t.Errorf("`agent lst` does not offer %q:\n%s\n"+
+				"  consequence: the answer names the mistake without naming the "+
+				"four words that would have worked, which is the whole reason "+
+				"notImplemented looks up the longest declared prefix.", want, r.out)
 		}
 	}
 }
