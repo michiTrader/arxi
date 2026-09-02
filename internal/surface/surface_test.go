@@ -126,13 +126,25 @@ func TestBudgetIsMandatory(t *testing.T) {
 // TestMutatingToolsAreNotAllowByDefault: if an agent can change the world
 // without asking, that has to be a written decision, not an oversight.
 func TestMutatingToolsAreNotAllowByDefault(t *testing.T) {
-	// These three are allow on purpose: they are the coordination mechanism
+	// These four are allow on purpose: they are the coordination mechanism
 	// between agents and they are scoped to the run. Without them the agents
 	// cannot collaborate and the tool has no reason to exist.
+	//
+	// `arxi_state_unlock` is the one that deserves a second sentence, because its
+	// `force` param lets an agent end a lease another agent still holds -- authority
+	// nothing else on this list has. It is allow for the same reason `state_lock` is:
+	// a release only a human can perform means every agent lock runs to its expiry,
+	// so the crashed-holder stall of docs/design/20-use-cases.md §20.8 comes back for
+	// every early finish. What makes it safe enough is that it is not deniable: the
+	// event records previous_holder and reason: "forced", so `arxi event log <run>
+	// --type lock.*` names who broke whose lease. PolicyAsk was the alternative and
+	// was rejected because the common case -- releasing a lock you hold yourself, the
+	// entire point of the verb -- would then need a human for every turn.
 	expected := map[string]bool{
-		"arxi_state_set":  true,
-		"arxi_event_emit": true,
-		"arxi_state_lock": true,
+		"arxi_state_set":    true,
+		"arxi_event_emit":   true,
+		"arxi_state_lock":   true,
+		"arxi_state_unlock": true,
 	}
 	for _, td := range BuildManifest().Tools {
 		if td.Mutates && td.Policy == PolicyAllow && !expected[td.Name] {

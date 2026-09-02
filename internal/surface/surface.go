@@ -330,7 +330,7 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("ref", "string", "blueprint reference"))}},
 
 	// ---- shared state ------------------------------------------------------
-	// The `run` positional on all three was ADDED when these verbs were wired, for
+	// The `run` positional on all four was ADDED when these verbs were wired, for
 	// the reason the `event emit` entry below spells out: these entries were written
 	// from the agent's side, where the run is ambient, and a shell has no ambient
 	// run. Worth seeing here that the omission was systematic rather than a slip --
@@ -355,6 +355,27 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("run", "string", "run id")),
 			pos(p("key", "string", "key")),
 			p("ttl", "string", "lock expiry")}},
+	// `state unlock` was promised by internal/kernel/why.go long before it was
+	// declared: the `lock` arm of walkCause hands the user `arxi state unlock <key>`
+	// as the remedy for a blocked member, and for the whole life of that line no
+	// registry entry backed it. `state lock` sharpened the hole rather than filling
+	// it -- the only lock.released it writes is a steal of a LAPSED lease, so a
+	// holder that finished early had no way to say so and the key sat there until it
+	// timed out.
+	//
+	// `force` is agent-visible, and that is a consequence of WireParams rather than a
+	// preference: every declared param is projected into the tool schema, and the
+	// only synthetic one is `json` on non-mutating commands. So there is no way to
+	// declare a flag the CLI has and an agent does not, and an allow-policy tool with
+	// this param lets one agent end another's LIVE lease. Kept anyway, because the
+	// alternative -- a lease only a human can end -- means every agent lock runs to
+	// expiry, which is the stall §20.8 names. The release is accountable instead: it
+	// records previous_holder and reason: "forced", and the log says who did it.
+	{Path: []string{"state", "unlock"}, Desc: "release a cooperative lock",
+		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
+		Params: []Param{pos(p("run", "string", "run id")),
+			pos(p("key", "string", "key")),
+			p("force", "bool", "release a lease that has not lapsed")}},
 
 	// ---- events ------------------------------------------------------------
 	// The `run` positional was ADDED when this verb was wired, and the omission is
@@ -894,10 +915,10 @@ func SubcommandsUnder(prefix ...string) []string {
 // a second thing to memorize.
 var shortFlags = map[string]string{
 	// The ones that appear over and over across the surface.
-	"run":    "r", // 17 commands
+	"run":    "r", // 18 commands
 	"name":   "n", // 8
 	"budget": "b", // 5
-	"key":    "k", // 3
+	"key":    "k", // 4
 	"text":   "t", // 3
 	"model":  "m", // 3
 	"prompt": "p", // the objective of a run
