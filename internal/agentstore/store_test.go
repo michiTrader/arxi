@@ -2,6 +2,7 @@ package agentstore
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // open makes a store in a disposable directory, under the name a real
@@ -82,21 +84,25 @@ func TestACreatedAgentIsABlueprintTheRunnerCanExecute(t *testing.T) {
 	}
 }
 
-// TestTheRenderedAgentDeclaresNoStages pins the decision the package doc
-// argues for.
+// TestTheRenderedAgentEntersAStageAndActivatesItsMember is the test that says
+// the file can run, and it used to assert the opposite.
 //
-// applyRunStarted in internal/kernel/decide.go returns nil when
-// len(c.Stages) == 0 -- the single-agent run of §20.1 enters no stage -- and
-// TestRunStartedWithoutStagesEntersNothing pins that arm from the other side.
-// Rendering a synthetic stage so the file resembled examples/feature-team.yaml
-// would put a stage in the state of every single-agent run that nobody
-// declared, and advance rules would then be evaluated against it.
+// It was TestTheRenderedAgentDeclaresNoStages, arguing that one member has
+// nothing to advance between and that a stage nobody wrote is a surprise in the
+// diff. Both true, and both beside the point: applyRunStarted activates the
+// members OF THE ENTERED STAGE, and returns nil when len(c.Stages) == 0. So the
+// stageless file it was protecting started, activated nobody, and recorded
+// run.quiescent -- "nobody is working and nobody can start" -- as the second
+// event, after zero turns. `blueprint validate` passed it, `agent show` printed
+// it, and the only symptom was a run that did nothing.
 //
-// Both halves are asserted: the parsed config, and the absence of the word in
-// the text. The text matters because the file is meant to be read and grown by
-// hand, and a stage the author did not write is a surprise in the diff.
-func TestTheRenderedAgentDeclaresNoStages(t *testing.T) {
-	raw, err := Record{Name: "solo", Model: "claude-sonnet-4-6"}.Render()
+// So it is asserted through Decide rather than by counting stages. The stage is
+// the mechanism; being activated is the property, and a future reducer that
+// activates a lone member without a stage should make this test pass, not fail.
+// internal/kernel's TestRunStartedWithoutStagesEntersNothing still pins the
+// stageless arm itself -- what changed is that a stored agent no longer takes it.
+func TestTheRenderedAgentEntersAStageAndActivatesItsMember(t *testing.T) {
+	raw, err := Record{Name: "solo", Model: "claude-sonnet-4-6", Tools: []string{"read"}}.Render()
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -104,19 +110,86 @@ func TestTheRenderedAgentDeclaresNoStages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if n := len(bp.Config.Stages); n != 0 {
-		t.Errorf("the rendered agent declares %d stage(s), want none\n"+
-			"  consequence: applyRunStarted emits stage.entered for the first "+
-			"declared stage, so every single-agent run would carry a stage its "+
-			"author never wrote, with advance rules evaluated against it.\n"+
-			"  fix: Render must not emit a stages: block; one member has nothing "+
-			"to advance between.", n)
+
+	// Two steps, because activation is not applyRunStarted's job: it emits
+	// stage.entered, and applyStageEntered activates that stage's members. The
+	// event is fed back the way the runtime feeds it back -- appended, then
+	// reduced -- so the property under test is "a run of this file reaches an
+	// activation", not "one function returned one effect".
+	s, fx := kernel.Decide(kernel.State{}, kernel.Event{
+		Seq: 1, ID: "e1", Type: kernel.RunStarted, Scope: "run:r1",
+		Source: kernel.SourceRuntime,
+		Payload: map[string]any{
+			"run_id": "r1", "actor": "solo", "budget_usd": 2.0,
+		},
+	}, bp.Config)
+
+	entered := firstEmit(fx, kernel.StageEntered)
+	if entered == nil {
+		t.Fatalf("run.started on a stored agent enters no stage; effects were %s\n"+
+			"  consequence: applyRunStarted returns nil for a blueprint with no "+
+			"stages, so the run activates nobody and records run.quiescent after "+
+			"zero turns -- while `agent create` prints `run it:` and every "+
+			"validator passes the file.\n"+
+			"  fix: Render writes a stages: block.", effectTypes(fx))
 	}
-	if strings.Contains(string(raw), "\nstages:") {
-		t.Errorf("the rendered file contains a stages: key:\n%s\n"+
-			"  consequence: the file is designed to be read and grown by hand, "+
-			"and a stage nobody declared is a line the author has to explain.", raw)
+
+	next := *entered
+	next.Seq, next.ID = 2, "e2"
+	_, fx = kernel.Decide(s, next, bp.Config)
+
+	// SpawnTurn, not the agent.activated event: the turn is the effect that costs
+	// money and does the work, and it is what a stageless file never produced.
+	spawned := ""
+	for _, f := range fx {
+		if st, ok := f.(kernel.SpawnTurn); ok {
+			spawned = st.Agent
+		}
 	}
+	if spawned != "solo" {
+		t.Errorf("entering stage %q spawns a turn for %q, want solo; effects were %s\n"+
+			"  consequence: the run this store exists to make possible enters a "+
+			"stage and then goes quiescent, having asked nobody to do anything.\n"+
+			"  fix: the rendered member must be a member of the rendered stage.",
+			entered.Str("stage"), spawned, effectTypes(fx))
+	}
+
+	// The text too, because the file is meant to be grown by hand and a member
+	// added to a file with no stage would silently not run either.
+	if !strings.Contains(string(raw), "\nstages:") {
+		t.Errorf("the rendered file has no stages: block:\n%s\n"+
+			"  consequence: a second member added by hand joins a file that "+
+			"activates nobody, and the diff gives the author no line to add one to.", raw)
+	}
+}
+
+// firstEmit returns the first emitted event of one type, or nil.
+func firstEmit(fx []kernel.Effect, t kernel.EventType) *kernel.Event {
+	for _, f := range fx {
+		if em, ok := f.(kernel.Emit); ok && em.Event.Type == t {
+			e := em.Event
+			return &e
+		}
+	}
+	return nil
+}
+
+// effectTypes names what came back, for a failure that has to say what happened
+// instead of what did not. "activates nobody" plus [Emit run.quiescent] is a
+// diagnosis; "activates nobody" alone is a bug report.
+func effectTypes(fx []kernel.Effect) string {
+	if len(fx) == 0 {
+		return "[]"
+	}
+	names := make([]string, 0, len(fx))
+	for _, f := range fx {
+		if em, ok := f.(kernel.Emit); ok {
+			names = append(names, string(em.Event.Type))
+			continue
+		}
+		names = append(names, fmt.Sprintf("%T", f))
+	}
+	return "[" + strings.Join(names, " ") + "]"
 }
 
 // hostileNames are names that the YAML subset would read as something other
@@ -673,5 +746,39 @@ func TestPlainSafeIsAnAllowlistAndKeepsTheSlash(t *testing.T) {
 				"sequence item, a number, a bool -- or is a hard error in the "+
 				"subset. Any of the four writes a file the next command misreads.", s)
 		}
+	}
+}
+
+// TestAtDoesNotCreateTheDirectoryAndStillAnswers.
+//
+// `agent list` and `agent show` read through At for this: a command that reports
+// on agents/ must not create it. The absence is asserted together with the two
+// answers, because a constructor that skipped the MkdirAll and then failed every
+// read would be worse than the side effect it avoids -- and in a checkout the
+// user cannot write to, At is the difference between "no agents yet" and
+// "permission denied" about a directory nobody asked to make.
+func TestAtDoesNotCreateTheDirectoryAndStillAnswers(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), DefaultDir)
+	s, err := At(dir)
+	if err != nil {
+		t.Fatalf("At: %v", err)
+	}
+
+	names, err := s.Names()
+	if err != nil || len(names) != 0 {
+		t.Errorf("Names on a store whose directory does not exist = %v, %v; want none and no error\n"+
+			"  consequence: `agent list` in a fresh repository complains instead of "+
+			"answering \"none\", which is what model list, trigger list and inbox do.", names, err)
+	}
+	if _, err := s.Load("ghost"); !errors.Is(err, ErrNotExist) {
+		t.Errorf("Load through At = %v; want ErrNotExist\n"+
+			"  consequence: `agent show ghost` exits on an I/O error instead of "+
+			"exit 1 with the name it looked for.", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s exists after two reads through At (%v)\n"+
+			"  consequence: reporting on the store creates it. Open is for writers "+
+			"and does that on purpose; a reader that does it too leaves an empty "+
+			"directory behind in every repository somebody runs `agent list` in.", dir, err)
 	}
 }
