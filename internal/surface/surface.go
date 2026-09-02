@@ -271,7 +271,22 @@ var Registry = []Cmd{
 			pos(p("text", "string", "the correction")),
 			p("to", "string", "recipient"),
 			p("if-seq", "number", "only apply if the run is at this seq"),
-			enum(def(p("on-busy", "string", "what to do if it is busy"), "steer"),
+			// The default is `queue`, and it was `steer` until this verb was
+			// wired. That value named ADR-0005's DISCARDED alternative --
+			// "interrupt the running turn and restart it with the new context",
+			// discarded because it throws away work already paid for -- so the
+			// surface declared as its default the one behaviour the reducer is
+			// documented never to have.
+			//
+			// It was not merely wrong on paper. parseInvocation applies declared
+			// defaults, so `arxi run steer <run> "..."` arrived with
+			// on-busy=steer, and the command refuses any on-busy the reducer does
+			// not implement: the verb would have rejected every plain invocation
+			// with exit 2, citing a flag the caller never typed. Read together
+			// with `run prompt` above, which defaults to `queue` and shares the
+			// same executor, the two entries also disagreed about behaviour that
+			// is literally one code path.
+			enum(def(p("on-busy", "string", "what to do if it is busy"), "queue"),
 				"reject", "queue", "steer")}},
 
 	// ---- agents and roles --------------------------------------------------
