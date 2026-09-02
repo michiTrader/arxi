@@ -777,9 +777,29 @@ func printEventTraceFooter(v traceView, elided bool) {
 		note := fmt.Sprintf(
 			"%s records no cause and nothing in this log records it as one, so\n"+
 				"    the chain is this one event", v.subject.ID)
+		if len(v.subject.CausedBy) > 0 {
+			// Reached when nothing the subject names can be followed -- the id is
+			// dangling, or it is the subject itself. Had one of them resolved to
+			// another event here, that event would be an ancestor and this branch
+			// would not have been taken.
+			//
+			// "records no cause" is false in that case, and the dangling or cycle
+			// note two lines further down says so in the same breath. A footer that
+			// contradicts itself reads as broken rather than as precise, and the
+			// reader cannot tell which of the two sentences to believe.
+			note = fmt.Sprintf(
+				"the chain is this one event: nothing in this log records %s as a\n"+
+					"    cause, and the %d it names cannot be followed either (below)",
+				v.subject.ID, len(v.subject.CausedBy))
+		}
+		// Phrased so the count does not sit in front of a verb. "1 of the 3 events
+		// here do carry one" is the disagreement isAre exists to prevent, and it is
+		// reachable by any log whose only cause-carrying event is the subject --
+		// which is exactly the dangling case above.
 		if deep := len(v.run.events) - v.causeless; deep > 0 {
-			note += fmt.Sprintf(";\n    %d of the %d events here do carry one, so this is a gap in the\n"+
-				"    chain rather than a log that has none", deep, len(v.run.events))
+			note += fmt.Sprintf(";\n    a cause is recorded on %d of the %d events in this log, so this is\n"+
+				"    a gap in the chain rather than a log that has none",
+				deep, len(v.run.events))
 		}
 		notes = append(notes, note)
 	default:
