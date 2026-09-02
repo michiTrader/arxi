@@ -109,7 +109,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		applyCost(&out, e, c, &fx)
 
 	case LockAcquired:
-		out.Locks = append(out.Locks, Lock{Key: e.Str("key"), Holder: e.Actor})
+		acquireLock(&out, e)
 	case LockReleased:
 		releaseLock(&out, e.Str("key"))
 
@@ -1354,6 +1354,98 @@ func anyBusy(s State) bool {
 	return false
 }
 
+// acquireLock takes the lock the event names, or leaves it where it is.
+//
+// This arm was one unconditional append, and that was wrong in both directions at
+// the same time. Two lock.acquired events for one key produced TWO rows -- a lock
+// held by two holders, which is the single state a lock exists to make impossible
+// -- and releaseLock removes every row for a key, so one release then freed both.
+// Nothing in the tree emitted either event when that was written, so nothing had
+// ever exercised it; `arxi state lock` is the first writer.
+//
+// # The first holder wins
+//
+// A second holder is dropped rather than overwriting. The earlier acquire is the
+// one the run has already acted on -- whoever holds the key may be editing the
+// files it guards -- so handing it to a later claimant would make the fold
+// contradict work already in flight. The CLI refuses a held key up front, which
+// leaves this arm deciding the case it cannot: two agents' tool calls landing in
+// one batch, where the only answer that keeps the invariant is the first.
+//
+// A loser learns nothing from the fold, and that is deliberate here: the reducer
+// records what is true, and telling the second claimant it failed is the job of
+// whatever bridged the call, which can read State.Locks and see the holder.
+//
+// # The same holder re-acquiring extends it
+//
+// The expiry is replaced and nothing else changes. That is the renewal a long
+// turn needs, and it has to be idempotent: a holder refused its own renewal would
+// eventually let the lock lapse under itself and then have it stolen mid-edit. A
+// shorter expiry is accepted as readily as a longer one, because a holder saying
+// it needs two more minutes rather than ten is information, not a mistake.
+//
+// # An empty key is dropped
+//
+// Same judgement as StateSet and the `if id == ""` in InboxItem: a keyed
+// collection with an unkeyed entry is a lookup that can only ever fail. Here it
+// would also put a row in `run show`'s lock listing that names nothing, and that
+// nothing can release by name.
+func acquireLock(out *State, e Event) {
+	key := e.Str("key")
+	if key == "" {
+		return
+	}
+
+	holder, expires := lockHolder(e), e.Str("expires_at")
+	for i := range out.Locks {
+		if out.Locks[i].Key != key {
+			continue
+		}
+		if out.Locks[i].Holder == holder {
+			out.Locks[i].ExpiresAt = expires
+		}
+		return
+	}
+	out.Locks = append(out.Locks, Lock{Key: key, Holder: holder, ExpiresAt: expires})
+}
+
+// lockHolder is who holds the lock, falling back to the event's source.
+//
+// An agent that takes a lock is in e.Actor, and an agent always has a name. A
+// lock taken from a shell does not: `arxi state lock`, like `state set` and
+// `event emit`, leaves Actor EMPTY on purpose, because wakeWatchers skips a
+// watcher whose agent equals the actor and putting a member's name there would
+// silently disable that member's own watcher on lock.*.
+//
+// Empty is fine in an event, where the field is optional and means "no member did
+// this". It is not fine in a Lock, where Holder is the entire answer to "held by
+// whom": `run show` would print "held by " and `run why` would say `waits for the
+// lock "migrations/" held by `, with the sentence trailing off exactly where the
+// reader needs a name. The source is the honest answer -- a person at a shell is
+// "human" -- and Source is a closed set of four words, so this can only ever
+// print something the reader has already met elsewhere in the log.
+func lockHolder(e Event) string {
+	if e.Actor != "" {
+		return e.Actor
+	}
+	return string(e.Source)
+}
+
+// releaseLock frees a key, whoever released it.
+//
+// It does not check the holder, and that is a decision rather than an omission: a
+// STEAL is legitimate and is how a lapsed lock is reclaimed. `arxi state lock`
+// records a lock.released for a holder whose expiry has passed and then acquires,
+// so the judgement "this lock had expired" lands in the log where the next fold
+// reproduces it without needing a clock. A reducer that only honoured a release
+// from the holder would refuse exactly that, and the only way round it would be
+// for the CLI to write an event claiming to be the crashed agent.
+//
+// So the writer is accountable for releasing only what it is entitled to, and the
+// log shows who did it. Removing every row for the key predates acquireLock, which
+// now keeps there being at most one; it is left as a filter because "one row per
+// key" is an invariant of this file rather than of the log it folds, and a
+// hand-written log with two acquires in it should still end up with the key free.
 func releaseLock(out *State, key string) {
 	kept := out.Locks[:0]
 	for _, l := range out.Locks {
