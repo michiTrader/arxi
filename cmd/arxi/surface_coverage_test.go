@@ -94,30 +94,32 @@ var blockingPaths = map[string]bool{
 func TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes(t *testing.T) {
 	// Job 2 first, because job 1's answer is meaningless if it fails.
 	//
-	// `run steer` is used as the canary because it is declared, has no executor,
+	// `state lock` is used as the canary because it is declared, has no executor,
 	// and is the unwired verb whose implementation is least like the work already
-	// done here: it does not project a fold at all, it injects an event into a run
-	// somebody else is driving, which needs the writer lock this binary hands to
-	// one process at a time. This repository wires verbs one per change, so the
-	// canary that survives longest is the one that is not a variation on a
-	// projection.
+	// done here: a cooperative lock with a --ttl is a LEASE, and nothing in this
+	// tree has one. writer.lock is not a counter-example -- it is a per-run-dir
+	// file holding a pid, taken and dropped inside a single command -- whereas
+	// this verb has to hold a named key across processes until it expires, with
+	// nobody running to expire it. This repository wires verbs one per change, so
+	// the canary that survives longest is the one that is not a variation on
+	// something already built.
 	//
-	// It has moved twice, from `run replay` to `run attach` to here, and both moves
-	// happened because the verb got built. The test failed exactly as designed each
-	// time, with the instruction below naming the fix, which is the right amount of
-	// noise: a demand to re-verify the sentinel against a path that is genuinely
-	// unwired, not a bug.
+	// It has moved three times, from `run replay` to `run attach` to `run steer`
+	// to here, and every move happened because the verb got built. The test failed
+	// exactly as designed each time, with the instruction below naming the fix,
+	// which is the right amount of noise: a demand to re-verify the sentinel
+	// against a path that is genuinely unwired, not a bug.
 	dir := workdir(t)
-	canary := arxi(t, dir, "run", "steer")
+	canary := arxi(t, dir, "state", "lock")
 	if !strings.Contains(canary.out, notImplementedSentinel) {
 		t.Fatalf("the sentinel this test counts with does not appear for a path known to be unimplemented.\n"+
-			"  probed:   arxi run steer\n  expected: %q\n  got:\n%s\n"+
+			"  probed:   arxi state lock\n  expected: %q\n  got:\n%s\n"+
 			"  consequence: if the sentinel is wrong, NOTHING matches it, every "+
 			"declared path counts as implemented, and this test certifies 100%% "+
 			"coverage while passing. That already happened once with the README's "+
 			"paraphrase of this phrase.\n"+
 			"  fix: copy the wording from notImplemented in main.go -- or, if "+
-			"run steer is now built, point this canary at another unimplemented path.",
+			"state lock is now built, point this canary at another unimplemented path.",
 			notImplementedSentinel, canary.out)
 	}
 
