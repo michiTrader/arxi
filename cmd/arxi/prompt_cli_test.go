@@ -243,7 +243,7 @@ func TestTheAdviceRunWhyGivesForAQuiescentRunIsImplemented(t *testing.T) {
 // backend now". On a budget-blocked run that is false: spawnCauses asks
 // spendingHalted BEFORE it looks at the member, so an idle member on a halted
 // run gets its cause parked. The line described a decision the reducer never
-// makes.
+// makes. (That function is now causeOutlook, shared with `run steer`.)
 func TestAHaltedRunIsToldItsCauseIsParkedAndNotStarted(t *testing.T) {
 	dir := workdir(t)
 	run := promptableRun(t, dir) // stops blocked, on the budget
