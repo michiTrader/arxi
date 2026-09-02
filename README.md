@@ -499,13 +499,56 @@ silently**, because each is evidence about a producer, and a walker that quietly
 smoothed them over would make the log look healthier than it is. The walk itself
 carries a visited set, so a cycle terminates the print instead of the process.
 
-What the verb also documents is a gap on the producer side: `caused_by`,
-`correlation_id` and `depth` are written by `kernel.derived` and **not** by
-`exec.stamp`, so every event minted by the executor — turns, tool calls, their
-results — carries no cause at all. The footer says so with a count rather than
-leaving the reader to conclude the run had no causality: *"3 of these 9 events
-carry no cause"*. Closing that gap is a change to the producer and is the next
-thing worth building here.
+What the verb also documented was a gap on the **producer** side, and writing
+this reader is what made the gap measurable — so it is now closed. `caused_by`,
+`correlation_id` and `depth` were written by `kernel.derived` and **not** by
+`exec.stamp`, so every event the executor minted — turns, tool calls, their
+results — carried no cause at all. On a real 21-event `--sim` log: **5 events
+carried a cause and 16 did not**, so the log held sixteen causal threads instead
+of one, an agent turn was a hole in the chain, every correlation group was rooted
+at an executor event rather than at `run.started`, and depth 0 on all sixteen
+cleared the `MaxDepth` brake in `wakeWatchers` as if each were a root cause. The
+same run today — same blueprint, same 21 events — has **20 of 21 carrying a
+cause**, all correlating to `run.started`, and `arxi event trace` prints a
+six-event chain from the run's start down to `run.result`. The one event that
+records no cause is `run.started`, which is the root.
+
+The fix is one function — `exec.attribute` — and its placement was the whole
+decision. Not in the `Executor` interface, because then every implementation has
+to remember: the Fake, the live provider one, and whichever comes next. Copying
+three fields is not a choice an executor should get to make differently, and the
+one that forgot would produce a log that traces correctly under `--sim` and not
+in production, which is the worst place for the difference to live. Not in
+`stamp` either, which fills identity, takes a bare `[]kernel.Event` and is called
+from three places — one of them, `Loop.appendTicks`, has no effect at all. So it
+sits in the sequential tail of `runIndependent`, the last point where the effect
+is still in hand.
+
+Two decisions inside it are load-bearing. All the events of one effect get the
+**same** cause, flat rather than chained — not `activated` causing `llm.response`
+causing `turn_done`. One effect is one causal step; chaining would read prettier
+and would **triple the depth every turn adds**, so cascades a blueprint legitimately
+asked for would start dying two generations early for a reason nothing prints.
+And a **timer tick is a root**: no cause, depth 0. The `SetTimer` that armed it
+ran in an earlier step and the clock that delivers the id does not remember who
+armed it, so reconstructing the link would need a timer-to-cause map in the
+`Runner` — a map that is not in the log, which a resumed run would rebuild empty,
+writing uncaused ticks where a fresh run wrote caused ones. `run`, `--sim`,
+resume and replay would stop being one fold over the same bytes. It is also true
+to what a tick is: time passing is not an event's consequence.
+
+Closing the gap then **inverted the footer notes**, which is the part worth
+recording. They had been written to accuse the producer, and on a healthy log the
+accusation was now false: the six-event trace printed *"1 of these 21 events
+carry no cause"* about `run.started`. An event with no cause is a **root** — the
+run's own start, a timer firing, or something fed in from outside the fold — not
+a defect. Both notes were reframed and gated at *more than one* root, so they are
+silent on every healthy log and still loud where it matters: sixteen roots in a
+21-event log reads as obviously wrong, which is how the next regression in
+attribution gets seen. The fixtures that produce the old shape were kept rather
+than updated, for two reasons — logs written before the fix are still on disk and
+must still render, and they are what keeps the root-count note reachable in the
+suite.
 
 `run steer` came just before it, and it is worth recording what it actually
 cost, because this paragraph predicted the wrong thing. The prediction was that
@@ -763,11 +806,13 @@ because `scope` is *empty on every executor event* — `agent.activated`,
 `llm.response`, `stage.submitted` and `agent.turn_done` all leave it unset, and
 only reducer events carry `scope: "run:<id>"`. A `--scope` filter would have
 silently dropped the majority of a real log while looking like it worked. And
-`DEPTH` is a column precisely because **the causal chain is broken through the
-executor**: reducer events carry `correlation_id`, `caused_by` and depth 1;
-executor events carry none of the three and depth 0. That is a gap in the
-producers rather than in this reader, and the footer names it instead of
-apologising for the column.
+`DEPTH` is a column because the chain **was** broken through the executor when
+this view was built: reducer events carried `correlation_id`, `caused_by` and
+depth 1; executor events carried none of the three and depth 0. The footer named
+that gap instead of apologising for the column, which is what made it measurable
+and then fixed — see `event trace` above. The column stayed, and now carries real
+values on every row: it is how a cascade's distance from its root is read, and how
+the note would come back if a producer ever stopped attributing.
 
 The two defects running it found were both in what it *said*, not in what it
 computed. `dashIfZero` — right for every other optional column in this binary —

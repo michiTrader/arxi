@@ -468,6 +468,138 @@ func TestLoopTicksAreRuntimeSourced(t *testing.T) {
 	}
 }
 
+// A tick is a ROOT of its causal thread, and this pins the decision rather than
+// leaving it to a doc comment.
+//
+// appendTicks is the one caller of stamp with no effect to attribute: the
+// SetTimer that armed the timer ran in an earlier step and the clock that
+// delivers the id does not remember who armed it. Reconstructing the link would
+// need a timer-to-cause map in the Runner, and that map is not in the log -- a
+// resumed run would rebuild it empty and write uncaused ticks where a fresh run
+// wrote caused ones, so `run`, `--sim`, resume and replay would stop being one
+// fold over the same bytes. Attributing a tick to whatever the loop happened to
+// be doing is the tempting version of the same bug, and it would be a lie: time
+// passing is not an event's consequence.
+//
+// correlation_id is checked because that, with caused_by, is what the CLI's
+// causalDepthSplit counts a root by; a tick carrying one would be counted as
+// caused and then trace as an orphan.
+func TestLoopTicksAreCausalRoots(t *testing.T) {
+	c := teamCfg()
+	c.Stages = []kernel.StageConfig{
+		{Name: "build", AdvanceWhen: "all", TimeoutMs: 1000, OnTimeout: "fail"},
+	}
+	c = c.ResolveDefaults()
+
+	loop, log, fake, _ := newLoop(c)
+	fake.Submits = false
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ticks := 0
+	evs, _ := log.Read(1, 0)
+	for _, e := range evs {
+		if e.Type != kernel.TimerTick {
+			continue
+		}
+		ticks++
+		if len(e.CausedBy) > 0 || e.CorrelationID != "" || e.Depth != 0 {
+			t.Errorf("timer.tick %s records caused_by %v / corr %q / depth %d, want "+
+				"none / \"\" / 0.\n"+
+				"Consequence: the cause can only come from a timer-to-cause map held "+
+				"in the Runner and absent from the log, so a resumed run writes "+
+				"uncaused ticks where a fresh one wrote caused ticks and the two "+
+				"folds diverge over the same bytes.\n"+
+				"Remedy: appendTicks stamps identity only. A tick is a root.",
+				e.ID, e.CausedBy, e.CorrelationID, e.Depth)
+		}
+	}
+	if ticks == 0 {
+		t.Fatal("no timer.tick was written, so this test asserts nothing")
+	}
+}
+
+// TestLoopWritesOneCausalThread is the end-to-end version of the two producer
+// halves, over a whole run rather than one step.
+//
+// It is the measurement that `arxi event trace` was built to make and that
+// trace.go records at the top of the file: before the executor attributed
+// anything, a 21-event --sim log carried a cause on 5 events, held 16 causal
+// threads and reached depth 1; afterwards the same run is one thread rooted at
+// run.started. Neither producer half can show that alone -- the reducer's
+// attribution was always right, the executor's was always missing, and what
+// broke was the JOIN: a turn's events entered the next Decide at depth 0, so the
+// chain restarted at every turn no matter how deep the run had gone.
+//
+// Ticks are excluded rather than asserted about, because a tick is a root on
+// purpose. See TestLoopTicksAreCausalRoots.
+func TestLoopWritesOneCausalThread(t *testing.T) {
+	c := teamCfg()
+	loop, log, _, _ := newLoop(c)
+	seedRun(t, log, c, nil)
+
+	if _, err := loop.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var roots []kernel.Event
+	deepest := 0
+	evs, _ := log.Read(1, 0)
+	for _, e := range evs {
+		if e.Type == kernel.TimerTick {
+			continue
+		}
+		if len(e.CausedBy) == 0 && e.CorrelationID == "" {
+			roots = append(roots, e)
+			continue
+		}
+		if e.CorrelationID != "ev-start" {
+			t.Errorf("%s (%s) correlates to %q, want the run's own start.\n"+
+				"Consequence: the run's history splits into groups that no longer say "+
+				"they belong to the same run, so `arxi event trace` prints one of them "+
+				"and reports the rest as separate threads.",
+				e.Type, e.ID, e.CorrelationID)
+		}
+		if e.Depth > deepest {
+			deepest = e.Depth
+		}
+	}
+
+	if len(roots) != 1 || roots[0].Type != kernel.RunStarted {
+		t.Errorf("this run wrote %d roots (%v), want 1: run.started.\n"+
+			"Consequence: every extra root is a thread `arxi event trace` cannot "+
+			"reach from the run's start, and an agent turn is what usually goes "+
+			"missing.\n"+
+			"Remedy: exec.attribute copies the deciding effect's Cause onto the "+
+			"events it produced.", len(roots), rootTypes(roots))
+	}
+	// A run this shape reached depth 5 when measured. The assertion is >1 and not
+	// ==5, because the exact number is the blueprint's business: what has to hold
+	// is that depth GROWS across turns. At depth 0 on everything the executor
+	// wrote, the deepest event in a completed run was 1, MaxDepth was unreachable,
+	// and a watcher cascade had no bottom.
+	if deepest <= 1 {
+		t.Errorf("the deepest caused event sits at depth %d.\n"+
+			"Consequence: a turn's events enter the next Decide at depth 0, so the "+
+			"chain restarts at every turn, MaxDepth never brakes, and each "+
+			"generation of a runaway cascade is billed.\n"+
+			"Remedy: the same one -- depth has to travel through the executor.",
+			deepest)
+	}
+}
+
+// rootTypes renders the roots for a failure message. The types are what say
+// whether an unexpected root is a turn that lost its cause or something else.
+func rootTypes(roots []kernel.Event) []kernel.EventType {
+	out := make([]kernel.EventType, len(roots))
+	for i, e := range roots {
+		out[i] = e.Type
+	}
+	return out
+}
+
 // ----------------------------------------------------------------- ceilings
 
 // The turn ceiling has to be reachable end to end. --max-turns exists to stop a

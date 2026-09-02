@@ -1025,3 +1025,169 @@ func TestSeedIDsPreventsCollisionsOnResume(t *testing.T) {
 			"resumed run.", got.ID)
 	}
 }
+
+// ----------------------------------------------------------------- provenance
+
+// TestExecutorEventsCarryTheCauseOfTheirEffect is the producer half of what
+// `arxi event trace` reads.
+//
+// kernel.derived writes the causality triple on what the REDUCER emits, and for
+// a while it was the only thing in the tree writing it: stamp filled ID and Ts
+// and nothing else, so every event an agent turn produced arrived with no cause.
+// Measured on a real 21-event --sim log, 5 events carried a cause and 16 did
+// not. An agent turn -- the part of a run anybody actually asks about -- was a
+// hole in the chain, every correlation group was rooted at an executor event
+// instead of at run.started, and depth 0 on all sixteen cleared the MaxDepth
+// brake in wakeWatchers as if each were a root cause.
+//
+// The depth assertion is also the flatness one: all of this turn's events sit at
+// the effect's depth, not at 3, 4, 5, 6. One effect is one causal step. See the
+// note on attribute for what chaining them would cost a cascade.
+func TestExecutorEventsCarryTheCauseOfTheirEffect(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	cause := kernel.Cause{Events: []string{"e1"}, CorrelationID: "c1", Depth: 3}
+	fx := []kernel.Effect{kernel.SpawnTurn{Agent: "writer", Cause: cause}}
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(log.events) < 2 {
+		t.Fatalf("the turn produced %d events, want the whole lifecycle",
+			len(log.events))
+	}
+	for _, e := range log.events {
+		if !reflect.DeepEqual(e.CausedBy, cause.Events) {
+			t.Errorf("%s (%s) records caused_by %v, want %v.\n"+
+				"Consequence: the event is a root of its own causal thread, so "+
+				"`arxi event trace` cannot reach it from run.started and the agent "+
+				"turn is a hole in the chain.\n"+
+				"Remedy: copy the effect's Provenance onto its events before "+
+				"stamping them.", e.Type, e.ID, e.CausedBy, cause.Events)
+		}
+		if e.CorrelationID != cause.CorrelationID {
+			t.Errorf("%s (%s) records correlation_id %q, want %q.\n"+
+				"Consequence: the event forms a correlation group of its own, so one "+
+				"run's history reads as many unrelated threads.\n"+
+				"Remedy: the same one.", e.Type, e.ID, e.CorrelationID,
+				cause.CorrelationID)
+		}
+		if e.Depth != cause.Depth {
+			t.Errorf("%s (%s) records depth %d, want %d.\n"+
+				"Consequence: at depth 0 every executor event clears the MaxDepth "+
+				"brake in wakeWatchers as if it were a root cause, so a watcher "+
+				"cascade has no bottom and every generation of it is billed.\n"+
+				"Remedy: the same one -- and flat, one depth for the whole turn.",
+				e.Type, e.ID, e.Depth, cause.Depth)
+		}
+	}
+}
+
+// TestEachEffectsEventsCarryItsOwnCause guards the pairing, which is how this
+// can be wrong while looking right.
+//
+// Two turns open in the same step, in parallel, from different causes and at
+// different depths. If attribution read a shared cause -- or the wrong element
+// of the effect slice, the same class of bug as appending in completion order --
+// every event would still carry a plausible triple and every footer count in
+// `arxi event log` would still add up. The chain would simply attach one
+// member's turn to the reason a DIFFERENT member was woken, and nothing
+// downstream can detect that: it reads as a run where the wrong agent reacted.
+func TestEachEffectsEventsCarryItsOwnCause(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+
+	fx := []kernel.Effect{
+		kernel.SpawnTurn{Agent: "writer", Cause: kernel.Cause{
+			Events: []string{"e-writer"}, CorrelationID: "c1", Depth: 1}},
+		kernel.SpawnTurn{Agent: "editor", Cause: kernel.Cause{
+			Events: []string{"e-editor"}, CorrelationID: "c1", Depth: 7}},
+	}
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The Fake stamps every event of a turn with the agent as Actor, so who each
+	// event belongs to is readable without reconstructing the split.
+	wantCause := map[string]string{"writer": "e-writer", "editor": "e-editor"}
+	wantDepth := map[string]int{"writer": 1, "editor": 7}
+	seen := map[string]int{}
+	for _, e := range log.events {
+		seen[e.Actor]++
+		if len(e.CausedBy) != 1 || e.CausedBy[0] != wantCause[e.Actor] {
+			t.Errorf("%s's %s records caused_by %v, want [%s].\n"+
+				"Consequence: the turn is attributed to the reason another member was "+
+				"woken, which reads as a run where the wrong agent reacted -- a shape "+
+				"no consumer can tell from a correct one.\n"+
+				"Remedy: attribute outcomes[i] from fx[i], never from a cause shared "+
+				"across the step.", e.Actor, e.Type, e.CausedBy, wantCause[e.Actor])
+		}
+		if e.Depth != wantDepth[e.Actor] {
+			t.Errorf("%s's %s records depth %d, want %d.\n"+
+				"Consequence: a turn inherits another turn's distance from the root, so "+
+				"MaxDepth brakes a shallow cascade and lets a deep one run.\n"+
+				"Remedy: the same one.", e.Actor, e.Type, e.Depth, wantDepth[e.Actor])
+		}
+	}
+	if seen["writer"] == 0 || seen["editor"] == 0 {
+		t.Fatalf("events per actor = %v; both turns must have produced some, or "+
+			"this test asserts nothing", seen)
+	}
+}
+
+// TestAProducerNamedCauseIsNotOverwritten protects the other direction, on the
+// same rule stamp follows for an id it did not mint.
+//
+// An executor that fills the triple itself knows something the effect's Cause
+// does not -- a provider that ran a nested cascade can say which of its own
+// steps produced which event, and that is finer than "everything this turn
+// wrote came from the reason the turn was opened". Overwriting it would flatten
+// exactly the detail worth having, and it would make Apply destructive on an
+// event built by kernel.derived, which arrives already attributed.
+func TestAProducerNamedCauseIsNotOverwritten(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.Now = func() string { return "2026-01-01T00:00:00Z" }
+	r.Executor = &attributingExecutor{}
+
+	fx := []kernel.Effect{kernel.SpawnTurn{Agent: "writer", Cause: kernel.Cause{
+		Events: []string{"e1"}, CorrelationID: "c1", Depth: 3}}}
+	if _, err := r.Run(context.Background(), fx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(log.events) != 1 {
+		t.Fatalf("got %d events, want the 1 this executor returns", len(log.events))
+	}
+
+	got := log.events[0]
+	want := kernel.Cause{Events: []string{"nested-step"},
+		CorrelationID: "other-thread", Depth: 9}
+	if !reflect.DeepEqual(got.CausedBy, want.Events) ||
+		got.CorrelationID != want.CorrelationID || got.Depth != want.Depth {
+		t.Fatalf("the event kept caused_by %v / corr %q / depth %d, want %v / %q / %d.\n"+
+			"Consequence: attribution overwrites a producer that named its own "+
+			"parents, so the finer causality a provider reported is replaced by the "+
+			"turn's -- and the same overwrite would blank the triple kernel.derived "+
+			"already wrote.\n"+
+			"Remedy: Cause.Apply returns early on a non-empty CausedBy.",
+			got.CausedBy, got.CorrelationID, got.Depth,
+			want.Events, want.CorrelationID, want.Depth)
+	}
+}
+
+// attributingExecutor is a provider that reports its own causality, which a real
+// one legitimately can: it ran the steps and knows which produced what.
+type attributingExecutor struct{}
+
+func (attributingExecutor) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Event, error) {
+	return []kernel.Event{{
+		ID: "x1", Type: kernel.AgentTurnDone, Actor: e.Agent,
+		CausedBy: []string{"nested-step"}, CorrelationID: "other-thread", Depth: 9,
+	}}, nil
+}
+
+func (attributingExecutor) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event, error) {
+	return nil, nil
+}
+
+func (attributingExecutor) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Event, error) {
+	return nil, nil
+}

@@ -516,8 +516,13 @@ func TestCoalescingOneTurnWithSeveralCauses(t *testing.T) {
 		t.Fatalf("turns = %d, expected 1 turn with the %d causes merged", got, n)
 	}
 	sp, _ := firstEffect[SpawnTurn](fx)
-	if len(sp.CauseEvents) != n {
-		t.Errorf("causes in the turn = %d, expected %d", len(sp.CauseEvents), n)
+	// n queued reasons plus the turn_done that freed the agent. The event that
+	// unblocked the member is a genuine parent -- it is why these causes can run
+	// NOW -- and naming it is what keeps the turn's depth consistent with a parent
+	// it actually declared. See causeOf.
+	if len(sp.Cause.Events) != n+1 {
+		t.Errorf("causes in the turn = %d, expected %d: the %d queued reasons and the event that drained them",
+			len(sp.Cause.Events), n+1, n)
 	}
 	if sp.Coalesced != n {
 		t.Errorf("Coalesced = %d; the number has to be auditable", sp.Coalesced)

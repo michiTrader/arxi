@@ -550,16 +550,15 @@ func TestEventTraceJSONKeepsADanglingCauseOutOfTheEdges(t *testing.T) {
 			"way to tell a missing line from an event that never had a cause.", cb)
 	}
 
-	// Two of the three: run.started and stage.entered, both written by the
-	// executor, which stamps only an id and a timestamp. The subject is the one
-	// event here carrying a cause, and it is the reason the count is worth
-	// publishing -- a consumer seeing 0 knows the chain is empty for a reason that
-	// has nothing to do with this log's contents.
+	// Two of the three: run.started and stage.entered, which this fixture writes
+	// without a cause. The subject is the one event here carrying one, and that is
+	// what makes the count worth publishing -- a consumer seeing 0 knows the chain
+	// is empty for a reason that has nothing to do with this log's contents.
 	if n := num(t, m, "events_without_cause"); n != 2 {
 		t.Errorf("events_without_cause is %d, want 2\n"+
-			"  consequence: causal fields are written by the reducer and not by the "+
-			"executor, so most events in a real log have none. A consumer cannot "+
-			"distinguish that from a broken chain without this figure.", n)
+			"  consequence: an event with no cause is a root, and every log has one. A "+
+			"consumer cannot tell a root from a chain broken by a producer that stopped "+
+			"attributing without this figure.", n)
 	}
 
 	// Empty, though ev-orphan records depth 1 and prints at the top of the tree.
