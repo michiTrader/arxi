@@ -154,6 +154,29 @@ type InboxItem struct {
 type Lock struct {
 	Key    string `json:"key"`
 	Holder string `json:"holder"`
+
+	// ExpiresAt is when the lock lapses, absolute and RFC3339, and it is absolute
+	// because the reducer has no clock. A duration ("10m") only means something
+	// next to a `now`, so storing one would make the fold depend on when it ran:
+	// the same log folded twice would report the same lock as live in the morning
+	// and lapsed in the afternoon, and replay fidelity is the property the whole
+	// design exists for. Whoever writes lock.acquired does the arithmetic once,
+	// against its own clock, and the instant it computed is then a fact of the log
+	// like any other.
+	//
+	// Empty means no expiry, which is NOT the same as expired: a lock with no
+	// expiry is held until something releases it. docs/design/20-use-cases.md
+	// §20.8 is blunt about what that costs -- "a lock with no expiry, held by an
+	// agent that crashed mid-turn, stalls the run until a human notices" -- which
+	// is why `arxi state lock` fills this in by default rather than leaving it to
+	// be remembered.
+	//
+	// The reducer never compares it to a clock; it only carries it. Deciding that
+	// a lock has lapsed is a reading, and a reading needs a now, so it belongs to
+	// the caller that has one: `arxi state lock` steals an expired lock by
+	// RECORDING a lock.released before its own acquire, which keeps the judgement
+	// in the log where the next fold can reproduce it without a clock of its own.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // State is the complete state of the run, derived from the log. It is never the
@@ -191,6 +214,22 @@ type State struct {
 
 	Locks []Lock      `json:"locks,omitempty"`
 	Inbox []InboxItem `json:"inbox,omitempty"`
+
+	// KV is the run's shared key/value store: what one member wants another to
+	// know without paying for a turn to say it.
+	//
+	// A map, and not the []Something every other collection here is. The others
+	// are ordered histories -- Members has slots, Inbox has questions in the
+	// order they were asked -- and this is a lookup where the last write is the
+	// whole answer. A slice would scan linearly per read and, worse, would let
+	// two entries share a key, which is a state `state get` cannot answer from.
+	//
+	// The values are strings because the surface declares the parameter as one,
+	// and that is worth keeping rather than widening to `any`: a map[string]any
+	// round-trips through JSON as float64, so a key set in Go and the same key
+	// after a fold from disk would not compare equal, and replay fidelity is the
+	// property this whole design exists for.
+	KV map[string]string `json:"kv,omitempty"`
 
 	ActiveTimer string `json:"active_timer,omitempty"`
 	Result      string `json:"result,omitempty"`
@@ -277,6 +316,19 @@ func (s State) Clone() State {
 	}
 	if s.Inbox != nil {
 		out.Inbox = append([]InboxItem(nil), s.Inbox...)
+	}
+	// The second map in this state, after Member.BlockedOn, and it needs the same
+	// treatment for a reason the slices above hide: `out := s` copies a slice
+	// HEADER, so appending to out.Locks leaves s.Locks alone, but it copies a map
+	// REFERENCE, so writing out.KV[k] writes s.KV[k] too. Without this arm the
+	// StateSet arm would mutate the state Decide was handed, the fold would stop
+	// being reproducible, and the tests that assert Decide does not touch its
+	// input would be checking the one field that no longer holds.
+	if s.KV != nil {
+		out.KV = make(map[string]string, len(s.KV))
+		for k, v := range s.KV {
+			out.KV[k] = v
+		}
 	}
 	return out
 }

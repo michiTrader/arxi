@@ -3,9 +3,9 @@
 // Today it implements schema, surface, why, blueprint validate, run start
 // (live, calling real models, or --sim), run list, run show, run why, run tree,
 // run prompt, run steer, run result, run pause, run unpause, run cancel,
-// run fork, run replay, run attach, event emit, event log, event trace, serve,
-// the trigger group, the inbox group, agent tool policy, the
-// eval group (--sim only), provider add and the
+// run fork, run replay, run attach, event emit, event log, event trace,
+// state set, state get, state lock, serve, the trigger group, the inbox group,
+// agent tool policy, the eval group (--sim only), provider add and the
 // model group; for everything else it answers "declared but not implemented"
 // with the exact name of the capability. That is on purpose: the surface is
 // frozen and verified by tests BEFORE the executor exists, so adding a new
@@ -18,18 +18,22 @@
 // with the binary. No count is repeated here on purpose: this comment has no
 // such test, so a figure in it can only rot.
 //
-// This paragraph has already been wrong five times. It claimed three commands
+// This paragraph has already been wrong six times. It claimed three commands
 // after six existed, it said `run start` was --sim only after the live executor
 // had landed, it carried "16 of 47" through six wirings and two registry
 // corrections, it omitted `run prompt` for that verb's entire life -- found
-// only when `run tree` was added to the same sentence -- and it was silently
+// only when `run tree` was added to the same sentence -- it was silently
 // missing `event emit`, the whole inbox group and `agent tool policy` until
 // `run replay` landed and the coverage guard's own list of wired paths was read
-// against it. That last one is the tell: the only reason those three were found
-// is that a DIFFERENT, tested figure printed the truth beside them. A doc comment
-// that overstates what is missing is the kind of stale documentation that costs a
-// reader nothing and a contributor everything: they reimplement what is already
-// in the tree.
+// against it, and it went stale again one increment later: `state set` shipped
+// wired, tested and counted in the README while this list did not mention it,
+// found when `state get` was added to the same sentence. That is the second
+// omission caught by the act of editing the line for the NEXT verb, which is
+// the only mechanism that has ever caught one here.
+//
+// A doc comment that overstates what is missing is the kind of stale
+// documentation that costs a reader nothing and a contributor everything: they
+// reimplement what is already in the tree.
 //
 // Note that the measured figure did NOT move when the executor landed, because
 // `run start` already counted as wired when only --sim worked. The number and
@@ -158,6 +162,9 @@ func main() {
 		return
 	case "agent":
 		cmdAgent(args[1:])
+		return
+	case "state":
+		cmdState(args[1:])
 		return
 	}
 
@@ -288,6 +295,9 @@ IMPLEMENTED TODAY
   run attach <run>           follow a live run: the events from now on
   event log <run>            the log itself: what every other verb reads
   event trace <event>        the causal chain of one event, root first
+  state set <run> <k> <v>    write a key the other members read
+  state get <run> <key>      read it back; exit 3 if it is not set
+  state lock <run> <key>     claim a key with a --ttl; exit 3 if it is held
   inbox                      questions an agent cannot continue without
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them

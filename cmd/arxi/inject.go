@@ -269,64 +269,10 @@ func injectCause(in injection, args []string) {
 		// A rejected CAS is not a failure of the disk, and saying so is the whole
 		// reason CASError is a distinct type carrying Actual. The caller is told
 		// what it missed and how to look at it, because re-reading is the correct
-		// response and retrying blindly is not.
+		// response and retrying blindly is not. refuseStaleCAS does not return.
 		var cas *logstore.CASError
 		if errors.As(err, &cas) {
-			// Two different mistakes reach this branch, and they need different
-			// sentences. Behind the head is the ordinary one: the run moved.
-			// AHEAD of the head is not -- the run never reached that seq, so
-			// "the run moved" is false, and the arithmetic below printed
-			// "-26 event(s) happened since you looked", which is not a number
-			// of events at all. Measured by guarding a 15-event run on seq 41.
-			//
-			// The catch-up hint has to differ too. Expected+1 past the head
-			// makes `event log --since-seq 42` print nothing, so the advice in
-			// a message whose only job is to say how to catch up would hand
-			// back an empty log.
-			if cas.Actual < cas.Expected {
-				fmt.Fprintf(os.Stderr, "arxi run %s: not appended -- run %s never "+
-					"reached seq %d.\n"+
-					"  you guarded on seq %d and the run is at seq %d, so the state "+
-					"you read is not this run's: a seq from another run, or a typo.\n"+
-					"  nothing was written. read this run and decide again:\n"+
-					"    arxi run show %s\n"+
-					"    arxi event log %s\n",
-					in.verb, pre.RunID, cas.Expected,
-					cas.Expected, cas.Actual, pre.RunID, pre.RunID)
-				store.Close()
-				os.Exit(1)
-			}
-
-			fmt.Fprintf(os.Stderr, "arxi run %s: not appended -- the run moved.\n"+
-				"  you guarded on seq %d and run %s is at seq %d, so %d event(s) "+
-				"happened since you looked.\n"+
-				"  nothing was written. read what changed and decide again:\n"+
-				"    arxi run show %s\n"+
-				// --since-seq, not --from-seq: the registry declares since-seq on
-				// `event log`, and the flag is INCLUSIVE (event.go:208 keeps
-				// e.Seq >= sinceSeq), so Expected+1 is the first event the caller
-				// has not seen. Printing a flag the recommended command refuses is
-				// the same defect as the `run fork --from-seq` hints, and it is
-				// worse here because it appears in a message whose whole purpose is
-				// to tell somebody how to catch up.
-				"    arxi event log %s --since-seq %d\n",
-				in.verb, cas.Expected, pre.RunID, cas.Actual,
-				cas.Actual-cas.Expected, pre.RunID, pre.RunID, cas.Expected+1)
-
-			// Closed explicitly before exiting, and this was MEASURED as a defect,
-			// not added defensively. os.Exit runs neither the deferred Close above
-			// nor the atExit hooks -- only fatal() calls runExitHooks, and this
-			// branch does not go through fatal because a rejected CAS is not an
-			// internal error.
-			//
-			// The consequence, walked by hand: one `run prompt --if-seq <stale>`
-			// left writer.lock holding a dead pid, and EVERY later command on that
-			// run was refused with advice to delete a lock file by hand -- for a run
-			// that had merely been guarded correctly. A CAS miss is the most
-			// ordinary failure this command has; it must not be the one that bricks
-			// the run.
-			store.Close()
-			os.Exit(1)
+			refuseStaleCAS("run "+in.verb, pre.RunID, cas, store)
 		}
 		fatal(fmt.Errorf("record %s: %w", in.typ, err))
 	}
@@ -397,6 +343,69 @@ func injectCause(in injection, args []string) {
 			"same fake executor: no model is called and no money is spent.\n")
 	}
 	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
+}
+
+// refuseStaleCAS reports a rejected --if-seq and exits 1. It never returns.
+//
+// Shared by every command that offers the flag (`run prompt`, `run steer`,
+// `run notify`, `state set`), and shared rather than copied because the three
+// decisions below were each measured on a real log, and a second copy of this
+// block is a second place for one of them to be missing. cmd is the CLI path
+// without the binary -- "run prompt", "state set" -- so the first line reads like
+// every other refusal of the command the user actually typed.
+func refuseStaleCAS(cmd, runID string, cas *logstore.CASError, store *logstore.Store) {
+	// Two different mistakes reach this function, and they need different
+	// sentences. Behind the head is the ordinary one: the run moved. AHEAD of the
+	// head is not -- the run never reached that seq, so "the run moved" is false,
+	// and the arithmetic below printed "-26 event(s) happened since you looked",
+	// which is not a number of events at all. Measured by guarding a 15-event run
+	// on seq 41.
+	//
+	// The catch-up hint has to differ too. Expected+1 past the head makes
+	// `event log --since-seq 42` print nothing, so the advice in a message whose
+	// only job is to say how to catch up would hand back an empty log.
+	if cas.Actual < cas.Expected {
+		fmt.Fprintf(os.Stderr, "arxi %s: not appended -- run %s never reached "+
+			"seq %d.\n"+
+			"  you guarded on seq %d and the run is at seq %d, so the state you "+
+			"read is not this run's: a seq from another run, or a typo.\n"+
+			"  nothing was written. read this run and decide again:\n"+
+			"    arxi run show %s\n"+
+			"    arxi event log %s\n",
+			cmd, runID, cas.Expected,
+			cas.Expected, cas.Actual, runID, runID)
+		store.Close()
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "arxi %s: not appended -- the run moved.\n"+
+		"  you guarded on seq %d and run %s is at seq %d, so %d event(s) happened "+
+		"since you looked.\n"+
+		"  nothing was written. read what changed and decide again:\n"+
+		"    arxi run show %s\n"+
+		// --since-seq, not --from-seq: the registry declares since-seq on
+		// `event log`, and the flag is INCLUSIVE (event.go:208 keeps
+		// e.Seq >= sinceSeq), so Expected+1 is the first event the caller has not
+		// seen. Printing a flag the recommended command refuses is the same defect
+		// as the `run fork --from-seq` hints, and it is worse here because it
+		// appears in a message whose whole purpose is to tell somebody how to
+		// catch up.
+		"    arxi event log %s --since-seq %d\n",
+		cmd, cas.Expected, runID, cas.Actual,
+		cas.Actual-cas.Expected, runID, runID, cas.Expected+1)
+
+	// Closed explicitly before exiting, and this was MEASURED as a defect, not
+	// added defensively. os.Exit runs neither the caller's deferred Close nor the
+	// atExit hooks -- only fatal() calls runExitHooks, and a rejected CAS does not
+	// go through fatal because it is not an internal error.
+	//
+	// The consequence, walked by hand: one `run prompt --if-seq <stale>` left
+	// writer.lock holding a dead pid, and EVERY later command on that run was
+	// refused with advice to delete a lock file by hand -- for a run that had
+	// merely been guarded correctly. A CAS miss is the most ordinary failure these
+	// commands have; it must not be the one that bricks the run.
+	store.Close()
+	os.Exit(1)
 }
 
 // kernelSteerTargetFor answers "who will actually hear this".

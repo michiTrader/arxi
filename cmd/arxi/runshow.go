@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/surface"
@@ -138,7 +139,16 @@ func runShowPayload(id, dir string, st kernel.State, cfg kernel.Config, simulate
 
 	locks := make([]map[string]any, 0, len(st.Locks))
 	for _, l := range st.Locks {
-		locks = append(locks, map[string]any{"key": l.Key, "holder": l.Holder})
+		lk := map[string]any{"key": l.Key, "holder": l.Holder}
+		// Omitted rather than "" when there is no expiry, the way the Lock's own JSON
+		// tag omits it and for the same reason: absent means "held until released" and a
+		// present empty string invites a consumer to print it as an instant. A reader
+		// deciding whether a lock is stealable tests presence first, so the two cases
+		// have to stay distinguishable here as well.
+		if l.ExpiresAt != "" {
+			lk["expires_at"] = l.ExpiresAt
+		}
+		locks = append(locks, lk)
 	}
 
 	out := map[string]any{
@@ -401,14 +411,53 @@ func describeBlockedOn(on map[string]any) string {
 	return strings.Join(parts, ", ")
 }
 
+// printShowLocks prints who holds what, and whether the claim still stands.
+//
+// The expiry is here because this is the command every lock message in the binary
+// points at: `state lock`'s refusals say "who holds what: arxi run show <id>", and
+// a holder without a lease answers half of what the reader came for -- whether to
+// wait or to steal.
+//
+// It reads a clock, alone among the show renderings, and the alternative was worse.
+// The annotation comes from lockLapsed, the SAME predicate `state lock` arbitrates
+// with, so the two cannot disagree; printing the instant and leaving the comparison
+// to the reader would let this view call a lock live that the next acquire would
+// steal out from under it. The clock is nowFunc, so a test can pin it.
+//
+// The JSON half deliberately does not carry the annotation: expires_at is a fact of
+// the fold, "lapsed" is a reading of it against a now, and a machine consumer has
+// its own clock.
 func printShowLocks(st kernel.State) {
 	if len(st.Locks) == 0 {
 		return
 	}
+	now := nowFunc().UTC()
 	fmt.Printf("\nlocks (%d):\n", len(st.Locks))
 	for _, l := range st.Locks {
-		fmt.Printf("  %s  held by %s\n", l.Key, l.Holder)
+		fmt.Printf("  %s  held by %s%s\n", l.Key, l.Holder, showLockLease(l, now))
 	}
+}
+
+// showLockLease renders the lease half of a lock line.
+//
+// Three outcomes, because a lock has three states worth telling apart and only one
+// of them is "held until T". No expiry is NOT expired -- it is held until the run
+// ends, since the only lock.released this binary writes is `state lock` stealing a
+// lapsed lease -- and an expiry no reader can parse is the same dead end reached by
+// a worse route, so both say what follows rather than showing a raw field.
+func showLockLease(l kernel.Lock, now time.Time) string {
+	if l.ExpiresAt == "" {
+		return "  (no expiry: held until the run ends)"
+	}
+	if _, err := time.Parse(time.RFC3339, l.ExpiresAt); err != nil {
+		return fmt.Sprintf("  (expires_at %q is not an instant, so nothing can judge it "+
+			"lapsed)", l.ExpiresAt)
+	}
+	if lockLapsed(l, now) {
+		return fmt.Sprintf("  (lapsed at %s: the next `arxi state lock` takes it)",
+			l.ExpiresAt)
+	}
+	return "  until " + l.ExpiresAt
 }
 
 // printShowAsks prints questions, with the unanswered ones first.
