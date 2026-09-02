@@ -4,9 +4,9 @@
 // (live, calling real models, or --sim), run list, run show, run why, run tree,
 // run prompt, run steer, run result, run pause, run unpause, run cancel,
 // run fork, run replay, run attach, event emit, event log, event trace,
-// state set, state get, state lock, serve, the trigger group, the inbox group,
-// agent tool policy, the eval group (--sim only), provider add and the
-// model group; for everything else it answers "declared but not implemented"
+// state set, state get, state lock, state unlock, serve, the trigger group, the
+// inbox group, agent tool policy, the eval group (--sim only), provider add and
+// the model group; for everything else it answers "declared but not implemented"
 // with the exact name of the capability. That is on purpose: the surface is
 // frozen and verified by tests BEFORE the executor exists, so adding a new
 // command is implementing something that was already promised, not inventing a
@@ -298,6 +298,7 @@ IMPLEMENTED TODAY
   state set <run> <k> <v>    write a key the other members read
   state get <run> <key>      read it back; exit 3 if it is not set
   state lock <run> <key>     claim a key with a --ttl; exit 3 if it is held
+  state unlock <run> <key>   hand it back; --force ends a live lease
   inbox                      questions an agent cannot continue without
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them
