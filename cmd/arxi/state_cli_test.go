@@ -640,18 +640,24 @@ func TestStateSetWithNoArgumentsExplainsTheStore(t *testing.T) {
 
 // TestTheStateGroupAnswersForVerbsItDoesNotRun.
 //
-// cmdState switches on `set` and sends everything else to notImplemented rather
-// than keeping its own list of the group's verbs. The defect that guards against is
-// the one `model` and `trigger` both shipped: a group that grows a dispatcher starts
-// answering "unknown command" for capabilities `arxi surface` publishes, which sends
-// the user hunting for a typo they never made.
+// cmdState routes the verbs it has and sends everything else to notImplemented,
+// which reads the group out of the registry rather than keeping its own list. The
+// defect that guards against is the one `model` and `trigger` both shipped: a group
+// that grows a dispatcher starts answering "unknown command" for capabilities
+// `arxi surface` publishes, which sends the user hunting for a typo they never made.
 //
-// What is NOT pinned here is which verb is unwired. `state get` is next and `state
-// lock` after it, so an assertion naming one would have to be edited by the commit
-// that fixes it -- and a test whose failure means "you succeeded" trains people to
-// edit tests. surface_coverage_test.go is where that moving fact lives, measured
-// against the registry rather than written down. The two sentences below hold for
-// every future state of the group.
+// The name of this test is now half a lie -- every verb in the group is wired, so
+// there is no capability it answers FOR -- and it is kept because the two shapes it
+// pins are the ones that outlive that. `arxi state` one word short and `arxi state
+// frobnicate` are still different mistakes with different answers, and both answers
+// are still built from the registry, so the fifth verb of this group will be listed
+// here on the day it is declared and before anything runs it.
+//
+// What is NOT pinned here is which verb is unwired. `state get` was next once, then
+// `state lock`, then `state unlock`; an assertion naming one would have to be edited
+// by the commit that fixed it -- and a test whose failure means "you succeeded"
+// trains people to edit tests. surface_coverage_test.go is where that moving fact
+// lives, measured against the registry rather than written down.
 func TestTheStateGroupAnswersForVerbsItDoesNotRun(t *testing.T) {
 	dir := t.TempDir()
 
@@ -662,7 +668,10 @@ func TestTheStateGroupAnswersForVerbsItDoesNotRun(t *testing.T) {
 	if bare.code != 2 {
 		t.Fatalf("`arxi state` exited %d, want 2:\n%s", bare.code, bare.out)
 	}
-	for _, want := range []string{"needs a subcommand", "it accepts:", "get", "lock"} {
+	// "unlock" rather than "lock", which every listing of the group would contain by
+	// accident: `lock` is a prefix of it, so asserting the shorter string would pass
+	// on a listing that had dropped the newer verb entirely.
+	for _, want := range []string{"needs a subcommand", "it accepts:", "get", "unlock"} {
 		if !strings.Contains(bare.out, want) {
 			t.Errorf("`arxi state` does not say %q:\n%s\n"+
 				"  consequence: the group is real and the user is one word away, so "+

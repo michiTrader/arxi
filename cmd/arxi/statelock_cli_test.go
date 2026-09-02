@@ -140,13 +140,19 @@ func TestStateLockTakesAFreeKeyOnALeaseItSaysItChose(t *testing.T) {
 //
 // `--ttl 0` is a real request -- a key one member owns for the whole run -- so it
 // is accepted. What follows from it is not obvious and cannot be discovered from
-// the log: `event emit` is gated to custom.*, so the only lock.released this binary
-// writes is a steal of a LAPSED lease, and a lock that cannot lapse is held until
-// the run ends.
+// the log: no reader ever judges such a lease lapsed, so neither the next claimant
+// nor this command's own steal reclaims the key. Somebody has to hand it back by
+// name with `arxi state unlock`, or it stands until the run ends.
+//
+// That last clause is what the warning gained when `state unlock` landed, and it is
+// asserted here rather than left to the prose: before the verb existed the sentence
+// described a dead end, and a warning about a dead end teaches the caller there is
+// nothing to be done.
 //
 // The warning is on STDERR because the callers of this verb are scripts, and a
 // script writes `arxi state lock r1 k >/dev/null`. The one consequence a caller
-// must not be able to redirect away is having created a lock nothing can reclaim.
+// must not be able to redirect away is having created a lock nothing reclaims on
+// its own.
 func TestStateLockWarnsAboutNoExpiryWhereStdoutCannotHideIt(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchSomethingElse, "", true)
@@ -165,8 +171,14 @@ func TestStateLockWarnsAboutNoExpiryWhereStdoutCannotHideIt(t *testing.T) {
 		t.Errorf("the no-expiry warning is not on stderr:\n%s\n"+
 			"  consequence: `arxi state lock r1 k >/dev/null` is how a script calls this, "+
 			"so a warning on stdout is a warning the caller who most needs it never "+
-			"sees -- and the lock it describes cannot be reclaimed by anything here.",
+			"sees -- and the lock it describes is one nothing reclaims on its own.",
 			errOut)
+	}
+	if !strings.Contains(errOut, "arxi state unlock r1 migrations/") {
+		t.Errorf("the warning does not name the release that frees this key:\n%s\n"+
+			"  consequence: the warning states a consequence and no remedy, which reads "+
+			"as \"you have done something irreversible\" -- and the reader who believes it "+
+			"leaves the key held for the life of the run.", errOut)
 	}
 
 	pay, _ := eventOfType(t, dir, "r1", "lock.acquired")["payload"].(map[string]any)
@@ -264,11 +276,15 @@ func TestALiveLeaseIsRefusedWithTheCodeAScriptCanWaitOn(t *testing.T) {
 // the exit-code contract, and it is the half that is easy to get wrong: this is
 // still "somebody else holds it", and it still must not be 3.
 //
-// A lock with no expiry never lapses, and the only lock.released this binary writes
-// is this command stealing a LAPSED lease -- `event emit` is gated to custom.*, so
-// there is no way to write one by hand. So a caller polling on 3 would spin until
-// the run ended. The message says which of the two it is, because "held by backend"
-// alone reads as something that will clear.
+// A lock with no expiry never lapses, and this command steals only a LAPSED lease,
+// so nothing reclaims the key on its own: not the next claimant, and not this
+// refusal. A caller polling on 3 would spin until the run ended.
+//
+// `state unlock --force` ends such a lease, and that does NOT make 3 right. 3 says
+// waiting alone gets the key, and here it never does -- what frees it is somebody
+// deciding to, which is a command to run rather than a wait to sit through. So the
+// refusal has to say which of the two situations this is, because "held by backend"
+// alone reads as something that will clear, and then name the decision.
 func TestALockThatCannotLapseIsRefusedWithACodeNoPollerSpinsOn(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchLock, eternalBackendLock, true)
@@ -281,7 +297,7 @@ func TestALockThatCannotLapseIsRefusedWithACodeNoPollerSpinsOn(t *testing.T) {
 			code, out, errOut, exitLockHeld)
 	}
 	if !strings.Contains(errOut, "with no expiry") ||
-		!strings.Contains(errOut, "nothing here can reclaim it") {
+		!strings.Contains(errOut, "nothing reclaims the key on its own") {
 		t.Errorf("the refusal does not distinguish itself from a lease that will "+
 			"clear:\n%s\n"+
 			"  consequence: the caller waits, and waiting is the one thing that cannot "+
@@ -291,6 +307,13 @@ func TestALockThatCannotLapseIsRefusedWithACodeNoPollerSpinsOn(t *testing.T) {
 		t.Errorf("the refusal does not say why it is not exit %d:\n%s\n"+
 			"  consequence: a reader who knows 3 means \"not yet\" reads 1 as a bug in "+
 			"this command rather than as a fact about the lock.", exitLockHeld, errOut)
+	}
+	if !strings.Contains(errOut, "arxi state unlock r1 migrations/ --force") {
+		t.Errorf("the refusal names no way out:\n%s\n"+
+			"  consequence: exit 1 plus \"nothing reclaims it\" is a dead end, so the "+
+			"caller's remaining options are to abandon the key or to invent a way of "+
+			"freeing it -- and the one that exists takes --force for a reason worth "+
+			"reading before it is typed.", errOut)
 	}
 
 	if log := stateLog(t, dir, "r1"); strings.Contains(log, "lock.released") {
