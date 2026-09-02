@@ -3,7 +3,7 @@
 // Today it implements schema, surface, why, blueprint validate, run start
 // (live, calling real models, or --sim), run list, run show, run why, run tree,
 // run prompt, run steer, run result, run pause, run unpause, run cancel,
-// run fork, run replay, run attach, event emit, event log, serve,
+// run fork, run replay, run attach, event emit, event log, event trace, serve,
 // the trigger group, the inbox group, agent tool policy, the
 // eval group (--sim only), provider add and the
 // model group; for everything else it answers "declared but not implemented"
@@ -287,6 +287,7 @@ IMPLEMENTED TODAY
   run replay <run>           fold the log again, no executor, at --until-seq
   run attach <run>           follow a live run: the events from now on
   event log <run>            the log itself: what every other verb reads
+  event trace <event>        the causal chain of one event, root first
   inbox                      questions an agent cannot continue without
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them
