@@ -264,8 +264,8 @@ func readmeCapabilityClaim(t *testing.T) (impl, total int) {
 	// the first match would then pass or fail depending on which one happens to
 	// appear earlier in the file.
 	//
-	// Today there is exactly one match, and README.md line 93 -- "There are
-	// **49 declared capabilities**" -- is one small edit away from being a
+	// Today there is exactly one match, and README.md's opening count -- "There
+	// are **50 declared capabilities**" -- is one small edit away from being a
 	// second. Refusing an ambiguity rather than resolving it by position is the
 	// same rule toolrun.Edit applies to a string that occurs more than once,
 	// and for the same reason: "the first one" is a choice the reader cannot
