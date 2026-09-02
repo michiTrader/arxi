@@ -154,6 +154,29 @@ type InboxItem struct {
 type Lock struct {
 	Key    string `json:"key"`
 	Holder string `json:"holder"`
+
+	// ExpiresAt is when the lock lapses, absolute and RFC3339, and it is absolute
+	// because the reducer has no clock. A duration ("10m") only means something
+	// next to a `now`, so storing one would make the fold depend on when it ran:
+	// the same log folded twice would report the same lock as live in the morning
+	// and lapsed in the afternoon, and replay fidelity is the property the whole
+	// design exists for. Whoever writes lock.acquired does the arithmetic once,
+	// against its own clock, and the instant it computed is then a fact of the log
+	// like any other.
+	//
+	// Empty means no expiry, which is NOT the same as expired: a lock with no
+	// expiry is held until something releases it. docs/design/20-use-cases.md
+	// §20.8 is blunt about what that costs -- "a lock with no expiry, held by an
+	// agent that crashed mid-turn, stalls the run until a human notices" -- which
+	// is why `arxi state lock` fills this in by default rather than leaving it to
+	// be remembered.
+	//
+	// The reducer never compares it to a clock; it only carries it. Deciding that
+	// a lock has lapsed is a reading, and a reading needs a now, so it belongs to
+	// the caller that has one: `arxi state lock` steals an expired lock by
+	// RECORDING a lock.released before its own acquire, which keeps the judgement
+	// in the log where the next fold can reproduce it without a clock of its own.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // State is the complete state of the run, derived from the log. It is never the
