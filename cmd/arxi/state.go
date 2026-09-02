@@ -13,12 +13,14 @@ import (
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
-// cmdState routes the run's shared key/value store.
+// cmdState routes the run's shared state: `set` and `get` for the key/value store,
+// `lock` for the cooperative claims over it.
 //
-// `set` and `get` are wired; `lock` falls through to notImplemented, which reads
-// the group from the registry. A hand-written list of the group's verbs here would
-// be a second copy, and the copy is the one that would forget the next verb to
-// land.
+// All three are wired, so nothing in this group reaches notImplemented today. The
+// fall-through stays anyway rather than becoming an "unknown verb" error: it reads
+// the group from the registry, so `arxi state unlock` -- the verb why.go already
+// promises and the surface does not declare -- lists what the group does have
+// instead of a message this function would have to keep in step by hand.
 func cmdState(args []string) {
 	if len(args) == 0 {
 		notImplemented([]string{"state"})
@@ -30,6 +32,9 @@ func cmdState(args []string) {
 		return
 	case "get":
 		cmdStateGet(args[1:])
+		return
+	case "lock":
+		cmdStateLock(args[1:])
 		return
 	}
 	notImplemented(append([]string{"state"}, args...))
