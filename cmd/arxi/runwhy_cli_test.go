@@ -145,6 +145,70 @@ func TestRunWhyRemedyNamesTheRunSoItCanBePasted(t *testing.T) {
 	}
 }
 
+// The lock remedy must be a command the binary runs, and this pastes it to find out.
+//
+// `arxi state unlock <run> <key>` is the fix why.go hands a lock-blocked member, and for
+// the whole life of that line the binary answered it by listing `set`, `get` and `lock`:
+// the verb was declared and not wired, and cmdState's fall-through is the best a
+// dispatcher can do for a promise nothing kept. Nothing tied the two together -- the
+// kernel prints a string, and whether it resolves is a fact about a different package.
+//
+// So this asserts the round trip instead of the substring. The remedy is read off the
+// screen, split into argv, handed back to the binary, and the release is looked for in
+// the log. A substring match would have passed throughout the period when the command
+// did not exist.
+//
+// The lock is taken with no actor, which is how lockHolder reads a shell's claim, so the
+// remedy without --force is the right one: why.go omits the flag deliberately, and a
+// human handing back their own key is the case where that omission has to work.
+func TestRunWhyOffersALockRemedyTheBinaryActuallyRuns(t *testing.T) {
+	dir := workdir(t)
+	runAt(t, dir, "lock-blocked-0001", "team", 5,
+		`{"id":"e3","seq":3,"type":"lock.acquired","source":"human","payload":{"key":"migrations/"}}
+{"id":"e4","seq":4,"type":"agent.blocked","actor":"backend","payload":{"blocked_on":"lock","blocked_ref":{"key":"migrations/","holder":"human"}}}
+`)
+
+	why := arxi(t, dir, "run", "why", "lock-blocked-0001")
+
+	var argv []string
+	for _, line := range strings.Split(why.out, "\n") {
+		if !strings.Contains(line, "state unlock") {
+			continue
+		}
+		argv = strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "$ "))
+		break
+	}
+	if len(argv) == 0 {
+		t.Fatalf("run why does not offer state unlock for a member blocked on a lock:\n%s\n"+
+			"  consequence: the one member that cannot move is waiting on a key, and the "+
+			"command that hands a key back is not on screen. why.go's lock arm is the only "+
+			"place a reader learns the verb exists.", why.out)
+	}
+	if argv[0] != "arxi" {
+		t.Fatalf("the remedy is not an arxi invocation: %q", argv)
+	}
+
+	got := arxi(t, dir, argv[1:]...)
+	if got.code != 0 {
+		t.Fatalf("the remedy run why printed exited %d:\n  pasted: %s\n%s\n"+
+			"  consequence: the user did exactly what the binary told them to. This is the "+
+			"failure `state unlock` was built to end -- for the whole life of that remedy "+
+			"the answer was a list of the three verbs in the group that were wired.",
+			got.code, strings.Join(argv, " "), got.out)
+	}
+	if log := stateLog(t, dir, "lock-blocked-0001"); !strings.Contains(log, "lock.released") {
+		t.Errorf("the pasted remedy exited 0 and released nothing:\n%s\n"+
+			"  consequence: a remedy that succeeds without changing the state leaves the "+
+			"member blocked and the caller with no reason to look further.", log)
+	}
+	if !strings.Contains(got.out, "backend is blocked on migrations/ and is NOT woken by this") {
+		t.Errorf("the release does not say the member run why named is still waiting:\n%s\n"+
+			"  consequence: this remedy came from `run why backend`, so the caller's whole "+
+			"purpose is to unstick backend. The key is free and backend is not: the reducer "+
+			"frees the key and nothing emits agent.unblocked.", got.out)
+	}
+}
+
 // An answered question must stop being offered as the fix.
 //
 // The log is append-only, so replying to a question does not remove it from
