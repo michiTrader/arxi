@@ -346,6 +346,15 @@ type emitWatcherOutcome struct {
 	// watcher matched": a matching watcher whose agent is not in the run, or has
 	// failed, or is mid-turn, produces either nothing or a parked cause.
 	acts bool
+	// tool names the tool a run_tool watcher will call, and is empty for every
+	// other action. It exists so a caller can tell the ONE outcome that cannot
+	// survive a halted run from the ones that can: a notify or activate cause is
+	// parked in PendingCauses, which is part of State and therefore comes back on
+	// unpause, while CallTool lives only in Decide's return value and is dropped by
+	// the next fold. `state set` refuses on that difference (see state.go), and
+	// deriving it there by re-matching the patterns would be a second copy of the
+	// duplication this function exists to keep down to one.
+	tool string
 	note string
 }
 
@@ -392,6 +401,7 @@ func emitWatcherOutcomes(st kernel.State, cfg kernel.Config, typ string) []emitW
 			// arguments. Worth stating, because it is the one action that fires
 			// while its agent is mid-turn.
 			o.acts = true
+			o.tool = w.Tool
 			o.note = "runs " + w.Tool + " for " + w.Agent +
 				" now, with this payload as its arguments"
 		case st.Member(w.Agent).Busy():
