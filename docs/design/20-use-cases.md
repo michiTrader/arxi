@@ -476,7 +476,7 @@ delegated precisely to avoid it.
 
 ## 20.8 UC-8 — Coordinating without stepping on each other
 
-Two agents that can both write need to share facts and avoid collisions. All four
+Two agents that can both write need to share facts and avoid collisions. All five
 of these capabilities are agent tools with `allow` policy — they are cheap,
 non-destructive and needed constantly, so requiring approval would make
 coordination the most expensive thing in the run.
@@ -502,6 +502,42 @@ a human notices — which is the quiescence of §20.3 caused by the very mechani
 meant to prevent conflicts. And note what the lock does *not* do: it does not give
 filesystem isolation. That is why `workspace: worktree` is a separate default
 (§20.4). The lock coordinates intent; the filesystem provides separation.
+
+```
+> arxi_state_unlock {"key": "migrations/"}
+lock migrations/ released (was held by backend)
+```
+
+The hand-back is what makes the `--ttl` above a **lease** rather than a deadline.
+`backend` asked for ten minutes and was done in two; without this call the
+frontend waiting on `migrations/` sits out the other eight for no reason, and the
+run pays for the safety margin of every lock in it. The expiry bounds the cost of
+a crash; the release is how the normal case stays fast.
+
+```
+$ arxi state unlock r1 migrations/ --force
+run r1 released migrations/ (seq 47)
+  taken from backend, whose lease ran to 2026-08-26T14:11:00Z and had not run
+  out: recorded as "forced", and the log names this shell as the one that ended it
+  frontend is blocked on migrations/ and is NOT woken by this: ...
+```
+
+`--force` is needed in exactly one case: a lease that has **not** lapsed and
+belongs to somebody else. Ending work in flight is a decision, so it has to be
+spelled and it is recorded as one — the release carries
+`previous_holder: "backend"` and `reason: "forced"`, and `arxi event log r1
+--type lock.*` says who ended it. A lease that has already lapsed needs no flag
+and is recorded as `expired`, with `expired_at` as the evidence for the judgement;
+the holder releasing its own key is neither.
+
+The reducer does not check who releases, and that is the design rather than a gap:
+a release honoured only from its own holder could never reclaim the key of an
+agent that crashed mid-turn, which is the stall this section opened with, and the
+only way round it would be a shell writing an event that claims to be that agent.
+So who *may* release is the writer's judgement, and `reason` is where the
+judgement is kept. Freeing the key does not by itself wake the member waiting for
+it: that member moves when a `lock.*` watcher opens a turn, which is why a
+blueprint coordinating on locks declares one.
 
 ```
 > arxi_event_emit {"type": "custom.contract_frozen", "payload": "{\"v\":2}"}
@@ -728,7 +764,7 @@ message type are three **mechanical projections of one registry entry** —
 synonym anywhere would fork the vocabulary and require a hand-maintained mapping
 forever.
 
-Of 49 declared capabilities, **33 are exposed as agent tools**. The 16 that are
+Of 50 declared capabilities, **34 are exposed as agent tools**. The 16 that are
 not are a security boundary, not an oversight:
 
 | not an agent tool | why an agent must not have it |
@@ -742,10 +778,23 @@ not are a security boundary, not an oversight:
 | `surface`, `version` | operator surface, and redundant besides: `schema` already gives an agent the same capability list in a form it can parse, so exposing the human-readable rendering adds a second answer to one question. `version` describes the binary the agent is already running inside, which is a fact it cannot act on |
 | `trigger run` | the only **transitive** exclusion: it starts whatever every stored trigger's `--then` names, unattended. An agent granted this one verb is granted the union of every action anybody ever scheduled, which no human reading the request can reconstruct |
 
-Note two that *are* tools and might look like they should not be. `agent create`
+Note three that *are* tools and might look like they should not be. `agent create`
 is exposed, but with `ToolPolicy: ask` — building a sub-team is legitimate and
 costs a human approval. `schema` is exposed with `allow`, because an agent reading
 the list of its own capabilities is the least dangerous operation in the system.
+
+`state unlock` is the third and the one that deserves its own sentence, because
+its `--force` lets one agent end a lease another agent still holds — authority
+nothing else on the `allow` list has. The param is agent-visible as a consequence
+rather than a preference: every declared param is projected into the tool schema,
+so there is no way to declare a flag the CLI has and an agent does not. It is
+`allow` anyway for the reason §20.8 opens with — a release only a human can
+perform means every agent lock runs to its full expiry, so the crashed-holder
+stall returns for every early finish — and what makes that tolerable is that the
+authority is **not deniable**: the release records `previous_holder` and
+`reason: "forced"`, so `arxi event log <run> --type lock.*` names who broke whose
+lease. `ask` was the alternative and was rejected because the common case,
+releasing a lock you hold yourself, would then cost a human approval every turn.
 
 The general rule: an agent may do things **inside** a run, and may not change the
 rules the run is judged by. `state set` is a tool and `agent tool policy` is not,
