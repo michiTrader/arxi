@@ -2,8 +2,8 @@
 //
 // Today it implements schema, surface, why, blueprint validate, run start
 // (live, calling real models, or --sim), run list, run show, run why, run tree,
-// run prompt, run result, run pause, run unpause, run cancel, run fork,
-// run replay, run attach, event emit, event log, serve,
+// run prompt, run steer, run result, run pause, run unpause, run cancel,
+// run fork, run replay, run attach, event emit, event log, serve,
 // the trigger group, the inbox group, agent tool policy, the
 // eval group (--sim only), provider add and the
 // model group; for everything else it answers "declared but not implemented"
@@ -112,6 +112,10 @@ func main() {
 		}
 		if len(args) > 1 && args[1] == "prompt" {
 			cmdRunPrompt(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "steer" {
+			cmdRunSteer(args[2:])
 			return
 		}
 		if len(args) > 1 && args[1] == "result" {
