@@ -7,13 +7,15 @@
 // an id, and the event it names can be twenty lines up. Following it by eye means
 // reading --json and grepping for an id, which is what this file automates.
 //
-// It adds no field, no index and no store. kernel.derived writes CausedBy,
-// CorrelationID and Depth on every event the reducer emits, and this is the
-// reader those fields were written for.
+// It adds no field, no index and no store. Every event in the log carries
+// CausedBy, CorrelationID and Depth -- kernel.derived writes them on what the
+// reducer emits, and exec.attribute copies the deciding effect's Cause onto what
+// the executor writes -- and this is the reader those fields were written for.
 //
-// # MEASURED: most events in a real log carry no cause, and that is the producer
+// # MEASURED: this view is what proved the producers were the problem
 //
-// From a real 21-event --sim log written by this binary before this file existed:
+// From a real 21-event --sim log written by this binary before the executor
+// attributed anything:
 //
 //	 1 run.started      ev-start             src=human   depth 0  caused_by []
 //	 2 stage.entered    ev-000002            src=runtime depth 1  caused_by [ev-start]
@@ -21,16 +23,22 @@
 //	11 stage.advanced   ev-000003            src=runtime depth 1  caused_by [sim-frontend-submit-1]
 //	21 run.result       ev-000005            src=runtime depth 1  caused_by [sim-backend-submit-2]
 //
-// Five of twenty-one carry a cause. Every event the EXECUTOR wrote carries none,
-// because exec.stamp fills in only ID and Ts: an agent turn is a hole in the
-// chain, and every correlation group in that log is rooted at an executor event
-// instead of at run.started.
+// Five of twenty-one carried a cause. Every event the EXECUTOR wrote carried
+// none, because exec.stamp filled in only ID and Ts: an agent turn was a hole in
+// the chain, every correlation group was rooted at an executor event instead of at
+// run.started, and depth 0 on all sixteen cleared the MaxDepth brake in
+// wakeWatchers as if each were a root cause.
 //
-// So the common answer here is a chain of one or two, and that branch is the one
-// written most carefully. It reports the gap as a defect in the producers, with
-// the count measured on the log in front of it -- a reader told "16 of 21 events
-// here carry no cause" goes and fixes the executor, where a reader shown one
-// lonely event concludes this view is broken.
+// The same run today, same blueprint, same 21 events: twenty of twenty-one carry a
+// cause, all of them correlate to ev-start, and `event trace ev-000005` prints a
+// six-event chain from run.started down. The one that records no cause is
+// run.started, which is the root.
+//
+// The gap-reporting branches below survive that fix and are still written
+// carefully, because they are how the next regression is seen. A reader shown one
+// lonely event concludes this view is broken; a reader told "16 of these 21 events
+// record no cause, so this log holds 16 causal threads" goes and looks at the
+// producer.
 //
 // # Why an id, and why a seq is taken too
 //
@@ -600,12 +608,15 @@ func (v *traceView) measure() {
 				v.dangling = appendOnce(v.dangling, p)
 			}
 		}
-		// Only an event with a single cause is checked. kernel.derived takes ONE
-		// cause and sets depth to that cause's depth plus one, so an event with two
-		// causes has a depth that agrees with one of its parents and disagrees with
-		// the other by however far apart they sit. Reporting that as a mismatch
-		// would be reporting the design, and a footer note that fires on correct
-		// logs is one the reader learns to skip.
+		// Only an event with a single cause is checked. kernel.causeOf -- the one
+		// function that resolves the triple, for derived events and for the ones the
+		// executor writes alike -- sets depth to the deciding event's depth plus one,
+		// so an event with two causes has a depth that agrees with one of its parents
+		// and disagrees with the other by however far apart they sit. That is what a
+		// coalesced turn is: the reasons that queued while the agent was busy join the
+		// event that freed it, and they sat at different depths. Reporting it as a
+		// mismatch would be reporting the design, and a footer note that fires on
+		// correct logs is one the reader learns to skip.
 		if len(r.ev.CausedBy) <= 1 && r.ev.Depth != r.expect {
 			v.depthMismatch = append(v.depthMismatch,
 				fmt.Sprintf("%s records %d, sits at %d", r.ev.ID, r.ev.Depth, r.expect))
@@ -772,8 +783,10 @@ func printEventTraceFooter(v traceView, elided bool) {
 
 	switch {
 	case v.ancestors == 0 && v.descendants == 0:
-		// The common case, by the measurement at the top of this file, so it gets
-		// the sentence that explains itself rather than a bare count.
+		// Not the common case any more -- see the MEASURED note at the top of this
+		// file -- but still the one that has to explain itself rather than print a
+		// bare count, because a lone row looks like a broken view and is usually a
+		// root that nothing came of.
 		note := fmt.Sprintf(
 			"%s records no cause and nothing in this log records it as one, so\n"+
 				"    the chain is this one event", v.subject.ID)
@@ -796,9 +809,14 @@ func printEventTraceFooter(v traceView, elided bool) {
 		// here do carry one" is the disagreement isAre exists to prevent, and it is
 		// reachable by any log whose only cause-carrying event is the subject --
 		// which is exactly the dangling case above.
+		//
+		// It says the emptiness is specific to this event and stops there, without
+		// calling it a gap: a root records no cause because there was none, and this
+		// branch cannot tell that apart from a truncated log. The dangling and
+		// cycle notes below name the cases where it IS a defect.
 		if deep := len(v.run.events) - v.causeless; deep > 0 {
-			note += fmt.Sprintf(";\n    a cause is recorded on %d of the %d events in this log, so this is\n"+
-				"    a gap in the chain rather than a log that has none",
+			note += fmt.Sprintf(";\n    a cause is recorded on %d of the %d events in this log, so the\n"+
+				"    emptiness is this event's and not the log's",
 				deep, len(v.run.events))
 		}
 		notes = append(notes, note)
@@ -808,14 +826,22 @@ func printEventTraceFooter(v traceView, elided bool) {
 			v.descendants, plural(v.descendants)))
 
 		// Said here as well as in the both-zero branch above, because a chain that
-		// HAS a shape can still be cut short by the same producer gap, and the
-		// reader of a two-row tree needs to know the tree is not the whole story.
-		if deep := len(v.run.events) - v.causeless; v.causeless > 0 && deep > 0 {
+		// HAS a shape can still be a fraction of the log, and the reader of a
+		// two-row tree needs to know why.
+		//
+		// The count is of ROOTS, and the note fires only above one because every log
+		// has at least run.started and a note that appears on every rendering is a
+		// note nobody reads. Above one it says something real: each root heads its
+		// own thread, so the tree is one of several. It is also how a regression in
+		// attribution shows up -- when the executor wrote uncaused events this said
+		// 16 of 21, and 16 threads in a 21-event log is visibly not what happened.
+		if v.causeless > 1 {
 			notes = append(notes, fmt.Sprintf(
-				"%d of these %d events carry no cause: caused_by and correlation_id\n"+
-					"    are written by the reducer and not by the executor, so anything\n"+
-					"    that ran through a turn is absent from the tree above rather than\n"+
-					"    unrelated to it", v.causeless, len(v.run.events)))
+				"%d of these %d events record no cause, so this log holds %d causal\n"+
+					"    threads and the tree above is one of them. An event with no cause is\n"+
+					"    a root: the run's own start, a timer firing, or something fed in from\n"+
+					"    outside the fold -- everything decided from an event carries it",
+				v.causeless, len(v.run.events), v.causeless))
 		}
 	}
 

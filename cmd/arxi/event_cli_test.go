@@ -25,19 +25,25 @@ import (
 // # The fixtures are hand-written, and the shapes came out of a real log
 //
 // The seq numbers, the empty `scope` on executor events and the depth-0/depth-1
-// split are not invented for the test. They are what `run start --sim` actually
-// wrote, checked against a 21-event log before any of this was asserted: the
-// reducer stamps scope, correlation_id, caused_by and depth 1; the executor stamps
-// none of the four. A fixture where everything carries a cause would have let the
-// footer's missing-cause note pass while being unreachable in practice.
+// split are not invented for the test. They are what `run start --sim` wrote,
+// checked against a 21-event log before any of this was asserted: the reducer
+// stamped scope, correlation_id, caused_by and depth 1; the executor stamped none
+// of the four.
+//
+// The executor attributes its events now (exec.attribute), so that log is the OLD
+// shape -- and the fixtures deliberately keep it. Logs written before the fix are
+// still on disk and still get read, so the viewer has to survive them; and a
+// fixture where everything carries a cause would leave the footer's root-count
+// note unreachable in the suite, which is the note that would report the next
+// producer regression.
 
 // logAt writes a run whose log has the shapes this viewer has to survive.
 //
 // runAt already supplies run.started at seq 1 and stage.entered at seq 2, so the
 // extras start at 3. The events here are deliberately mixed: two with no cause and
-// no scope (the executor's shape), one with both (the reducer's), and one carrying
-// a 64-character sha so elision is exercised by a value the system really writes
-// rather than by a string invented to be long.
+// no scope (the executor's shape before it attributed anything), one with both
+// (the reducer's), and one carrying a 64-character sha so elision is exercised by
+// a value the system really writes rather than by a string invented to be long.
 func logAt(t *testing.T, dir, id string) {
 	t.Helper()
 
@@ -559,9 +565,9 @@ func TestEventLogFooterAgreesWithItselfAboutOne(t *testing.T) {
 	// Whatever it says about causes, it must be pinned to a number it counted: the
 	// note fired unconditionally at first, announcing a broken chain on logs where
 	// nothing had a cause to break.
-	if strings.Contains(out, "carry no cause") &&
-		!strings.Contains(out, "5 of these events carry no cause") {
-		t.Errorf("the missing-cause note is not pinned to the rows shown:\n%s\n"+
+	if strings.Contains(out, "record no cause") &&
+		!strings.Contains(out, "5 of these events record no cause") {
+		t.Errorf("the root-count note is not pinned to the rows shown:\n%s\n"+
 			"  consequence: a note that fires regardless of the log tells a reader "+
 			"their run is damaged when it is merely simple.", out)
 	}

@@ -432,14 +432,17 @@ func printEventLogFooter(v eventLogView, elided bool) {
 				"    --json has every value whole", eventPayloadValueWidth))
 	}
 
-	// Said once, and only when the log shows it. This is a defect in the
-	// producers rather than in this view, so the note names what is missing
-	// instead of apologising for the column.
-	if flat, deep := causalDepthSplit(v.rows); deep > 0 && flat > 0 {
+	// Said once, and only when the log holds more than one root. Below that it is
+	// the shape of every healthy log -- run.started records no cause because
+	// nothing caused it -- and a note on every rendering is a note nobody reads.
+	// Above it, the count is the number of separate causal threads, which is worth
+	// knowing and is also how a producer that stopped attributing shows up.
+	if flat, deep := causalDepthSplit(v.rows); flat > 1 && deep > 0 {
 		notes = append(notes, fmt.Sprintf(
-			"%d of these events carry no cause: caused_by and correlation_id are\n"+
-				"    written by the reducer and not by the executor, so a chain that\n"+
-				"    runs through a turn is broken at depth 0", flat))
+			"%d of these events record no cause, so the log holds %d causal threads:\n"+
+				"    a root is the run's own start, a timer firing, or something fed in\n"+
+				"    from outside the fold. See how one of them runs: arxi event trace",
+			flat, flat))
 	}
 
 	if len(notes) > 0 {
@@ -465,11 +468,14 @@ func isAre(n int) string {
 	return "are"
 }
 
-// causalDepthSplit counts events with and without a recorded cause.
+// causalDepthSplit counts the roots of a log and the events caused by something.
 //
-// Split rather than a bare "any missing?", because a log where NOTHING has a
-// cause is not evidence of a broken chain -- it is a run where no watcher ever
-// fired, and warning about it would train the reader to ignore the note.
+// Split rather than a bare "any missing?", because an event with no cause is not
+// evidence of a broken chain: it is a root, and every log has at least one. A log
+// that is ALL roots is a single run.started, or a stretch of nothing but timer
+// ticks -- both legitimate, and warning about either would train the reader to
+// ignore the note. What the callers do with the split is print it only above one
+// root, where the count says how many threads the log holds.
 func causalDepthSplit(rows []kernel.Event) (flat, deep int) {
 	for _, e := range rows {
 		if len(e.CausedBy) == 0 && e.CorrelationID == "" {
