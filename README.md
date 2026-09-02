@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**39 of 49 declared capabilities are wired — 79.6%.** That figure is measured,
+**40 of 49 declared capabilities are wired — 81.6%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -396,16 +396,17 @@ hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
 moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
 `event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37,
-`run steer` to 38 and `event trace` to 39, and every time the number above was
+`run steer` to 38, `event trace` to 39 and `state set` to 40, and every time the
+number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 10 that remain are `agent list` / `create`
-/ `show`, `role define`, `blueprint create` / `install`, `state get` / `set` /
+It is deliberately unflattering — the 9 that remain are `agent list` / `create`
+/ `show`, `role define`, `blueprint create` / `install`, `state get` /
 `lock` and `design`, which want an agent store, a keyed store or a generator
 rather than another way to read what a run already wrote. The implemented
-thirty-nine are
+forty are
 `provider add`, `model list` /
 `enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent tool policy`,
-`blueprint validate`, `event emit`, `event log`, `event trace`, `trigger create` /
+`blueprint validate`, `state set`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
 
@@ -437,7 +438,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-79.6% is the CLI surface, and quoting it alone would be misleading in **both**
+81.6% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -445,7 +446,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **39 / 49 — 79.6%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **40 / 49 — 81.6%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -475,14 +476,55 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 79.6% understates and 100% overstates. The `run` group is
+That shape is also why 81.6% understates and 100% overstates. The `run` group is
 now **14 / 14** and the `event` group **3 / 3**: every verb a person needs to
-inspect, redirect or end a run in flight is wired, and none of the 10 that remain
+inspect, redirect or end a run in flight is wired, and none of the 9 that remain
 is one of them. The list here has been rewritten four times and each rewrite was
 the same admission — it named `replay`, then `attach`, then `steer` as the next
 thing worth building, and each one got built.
 
-`event trace` is the one just finished, and it is the first verb here that reads
+`state set` is the one just finished, and it is the first verb that writes to the
+run's **shared store**: what one member wants another to know without paying for a
+turn to say it. A member that has frozen an API contract writes the key; whoever
+needs it reads it back. The store is not a file beside the log, and that is the
+whole design — a KV file would make `state = fold(Decide, State0, events)` false in
+the direction hardest to notice, since the fold would rebuild every member, lock
+and inbox item from August and then read **today's** value for a key an agent set
+last Tuesday. Nothing is lost by keeping it in the log either: the history of a key
+*is* `arxi event log <run> --type state.set`, and a second copy inside the state
+would be a copy that can disagree with it.
+
+The write **drives the run**, because `state.set` is deliberately not
+runtime-derived and deliberately outside `isWatcherDispatched`: a blueprint that
+declares `watchers: [{agent: backend, pattern: state.*}]` gets a turn when the
+contract it was waiting for lands. Those effects live only in `Decide`'s return
+value, so appending and returning would leave a declared watcher unfired and
+indistinguishable from a pattern that never matched — the same conclusion
+`event emit` and `run prompt` reached, the second one after shipping the bug.
+
+Where it *departs* from `event emit` is the paused run, and the asymmetry is the
+judgement rather than an inconsistency. `event emit` refuses one outright: waking
+somebody is the event's only purpose, so a parked cause is pure loss. A
+`state.set` has a second purpose that lands whatever the status is — the key is
+stored and `state get` will read it — so refusing would block a good write and
+teach the user to unpause a run, which resumes spending, in order to leave a note
+in it. The **one** exception is a `run_tool` watcher, and it is refused: a notify
+or activate cause is parked in `PendingCauses`, which is part of `State` and comes
+back when the halt clears, while `wakeWatchers` returns `CallTool`
+unconditionally, nothing parks it, and the next drive folds this event into its
+starting state and keeps no effects from it. That tool call would be dropped in
+silence, and nothing has been written yet when the refusal happens.
+
+Wiring it also found a **registry** defect that was systematic rather than a slip.
+All three `state` verbs were declared with a key and no run — they had been
+written from the agent's side, where the run is ambient, and a shell has no
+ambient run. `state get` is where it bites hardest: it reads, so nothing can be
+undone by getting it wrong, which is exactly what makes it dangerous, because with
+no run to name the honest implementation had to invent one and a read that
+silently answers from the wrong run is a read whose caller has no reason to doubt
+it. Every entry declared before its CLI existed is a candidate for the same fix.
+
+`event trace` came just before it, and it is the first verb here that reads
 the log for its **shape** rather than its contents: it takes one event id and
 prints the causal chain around it, ancestors above and descendants below, with
 the event asked about marked. `caused_by` has been written by the reducer since
@@ -550,7 +592,7 @@ than updated, for two reasons — logs written before the fix are still on disk 
 must still render, and they are what keeps the root-count note reachable in the
 suite.
 
-`run steer` came just before it, and it is worth recording what it actually
+`run steer` came before that, and it is worth recording what it actually
 cost, because this paragraph predicted the wrong thing. The prediction was that
 it "needs the writer lock this binary hands to one process at a time — a
 different problem from reading". True, and already solved: `run prompt` had paid

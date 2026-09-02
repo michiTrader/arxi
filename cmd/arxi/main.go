@@ -159,6 +159,9 @@ func main() {
 	case "agent":
 		cmdAgent(args[1:])
 		return
+	case "state":
+		cmdState(args[1:])
+		return
 	}
 
 	// Everything else: if it is declared, say so precisely. An "unknown command"
@@ -288,6 +291,7 @@ IMPLEMENTED TODAY
   run attach <run>           follow a live run: the events from now on
   event log <run>            the log itself: what every other verb reads
   event trace <event>        the causal chain of one event, root first
+  state set <run> <k> <v>    write a key the other members read
   inbox                      questions an agent cannot continue without
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them
