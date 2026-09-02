@@ -14,13 +14,18 @@ import (
 )
 
 // cmdState routes the run's shared state: `set` and `get` for the key/value store,
-// `lock` for the cooperative claims over it.
+// `lock` and `unlock` for the cooperative claims over it.
 //
-// All three are wired, so nothing in this group reaches notImplemented today. The
+// All four are wired, so nothing in this group reaches notImplemented today. The
 // fall-through stays anyway rather than becoming an "unknown verb" error: it reads
-// the group from the registry, so `arxi state unlock` -- the verb why.go already
-// promises and the surface does not declare -- lists what the group does have
+// the group from the registry, so a verb declared before it is built -- which is how
+// every one of these four arrived, `unlock` last -- lists what the group does have
 // instead of a message this function would have to keep in step by hand.
+//
+// That mechanism is the reason `arxi state unlock` was worth reaching for at all. It
+// answered by listing `set`, `get` and `lock` for the whole life of the remedy
+// internal/kernel/why.go hands out for a lock-blocked member, which is the best a
+// dispatcher can do for a promise nothing kept.
 func cmdState(args []string) {
 	if len(args) == 0 {
 		notImplemented([]string{"state"})
@@ -35,6 +40,9 @@ func cmdState(args []string) {
 		return
 	case "lock":
 		cmdStateLock(args[1:])
+		return
+	case "unlock":
+		cmdStateUnlock(args[1:])
 		return
 	}
 	notImplemented(append([]string{"state"}, args...))
