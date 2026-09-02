@@ -12,8 +12,8 @@ import (
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
-// `arxi state lock <run> <key> [--ttl <d>]` -- take a cooperative lock, the third
-// and last verb of the run's shared state.
+// `arxi state lock <run> <key> [--ttl <d>]` -- take a cooperative lock over the
+// run's shared state.
 //
 // # What it buys
 //
@@ -28,9 +28,10 @@ import (
 //
 // §20.8 names the failure this command exists to avoid: "a lock with no expiry,
 // held by an agent that crashed mid-turn, stalls the run until a human notices".
-// Nothing in this binary writes lock.released except this command, stealing a lock
-// whose lease has run out -- so a lock with no expiry is held until the run ends.
-// A caller who says nothing therefore gets a lease, not eternity.
+// The only lock.released this command writes is a steal of a lease that has run
+// out, so a lock with no expiry is one no clock ever reclaims: it stands until
+// somebody hands it back by name with `arxi state unlock`. A caller who says nothing
+// therefore gets a lease, not eternity -- the reclaim that needs nobody's attention.
 //
 // # Refused with exit 3, so a script can wait
 //
@@ -291,13 +292,14 @@ func cmdStateLock(args []string) {
 
 	// On stderr, unlike every other note here, because the callers of this command
 	// are scripts and a script writes `arxi state lock r1 k >/dev/null`. The one
-	// consequence a caller must not be able to discard is having created a lock
-	// nothing can reclaim.
+	// consequence a caller must not be able to discard is having created a lock no
+	// clock will ever reclaim.
 	if ttl == 0 {
-		fmt.Fprintf(os.Stderr, "warning: %s is held with no expiry, and the only "+
-			"lock.released this binary writes is the one above -- a steal of a LAPSED "+
-			"lease. Nothing releases a lock that cannot lapse, so this one is held "+
-			"until the run ends.\n", key)
+		fmt.Fprintf(os.Stderr, "warning: %s is held with no expiry, so no reader will "+
+			"ever judge this lease lapsed: not the next claimant, and not the steal above. "+
+			"Somebody has to hand it back by name -- `arxi state unlock %s %s`, or "+
+			"--force from anyone else -- or it stands until the run ends.\n",
+			key, pre.RunID, key)
 	}
 
 	printStateLockOutlook(pre, key, watch, acts)
@@ -416,11 +418,11 @@ func lockEvent(t kernel.EventType, src kernel.Source, runID string, seq int64,
 //
 // # Zero is accepted, negative is refused
 //
-// `--ttl 0` is a real request: a lock held until the run ends is the right answer
-// for a key one member owns for the whole run, and refusing it would leave no way
-// to say so. It is answered on stderr instead, because what follows from it -- that
-// nothing in this binary can reclaim it -- is a consequence the caller has to hear
-// even with stdout redirected.
+// `--ttl 0` is a real request: a lock one member owns for the whole run wants no
+// expiry, and refusing it would leave no way to say so. It is answered on stderr
+// instead, because what follows from it -- that no clock will reclaim it, so it takes
+// an explicit `state unlock` -- is a consequence the caller has to hear even with
+// stdout redirected.
 //
 // A NEGATIVE ttl is refused rather than clamped to either of those, per
 // scheduler.go's refusal of a non-positive --interval. Clamping to 0 would grant
@@ -441,7 +443,8 @@ func parseLockTTL(raw string) (time.Duration, bool, error) {
 		// caller nothing about what to type instead.
 		return 0, false, fmt.Errorf("--ttl %q is not a duration: %v\n"+
 			"  examples: 30s, 10m, 1h, 24h -- there is no d unit, so a day is 24h\n"+
-			"  --ttl 0 means no expiry, which is held until the run ends", raw, err)
+			"  --ttl 0 means no expiry, which no clock reclaims: it takes `state unlock`",
+			raw, err)
 	}
 	if d < 0 {
 		return 0, false, fmt.Errorf("--ttl %s is negative, so the lease would already "+
@@ -505,25 +508,31 @@ func ttlArg(given bool, ttl time.Duration) string {
 //   - a LIVE lease. Waiting works and the lease says for how long, so this is exit
 //     3 -- the same "not yet" as `run result` and `state get`, which is what makes
 //     `until arxi state lock r1 k; do sleep 5; done` terminate.
-//   - NO expiry. Waiting cannot work: `event emit` is gated to custom.*, so the
-//     only lock.released this binary writes is this command stealing a LAPSED
-//     lease, and a lock with no expiry never lapses. Exit 1, because a poller on 3
-//     would spin until the run ended.
+//   - NO expiry. Waiting cannot work: a lock with no expiry never lapses, so no
+//     amount of asking again turns this refusal into an acquire. Exit 1, because a
+//     poller on 3 would spin until the run ended. `arxi state unlock --force` is the
+//     way out, and it is a decision rather than a wait.
 //   - an UNREADABLE expiry, which only an agent's tool call can produce. No reader
 //     can judge that lease lapsed, so it is the case above with a worse cause.
+//
+// The two exit-1 branches used to say the key was held until the run ended, full
+// stop, and that was true when nothing but this command's own steal of a lapsed
+// lease ever wrote a lock.released. `state unlock` is the release those sentences
+// said did not exist, so they now name it instead of describing a dead end.
 func refuseHeldLock(st kernel.State, held kernel.Lock, key string, now time.Time) {
 	fmt.Fprintf(os.Stderr, "arxi state lock: %s is held by %s", key, held.Holder)
 
 	if held.ExpiresAt == "" {
 		fmt.Fprintf(os.Stderr, " with no expiry.\n"+
-			"  nothing here can reclaim it. `event emit` is gated to custom.*, so the "+
-			"only %s this binary writes is this command stealing a LAPSED lease -- and "+
-			"this lease cannot lapse, so the key is held until the run ends.\n"+
+			"  waiting will not get it: this command steals only a LAPSED lease, and this "+
+			"lease cannot lapse -- so nothing reclaims the key on its own.\n"+
 			"  exit 1 and not %d for that reason: %d means ask again later, and no "+
 			"amount of asking changes this one.\n"+
+			"  end the lease instead, which is a decision and is recorded as one:\n"+
+			"    arxi state unlock %s %s --force\n"+
 			"  who holds what:    arxi run show %s\n"+
 			"  when it was taken: arxi event log %s --type %s\n",
-			kernel.LockReleased, exitLockHeld, exitLockHeld, st.RunID, st.RunID,
+			exitLockHeld, exitLockHeld, st.RunID, key, st.RunID, st.RunID,
 			kernel.LockAcquired)
 		os.Exit(1)
 	}
@@ -532,11 +541,13 @@ func refuseHeldLock(st kernel.State, held kernel.Lock, key string, now time.Time
 	if err != nil {
 		fmt.Fprintf(os.Stderr, " until %q, which is not an RFC3339 instant: %v\n"+
 			"  no reader can judge that lease lapsed, so nothing steals the key -- this "+
-			"command included -- and it is held until the run ends. an expiry like that "+
-			"comes from an agent's tool call writing the payload by hand; `arxi state "+
-			"lock` computes an absolute instant from --ttl.\n"+
+			"command included. an expiry like that comes from an agent's tool call writing "+
+			"the payload by hand; `arxi state lock` computes an absolute instant from "+
+			"--ttl.\n"+
+			"  end it explicitly, since no clock will:\n"+
+			"    arxi state unlock %s %s --force\n"+
 			"  the event that wrote it: arxi event log %s --type %s\n",
-			held.ExpiresAt, err, st.RunID, kernel.LockAcquired)
+			held.ExpiresAt, err, st.RunID, key, st.RunID, kernel.LockAcquired)
 		os.Exit(1)
 	}
 
@@ -547,9 +558,11 @@ func refuseHeldLock(st kernel.State, held kernel.Lock, key string, now time.Time
 		"  past that instant the next claimant takes it: this command records a %s and "+
 		"then acquires, so a holder that crashed mid-turn costs one lease rather than a "+
 		"human noticing.\n"+
+		"  or do not wait: arxi state unlock %s %s --force ends the lease now, and the "+
+		"log names who ended it.\n"+
 		"  who holds what: arxi run show %s\n",
 		held.ExpiresAt, until.Sub(now).Round(time.Second), exitLockHeld, st.RunID, key,
-		kernel.LockReleased, st.RunID)
+		kernel.LockReleased, st.RunID, key, st.RunID)
 	os.Exit(exitLockHeld)
 }
 

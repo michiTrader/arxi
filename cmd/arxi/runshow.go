@@ -441,17 +441,18 @@ func printShowLocks(st kernel.State) {
 // showLockLease renders the lease half of a lock line.
 //
 // Three outcomes, because a lock has three states worth telling apart and only one
-// of them is "held until T". No expiry is NOT expired -- it is held until the run
-// ends, since the only lock.released this binary writes is `state lock` stealing a
-// lapsed lease -- and an expiry no reader can parse is the same dead end reached by
-// a worse route, so both say what follows rather than showing a raw field.
+// of them is "held until T". No expiry is NOT expired -- no clock ever reclaims it,
+// since the only lock.released `state lock` writes is a steal of a LAPSED lease, so
+// it stands until `state unlock` hands it back -- and an expiry no reader can parse
+// needs the same explicit release by a worse route, so both name the way out rather
+// than showing a raw field.
 func showLockLease(l kernel.Lock, now time.Time) string {
 	if l.ExpiresAt == "" {
-		return "  (no expiry: held until the run ends)"
+		return "  (no expiry: nothing reclaims it, only `state unlock`)"
 	}
 	if _, err := time.Parse(time.RFC3339, l.ExpiresAt); err != nil {
 		return fmt.Sprintf("  (expires_at %q is not an instant, so nothing can judge it "+
-			"lapsed)", l.ExpiresAt)
+			"lapsed: only `state unlock --force` frees it)", l.ExpiresAt)
 	}
 	if lockLapsed(l, now) {
 		return fmt.Sprintf("  (lapsed at %s: the next `arxi state lock` takes it)",
