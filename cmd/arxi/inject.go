@@ -272,6 +272,31 @@ func injectCause(in injection, args []string) {
 		// response and retrying blindly is not.
 		var cas *logstore.CASError
 		if errors.As(err, &cas) {
+			// Two different mistakes reach this branch, and they need different
+			// sentences. Behind the head is the ordinary one: the run moved.
+			// AHEAD of the head is not -- the run never reached that seq, so
+			// "the run moved" is false, and the arithmetic below printed
+			// "-26 event(s) happened since you looked", which is not a number
+			// of events at all. Measured by guarding a 15-event run on seq 41.
+			//
+			// The catch-up hint has to differ too. Expected+1 past the head
+			// makes `event log --since-seq 42` print nothing, so the advice in
+			// a message whose only job is to say how to catch up would hand
+			// back an empty log.
+			if cas.Actual < cas.Expected {
+				fmt.Fprintf(os.Stderr, "arxi run %s: not appended -- run %s never "+
+					"reached seq %d.\n"+
+					"  you guarded on seq %d and the run is at seq %d, so the state "+
+					"you read is not this run's: a seq from another run, or a typo.\n"+
+					"  nothing was written. read this run and decide again:\n"+
+					"    arxi run show %s\n"+
+					"    arxi event log %s\n",
+					in.verb, pre.RunID, cas.Expected,
+					cas.Expected, cas.Actual, pre.RunID, pre.RunID)
+				store.Close()
+				os.Exit(1)
+			}
+
 			fmt.Fprintf(os.Stderr, "arxi run %s: not appended -- the run moved.\n"+
 				"  you guarded on seq %d and run %s is at seq %d, so %d event(s) "+
 				"happened since you looked.\n"+

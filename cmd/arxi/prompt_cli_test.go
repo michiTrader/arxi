@@ -444,6 +444,62 @@ func TestAFinishedRunIsNotPrompted(t *testing.T) {
 	}
 }
 
+// TestAGuardOnASeqTheRunNeverReachedSaysSo, which is the other half of the CAS
+// miss and reads nothing like it.
+//
+// Both mistakes arrive as the same *logstore.CASError, and for a while both got
+// the same sentence: "the run moved", followed by the difference between the two
+// seqs. Guarding a 15-event run on seq 41 therefore printed
+//
+//	you guarded on seq 41 and run <id> is at seq 15, so -26 event(s) happened
+//
+// which is false twice over. The run did not move -- it never got there -- and
+// -26 is not a count of anything. The two are different mistakes: behind the
+// head means somebody else wrote, ahead of it means the seq came from another
+// run or was mistyped, and only the second one is unfixable by re-reading THIS
+// run's tail.
+//
+// The catch-up advice has to differ for the same reason. Expected+1 past the head
+// makes `event log --since-seq 42` print an empty log, so the one line whose job
+// is to say how to catch up would have handed back nothing.
+func TestAGuardOnASeqTheRunNeverReachedSaysSo(t *testing.T) {
+	dir := workdir(t)
+	run := promptableRun(t, dir)
+
+	head := len(allEvents(t, dir, run))
+	got := arxi(t, dir, "run", "prompt", run, "hi", "--if-seq", itoa(head+26))
+	if got.code != 1 {
+		t.Fatalf("guarding ahead of the head exited %d, want 1:\n%s", got.code, got.out)
+	}
+
+	if !strings.Contains(got.out, "never reached seq") {
+		t.Errorf("the refusal does not say the run never reached that seq:\n%s\n\n"+
+			"consequence: told \"the run moved\", the caller re-reads the tail and "+
+			"retries, which cannot work -- the seq is ahead of the head, so no "+
+			"amount of catching up produces it.", got.out)
+	}
+	// "N event(s) happened since you looked" belongs to the behind-the-head
+	// branch alone. Reaching it from here is what produced -26 event(s): the
+	// subtraction is only a count when the head is the larger number.
+	if strings.Contains(got.out, "event(s) happened") {
+		t.Errorf("the refusal counts events that did not happen:\n%s\n\n"+
+			"consequence: this is the behind-the-head sentence on the ahead-of-head "+
+			"path, so the difference of the two seqs is printed as an event count "+
+			"with the sign inverted.", got.out)
+	}
+	// The hint must not point past the head, because that log is empty.
+	if strings.Contains(got.out, "--since-seq") {
+		t.Errorf("the refusal recommends --since-seq past the head, which prints "+
+			"nothing:\n%s", got.out)
+	}
+
+	// And this path exits directly too, so it needs its own Close. A second exit
+	// under the same lock is exactly how the first one got missed.
+	if _, err := os.Stat(filepath.Join(dir, "runs", run, "writer.lock")); err == nil {
+		t.Errorf("writer.lock survived a guard on an unreached seq")
+	}
+}
+
 // itoa avoids pulling strconv in for one call.
 func itoa(n int) string {
 	if n == 0 {
