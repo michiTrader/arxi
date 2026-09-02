@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**38 of 49 declared capabilities are wired — 77.6%.** That figure is measured,
+**39 of 49 declared capabilities are wired — 79.6%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -395,18 +395,20 @@ you are reading cannot go stale without a test failing. That is not a
 hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
 moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
-`event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37 and
-`run steer` to 38, and every time the number above was
+`event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37,
+`run steer` to 38 and `event trace` to 39, and every time the number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 11 that remain are mostly
-`agent *`, `state *`, `blueprint *` and `event trace`, which want the tool
-runner, a state store or a tracer rather than a way to read the log. The
-implemented thirty-eight are
+It is deliberately unflattering — the 10 that remain are `agent list` / `create`
+/ `show`, `role define`, `blueprint create` / `install`, `state get` / `set` /
+`lock` and `design`, which want an agent store, a keyed store or a generator
+rather than another way to read what a run already wrote. The implemented
+thirty-nine are
 `provider add`, `model list` /
 `enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent tool policy`,
-`blueprint validate`, `event emit`, `event log`, `trigger create` /
+`blueprint validate`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
+
 
 
 That probe is worth *running* rather than trusting, and two botched runs of it
@@ -435,7 +437,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-77.6% is the CLI surface, and quoting it alone would be misleading in **both**
+79.6% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -443,7 +445,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **32 / 32 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **38 / 49 — 77.6%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **39 / 49 — 79.6%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -473,14 +475,39 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 77.6% understates and 100% overstates. The `run` group is
-now **14 / 14**: every verb a person needs to inspect, redirect or end a run in
-flight is wired, and none of the 11 that remain is one of them. The list here has
-been rewritten four times and each rewrite was the same admission — it named
-`replay`, then `attach`, then `steer` as the next thing worth building, and each
-one got built.
+That shape is also why 79.6% understates and 100% overstates. The `run` group is
+now **14 / 14** and the `event` group **3 / 3**: every verb a person needs to
+inspect, redirect or end a run in flight is wired, and none of the 10 that remain
+is one of them. The list here has been rewritten four times and each rewrite was
+the same admission — it named `replay`, then `attach`, then `steer` as the next
+thing worth building, and each one got built.
 
-`steer` is the one just finished, and it is worth recording what it actually
+`event trace` is the one just finished, and it is the first verb here that reads
+the log for its **shape** rather than its contents: it takes one event id and
+prints the causal chain around it, ancestors above and descendants below, with
+the event asked about marked. `caused_by` has been written by the reducer since
+the first commit and nothing until now could follow it, so the fields existed and
+the question "what caused this" had no answer at the CLI.
+
+Reading a tree out of an append-only file is where the wiring got interesting,
+because the file can hold shapes a tree cannot: two events naming the same cause
+from different branches, a `caused_by` naming an id that is not in the file, an
+id that appears twice, an event with no id at all, a depth stamp that disagrees
+with the rebuilt tree, and — although appending in order cannot write one — a
+cycle. Every one of them is **reported in the footer rather than repaired
+silently**, because each is evidence about a producer, and a walker that quietly
+smoothed them over would make the log look healthier than it is. The walk itself
+carries a visited set, so a cycle terminates the print instead of the process.
+
+What the verb also documents is a gap on the producer side: `caused_by`,
+`correlation_id` and `depth` are written by `kernel.derived` and **not** by
+`exec.stamp`, so every event minted by the executor — turns, tool calls, their
+results — carries no cause at all. The footer says so with a count rather than
+leaving the reader to conclude the run had no causality: *"3 of these 9 events
+carry no cause"*. Closing that gap is a change to the producer and is the next
+thing worth building here.
+
+`run steer` came just before it, and it is worth recording what it actually
 cost, because this paragraph predicted the wrong thing. The prediction was that
 it "needs the writer lock this binary hands to one process at a time — a
 different problem from reading". True, and already solved: `run prompt` had paid
@@ -496,7 +523,7 @@ the reducer does not implement. Each of those three is right on its own. Togethe
 the verb would have refused **every** plain invocation with exit 2, quoting a
 flag back at a caller who typed none.
 
-The honest reason the remaining 11 will not fall as fast is that none of them is
+The honest reason the remaining 10 will not fall as fast is that none of them is
 a variation on something already here. `agent *` and `role define` want an agent
 store; `blueprint create` / `install` want generation rather than validation;
 `state get` / `set` / `lock` want a keyed store, and `lock` specifically wants a
@@ -505,8 +532,8 @@ running to expire it, which nothing in this tree has. `writer.lock` is not a
 counter-example: it is one file per run directory holding a pid, taken and
 dropped inside a single command.
 
-`run attach` is the one just built, and it is the only verb here that reads a log
-while somebody else is writing to it. It joins at the head — the events that
+`run attach` was built two verbs earlier, and it is the only verb here that reads
+a log while somebody else is writing to it. It joins at the head — the events that
 already exist are *not* reprinted, because `event log`, `run replay` and
 `run show` each print history better, and backfilling would scroll the arriving
 events out of view. Then it prints each event as it lands, folds it with

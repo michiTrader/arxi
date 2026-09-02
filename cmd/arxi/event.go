@@ -124,12 +124,11 @@ type eventLogView struct {
 
 // cmdEvent routes the group and refuses nothing itself.
 //
-// `trace` is declared and unbuilt, so it goes to notImplemented, which names it
-// out of the registry and prints its description -- the same shape cmdAgent uses.
-// A bare `arxi event` goes to the same place rather than growing a usage string
-// here: notImplemented's incomplete-path branch already lists the subcommands,
+// A bare `arxi event` goes to notImplemented rather than growing a usage string
+// here: that function's incomplete-path branch already lists the subcommands,
 // computed from the surface, so a hand-written list here would be a second copy
-// able to omit the next verb wired.
+// able to omit the next verb wired. The group is now complete, so the fallthrough
+// below answers only for a misspelling -- and it answers it with the real list.
 func cmdEvent(args []string) {
 	if len(args) == 0 {
 		notImplemented([]string{"event"})
@@ -141,6 +140,9 @@ func cmdEvent(args []string) {
 		return
 	case "emit":
 		cmdEventEmit(args[1:])
+		return
+	case "trace":
+		cmdEventTrace(args[1:])
 		return
 	}
 	notImplemented(append([]string{"event"}, args...))

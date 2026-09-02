@@ -483,23 +483,44 @@ func TestEventLogAsksWhichRunRatherThanReadingTheRunsDirectory(t *testing.T) {
 // printed for capabilities `arxi surface` publishes -- it happened to trigger and to
 // eval before they were fixed, and the answer is the worst one available: it sends a
 // user hunting for a typo they never made in a command that genuinely exists.
+//
+// The verbs are taken from the registry rather than listed here. This test used to
+// name the group's unwired verb and assert the not-implemented sentence, which was
+// a list of one that went stale the moment `event trace` was wired: it then asserted
+// the opposite of what the binary does. The registry cannot go stale that way, and
+// the assertion below holds whether a verb is wired or not -- what it forbids is the
+// group disowning a verb the surface publishes.
 func TestEventGroupNeverCallsADeclaredSubcommandUnknown(t *testing.T) {
 	dir := t.TempDir()
 
-	for _, sub := range []string{"trace"} {
+	var subs []string
+	for _, p := range surfaceRegistryPaths() {
+		if len(p) == 2 && p[0] == "event" {
+			subs = append(subs, p[1])
+		}
+	}
+	if len(subs) == 0 {
+		t.Fatal("the registry declares no event subcommands, so the loop below " +
+			"asserts nothing -- the filter is wrong, not the surface")
+	}
+
+	for _, sub := range subs {
 		r := arxi(t, dir, "event", sub)
-		if !strings.Contains(r.out, notImplementedSentinel) {
-			t.Errorf("arxi event %s does not report itself as declared:\n%s\n"+
-				"  consequence: `arxi surface` lists it, so calling it unknown makes "+
-				"a reader distrust the surface or reimplement what is coming.",
-				sub, r.out)
+		for _, bad := range []string{"not an event command", "unknown command"} {
+			if strings.Contains(strings.ToLower(r.out), bad) {
+				t.Errorf("arxi event %s is declared but the group answers %q:\n%s\n"+
+					"  consequence: `arxi surface` lists it, so calling it unknown makes "+
+					"a reader distrust the surface or reimplement what is coming.",
+					sub, bad, r.out)
+			}
 		}
 	}
 
 	// The bare group names the verbs it accepts, computed from the registry, so a
-	// verb wired later needs no edit here or there.
+	// verb wired later needs no edit here or there -- including here, which is why
+	// this checks the same registry-derived list rather than a copy of it.
 	bare := arxi(t, dir, "event")
-	for _, sub := range []string{"emit", "log", "trace"} {
+	for _, sub := range subs {
 		if !strings.Contains(bare.out, sub) {
 			t.Errorf("bare `arxi event` does not list %s:\n%s", sub, bare.out)
 		}
