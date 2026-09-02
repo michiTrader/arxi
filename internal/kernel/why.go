@@ -72,10 +72,17 @@ func Explain(s State, c Config) Why {
 		}
 		blocked++
 		add(1, "%s: %s (%s) since seq %d", m.Name, m.State, m.Detail, m.SinceSeq)
-		for _, l := range walkCause(m) {
+		for _, l := range walkCause(m, s.RunID) {
 			add(2, "%s", l.text)
 			if l.fix != "" {
-				w.Fix = append(w.Fix, l.fix)
+				// appendFix and not append, which became necessary the moment walkCause
+				// started naming the run. Two members blocked on one lock now produce the
+				// SAME `arxi state unlock <run> <key>`, and a member blocked on budget
+				// produces the same line as the run-level breach below -- where before the
+				// placeholder made them differ, so the duplicate was hidden behind a remedy
+				// nobody could paste. The cause tree still names every blocked member; it is
+				// the fix list that must not offer one command twice as two steps.
+				w.Fix = appendFix(w.Fix, l.fix)
 			}
 		}
 	}
@@ -169,7 +176,15 @@ type whyLeaf struct {
 //
 // Note that there is not a single `if runID == ...`, nor any special case per
 // blueprint: the remedy comes out of the data the event was obliged to bring.
-func walkCause(m Member) []whyLeaf {
+//
+// The runID is passed in only because a remedy has to be PASTEABLE, which is the
+// whole point of the fix list -- and a Member does not know which run it is in. Three
+// arms used to return the literal "<run>", so copying the line they printed gave the
+// user a shell error at exactly the moment they were told what to do. The lock arm
+// was worse than a placeholder: it printed `arxi state unlock <key>` with no run
+// slot at all, so there was no shape of that command anybody could have run, and no
+// registry entry behind the verb either until this increment.
+func walkCause(m Member, runID string) []whyLeaf {
 	ref := m.BlockedOn
 	get := func(k string) string {
 		if ref == nil {
@@ -191,8 +206,14 @@ func walkCause(m Member) []whyLeaf {
 	case "lock":
 		key, holder := get("key"), get("holder")
 		return []whyLeaf{
+			// Without --force, deliberately, even though the holder is by definition
+			// somebody else and `state unlock` refuses a live foreign lease without it. The
+			// safe command goes first and its own refusal names the escalation, along with
+			// how long the lease has left to run: a remedy list that opens with --force
+			// teaches the reader to end another member's work in flight before telling them
+			// it was another member's.
 			{text: fmt.Sprintf("waits for the lock %q held by %s", key, holder),
-				fix: "arxi state unlock " + key},
+				fix: fmt.Sprintf("arxi state unlock %s %s", runID, key)},
 		}
 	case "peer":
 		return []whyLeaf{
@@ -201,7 +222,7 @@ func walkCause(m Member) []whyLeaf {
 	case "budget":
 		return []whyLeaf{
 			{text: "the budget of the tree ran out",
-				fix: "arxi run unpause <run> --budget <higher>"},
+				fix: "arxi run unpause " + runID + " --budget <higher>"},
 		}
 	case "timer":
 		return []whyLeaf{
@@ -214,7 +235,7 @@ func walkCause(m Member) []whyLeaf {
 	case "workspace":
 		return []whyLeaf{
 			{text: fmt.Sprintf("waits for the workspace %q (write conflict)", get("path")),
-				fix: "arxi run show <run> --workspace"},
+				fix: "arxi run show " + runID + " --workspace"},
 		}
 	}
 	return []whyLeaf{{

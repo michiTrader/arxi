@@ -50,6 +50,28 @@ const (
 	LockReleased     EventType = "lock.released"
 	ResourceConflict EventType = "resource.conflict"
 
+	// --- shared state ---
+	//
+	// StateSet is a write to the run's key/value store, and it is an EVENT rather
+	// than a call into some store on the side for the reason ADR-0002 gives about
+	// everything else: State = fold(Decide, State0, events). A KV file living
+	// beside the log would make that sentence false. The fold would rebuild every
+	// member, every lock and every inbox item from August and then read TODAY's
+	// value for a key an agent set last Tuesday, so a replay would not be a
+	// replay, and `run why` would reason over a mixture of two runs.
+	//
+	// It is not in isWatcherDispatched, so the tail of Decide wakes watchers on
+	// it. That is the point rather than a side effect: a blueprint that declares
+	// `watchers: [{agent: backend, pattern: state.*}]` gets a turn when the
+	// contract it is waiting for lands, which is the coordination
+	// docs/design/20-use-cases.md §20.8 is about.
+	//
+	// There is deliberately no `state.get`: a read changes nothing, so an event
+	// for it would be a row in the log that no fold can use. There is no delete
+	// either -- the surface declares no verb for one, and a key that vanishes
+	// from the fold cannot be told from a key nobody ever set.
+	StateSet EventType = "state.set"
+
 	// --- budget ---
 	BudgetWarning  EventType = "budget.warning"
 	BudgetExceeded EventType = "budget.exceeded"

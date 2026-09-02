@@ -330,17 +330,52 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("ref", "string", "blueprint reference"))}},
 
 	// ---- shared state ------------------------------------------------------
+	// The `run` positional on all four was ADDED when these verbs were wired, for
+	// the reason the `event emit` entry below spells out: these entries were written
+	// from the agent's side, where the run is ambient, and a shell has no ambient
+	// run. Worth seeing here that the omission was systematic rather than a slip --
+	// every entry declared before its CLI existed is a candidate for the same fix.
+	//
+	// `state get` is the one where it bites hardest. It reads, so nothing can be
+	// undone by getting it wrong, and that is exactly what makes it dangerous: with
+	// no run to name, the honest implementation had to invent one, and a read that
+	// silently answers from the wrong run is a read whose caller has no reason to
+	// doubt it.
 	{Path: []string{"state", "get"}, Desc: "read a key from the run state",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("key", "string", "key"))}},
+		Params: []Param{pos(p("run", "string", "run id")),
+			pos(p("key", "string", "key"))}},
 	{Path: []string{"state", "set"}, Desc: "write a key of the run state",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
-		Params: []Param{pos(p("key", "string", "key")), pos(p("value", "string", "value")),
+		Params: []Param{pos(p("run", "string", "run id")),
+			pos(p("key", "string", "key")), pos(p("value", "string", "value")),
 			p("if-seq", "number", "compare-and-swap on the run seq")}},
 	{Path: []string{"state", "lock"}, Desc: "take a cooperative lock",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
-		Params: []Param{pos(p("key", "string", "key")),
+		Params: []Param{pos(p("run", "string", "run id")),
+			pos(p("key", "string", "key")),
 			p("ttl", "string", "lock expiry")}},
+	// `state unlock` was promised by internal/kernel/why.go long before it was
+	// declared: the `lock` arm of walkCause hands the user `arxi state unlock <key>`
+	// as the remedy for a blocked member, and for the whole life of that line no
+	// registry entry backed it. `state lock` sharpened the hole rather than filling
+	// it -- the only lock.released it writes is a steal of a LAPSED lease, so a
+	// holder that finished early had no way to say so and the key sat there until it
+	// timed out.
+	//
+	// `force` is agent-visible, and that is a consequence of WireParams rather than a
+	// preference: every declared param is projected into the tool schema, and the
+	// only synthetic one is `json` on non-mutating commands. So there is no way to
+	// declare a flag the CLI has and an agent does not, and an allow-policy tool with
+	// this param lets one agent end another's LIVE lease. Kept anyway, because the
+	// alternative -- a lease only a human can end -- means every agent lock runs to
+	// expiry, which is the stall §20.8 names. The release is accountable instead: it
+	// records previous_holder and reason: "forced", and the log says who did it.
+	{Path: []string{"state", "unlock"}, Desc: "release a cooperative lock",
+		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
+		Params: []Param{pos(p("run", "string", "run id")),
+			pos(p("key", "string", "key")),
+			p("force", "bool", "release a lease that has not lapsed")}},
 
 	// ---- events ------------------------------------------------------------
 	// The `run` positional was ADDED when this verb was wired, and the omission is
@@ -354,10 +389,9 @@ var Registry = []Cmd{
 	// which run a write lands in is the one guess an append-only log cannot take
 	// back. So `arxi event emit custom.x` had no run to write to at all.
 	//
-	// Positional and FIRST, matching the thirteen other run-taking commands --
-	// fourteen counting this one, which is what `-r` now reaches. A parameter
-	// that is positional on thirteen commands and a flag on the fourteenth is
-	// the per-command dialect shortFlags exists to prevent.
+	// Positional and FIRST, matching every other run-taking command, which is what
+	// `-r` reaches. A parameter that is positional everywhere else and a flag on
+	// this one is the per-command dialect shortFlags exists to prevent.
 	{Path: []string{"event", "emit"}, Desc: "emit a custom.* event",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id")),
@@ -881,10 +915,10 @@ func SubcommandsUnder(prefix ...string) []string {
 // a second thing to memorize.
 var shortFlags = map[string]string{
 	// The ones that appear over and over across the surface.
-	"run":    "r", // 14 commands
+	"run":    "r", // 18 commands
 	"name":   "n", // 8
 	"budget": "b", // 5
-	"key":    "k", // 3
+	"key":    "k", // 4
 	"text":   "t", // 3
 	"model":  "m", // 3
 	"prompt": "p", // the objective of a run
@@ -911,7 +945,7 @@ var shortFlags = map[string]string{
 // -p (prompt), -f (path) and -r (run) abbreviate parameters declared with pos(),
 // whose identity is arguably their position. The first attempt therefore refused
 // short flags for positionals — and that deleted exactly the useful cases: -r
-// reaches fourteen commands, and -p and -f are the two a person types most.
+// reaches seventeen commands, and -p and -f are the two a person types most.
 //
 // So the rule is the other way round: a declared parameter is ALWAYS reachable
 // by name, and the position is a convenience layered on top. `--actor` is not a
