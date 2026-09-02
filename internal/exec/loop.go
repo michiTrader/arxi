@@ -353,6 +353,16 @@ func (l *Loop) tick(ctx context.Context) (bool, error) {
 // Seq is left 0 and ID empty: the log assigns the sequence number (ADR-0002) and
 // the Runner mints the id. Setting either here would put two writers in charge of
 // one field.
+//
+// A tick is a ROOT of its causal thread: no caused_by, and depth 0, which is why
+// this is the one caller of stamp that has no effect to attribute. The tick's
+// SetTimer is long gone -- it ran in an earlier step, and the clock that delivers
+// the id does not remember who armed it. Reconstructing the link would mean a
+// timer-to-cause map in the Runner, and that map is not in the log: a resumed run
+// would rebuild it empty and write uncaused ticks where a fresh run wrote caused
+// ones, so `run`, `--sim`, resume and replay would stop being one fold over the
+// same bytes. A tick being a root is also true to what it is: time passing is not
+// an event's consequence. See the note on kernel.SetTimer.
 func (l *Loop) appendTicks(fired []string) error {
 	events := make([]kernel.Event, 0, len(fired))
 	for _, id := range fired {

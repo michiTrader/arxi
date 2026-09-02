@@ -55,7 +55,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		// causes, so a resume that does not drain them restarts a run with nothing
 		// to do and quiescence blames the blueprint.
 		out.Status = StatusRunning
-		fx = append(fx, drainParked(&out, c)...)
+		fx = append(fx, drainParked(&out, e, c)...)
 	case RunCancelled:
 		out.Status = StatusCancelled
 	case RunExpired:
@@ -131,6 +131,7 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 			Kind:      "budget",
 			Question:  fmt.Sprintf("budget exhausted (%.4f of %.4f USD in the tree). raise or cancel?", out.TreeSpentUSD, out.BudgetUSD),
 			OnTimeout: "fail",
+			Cause:     causeOf(e),
 		})
 
 	case InboxCreated:
@@ -345,7 +346,7 @@ func applyInjection(out *State, e Event, c Config) []Effect {
 		}
 		m.State = MemberIdle
 		m.Submitted = false
-		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
+		fx = append(fx, spawnCauses(out, m, c, causeOf(e), 0)...)
 	}
 	return fx
 }
@@ -428,7 +429,7 @@ func applyStageEntered(out *State, e Event, c Config) []Effect {
 		}
 
 		m.State = MemberIdle
-		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
+		fx = append(fx, spawnCauses(out, m, c, causeOf(e), 0)...)
 	}
 	return fx
 }
@@ -663,6 +664,7 @@ func applyStageTimeout(out *State, e Event, c Config) []Effect {
 			Kind:      "stage_timeout",
 			Question:  "the stage " + out.Stage + " expired and nobody observes it. advance, extend or cancel?",
 			OnTimeout: "fail",
+			Cause:     causeOf(e),
 		}}
 	}
 }
@@ -729,7 +731,7 @@ func applyTurnDone(out *State, e Event, c Config) []Effect {
 	}
 	causes := m.PendingCauses
 	m.PendingCauses = nil
-	return spawnCauses(out, m, c, causes, len(causes))
+	return spawnCauses(out, m, c, causeOf(e, causes...), len(causes))
 }
 
 func applyBlocked(out *State, e Event) {
@@ -791,6 +793,7 @@ func applyToolDenied(out *State, e Event) []Effect {
 		Question:  item.Question,
 		Agent:     e.Actor,
 		OnTimeout: item.OnTimeout,
+		Cause:     causeOf(e),
 	}}
 }
 
@@ -824,11 +827,11 @@ func applyInboxReplied(out *State, e Event, c Config) []Effect {
 		if out.Status == StatusBlocked {
 			out.Status = StatusRunning
 		}
-		fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
+		fx = append(fx, spawnCauses(out, m, c, causeOf(e), 0)...)
 	}
 	if out.Status == StatusBlocked {
 		out.Status = StatusRunning
-		fx = append(fx, drainParked(out, c)...)
+		fx = append(fx, drainParked(out, e, c)...)
 	}
 	return fx
 }
@@ -847,7 +850,12 @@ func applyInboxReplied(out *State, e Event, c Config) []Effect {
 // blocked and nothing armed, so checkQuiescence fired and reported the stage's
 // advance rule as unsatisfiable -- sending the user to debug a blueprint that was
 // correct, about work this reducer was holding. Paying for more bought silence.
-func drainParked(out *State, c Config) []Effect {
+//
+// It takes the event that unblocked the run, which it does not otherwise need,
+// because the turns it opens have to say what caused them and a parked cause is
+// only an id. The reply is the reason these turns can run now, so it is a genuine
+// parent of them, not a stand-in for a missing one.
+func drainParked(out *State, e Event, c Config) []Effect {
 	var fx []Effect
 	for i := range out.Members {
 		m := &out.Members[i]
@@ -863,7 +871,7 @@ func drainParked(out *State, c Config) []Effect {
 		causes := m.PendingCauses
 		m.PendingCauses = nil
 		m.State = MemberIdle
-		fx = append(fx, spawnFor(out, *m, c, causes, len(causes)))
+		fx = append(fx, spawnFor(out, *m, c, causeOf(e, causes...), len(causes)))
 	}
 	return fx
 }
@@ -1120,21 +1128,21 @@ func wakeWatchers(out *State, e Event, c Config) []Effect {
 
 		switch w.Action {
 		case "run_tool":
-			fx = append(fx, CallTool{Agent: w.Agent, Tool: w.Tool, Args: e.Payload})
+			fx = append(fx, CallTool{Agent: w.Agent, Tool: w.Tool, Args: e.Payload, Cause: causeOf(e)})
 		case "notify":
 			if m.Busy() || m.State == MemberWaiting {
 				m.PendingCauses = append(m.PendingCauses, e.ID)
 				continue
 			}
 			m.State = MemberIdle
-			fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
+			fx = append(fx, spawnCauses(out, m, c, causeOf(e), 0)...)
 		default: // activate
 			if m.Busy() || m.State == MemberWaiting {
 				m.PendingCauses = append(m.PendingCauses, e.ID)
 				continue
 			}
 			m.State = MemberIdle
-			fx = append(fx, spawnCauses(out, m, c, []string{e.ID}, 0)...)
+			fx = append(fx, spawnCauses(out, m, c, causeOf(e), 0)...)
 		}
 	}
 	return fx
@@ -1178,15 +1186,22 @@ func spendingHalted(s State) bool {
 // spawnCauses either opens the turn or parks its causes on the member, and every
 // site that wants a turn goes through it so the budget cannot be enforced in
 // five places and forgotten in the sixth.
-func spawnCauses(out *State, m *Member, c Config, causes []string, coalesced int) []Effect {
+//
+// It takes a resolved Cause and not a list of ids because the turn's events are
+// written by the executor, which never sees the event that decided them. What is
+// parked is still only the ids: PendingCauses is part of State, so it is
+// snapshotted and re-folded, and widening it to hold three fields per parked
+// cause would buy nothing -- the depth of a drained turn comes from whatever
+// event drains it. See causeOf.
+func spawnCauses(out *State, m *Member, c Config, cause Cause, coalesced int) []Effect {
 	if spendingHalted(*out) {
-		m.PendingCauses = append(m.PendingCauses, causes...)
+		m.PendingCauses = append(m.PendingCauses, cause.Events...)
 		return nil
 	}
-	return []Effect{spawnFor(out, *m, c, causes, coalesced)}
+	return []Effect{spawnFor(out, *m, c, cause, coalesced)}
 }
 
-func spawnFor(out *State, m Member, c Config, causes []string, coalesced int) Effect {
+func spawnFor(out *State, m Member, c Config, cause Cause, coalesced int) Effect {
 	slice := 0.0
 	if out.BudgetUSD > 0 {
 		if rest := out.BudgetUSD - out.TreeSpentUSD; rest > 0 {
@@ -1195,8 +1210,8 @@ func spawnFor(out *State, m Member, c Config, causes []string, coalesced int) Ef
 	}
 	return SpawnTurn{
 		Agent:       m.Name,
-		Context:     buildContext(out, m, c, causes),
-		CauseEvents: causes,
+		Context:     buildContext(out, m, c, cause.Events),
+		Cause:       cause,
 		BudgetSlice: slice,
 		Coalesced:   coalesced,
 	}
@@ -1222,26 +1237,59 @@ func buildContext(out *State, m Member, c Config, causes []string) ContextSpec {
 	return cs
 }
 
+// causeOf resolves the provenance that everything caused by e must carry, and it
+// is the only place the three rules live: the event being decided is a parent,
+// the correlation id is inherited or else opened by that event, and the depth is
+// one past it.
+//
+// `also` are the extra parents of a coalesced turn -- the reasons that queued up
+// while the agent was busy. They join e rather than replacing it, and that is
+// what keeps the arithmetic honest: a turn drained by an agent.turn_done happens
+// because the queue asked for it AND because that turn_done is what finally
+// freed the member, so recording only the queue would leave the turn's depth
+// disagreeing with the one parent it named. Depth still comes from e, never from
+// the queue, and that direction is deliberate -- depth is the brake in
+// wakeWatchers, and resetting it to a parked event's depth would let a cascade
+// keep going by bouncing through the queue.
+//
+// Duplicates of e are dropped: a member can end up with its own trigger parked
+// on it, and naming a parent twice turns one edge of the causal graph into two.
+func causeOf(e Event, also ...string) Cause {
+	corr := e.CorrelationID
+	if corr == "" {
+		corr = e.ID
+	}
+	events := make([]string, 0, len(also)+1)
+	events = append(events, e.ID)
+	for _, id := range also {
+		if id != e.ID {
+			events = append(events, id)
+		}
+	}
+	return Cause{Events: events, CorrelationID: corr, Depth: e.Depth + 1}
+}
+
 // derived builds a derived event. It inherits correlation_id (so the full causal
 // thread can be followed) and increments depth, which is what makes the depth
 // limit enforceable.
 //
+// The triple comes from causeOf rather than from three lines written here, so
+// that an Emit and a SpawnTurn decided by the same event agree about where they
+// sit in the chain. They did not always: this function was once the only thing
+// in the tree that wrote these fields, which is precisely why everything the
+// executor produced had none.
+//
 // Seq stays 0 on purpose: the reducer is not the single writer of the log, so
 // assigning sequence numbers is not its job.
 func derived(out *State, cause Event, typ EventType, payload map[string]any) Event {
-	corr := cause.CorrelationID
-	if corr == "" {
-		corr = cause.ID
+	e := Event{
+		Type:    typ,
+		Scope:   "run:" + out.RunID,
+		Source:  SourceRuntime,
+		Payload: payload,
 	}
-	return Event{
-		Type:          typ,
-		Scope:         "run:" + out.RunID,
-		Source:        SourceRuntime,
-		CorrelationID: corr,
-		CausedBy:      []string{cause.ID},
-		Depth:         cause.Depth + 1,
-		Payload:       payload,
-	}
+	causeOf(cause).Apply(&e)
+	return e
 }
 
 // orderEffects puts the control ones first, preserving the relative order

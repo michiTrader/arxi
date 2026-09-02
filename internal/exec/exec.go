@@ -378,7 +378,8 @@ func (r *Runner) runIndependent(ctx context.Context, fx []kernel.Effect, res *Re
 		// event and an error produced both, and the event is the part that
 		// belongs in history.
 		if len(outcomes[i].events) > 0 {
-			written, err := r.Log.Append(r.stamp(outcomes[i].events))
+			ev := attribute(fx[i], outcomes[i].events)
+			written, err := r.Log.Append(r.stamp(ev))
 			if err != nil {
 				res.Errs = append(res.Errs, fmt.Errorf("append result of %T: %w", fx[i], err))
 			} else {
@@ -389,6 +390,33 @@ func (r *Runner) runIndependent(ctx context.Context, fx []kernel.Effect, res *Re
 			res.Errs = append(res.Errs, outcomes[i].err)
 		}
 	}
+}
+
+// attribute copies the effect's provenance onto the events it produced.
+//
+// Here and not inside the Executor, because otherwise every implementation of
+// the interface has to remember: the Fake, the live provider one, and whichever
+// comes next. Copying three fields is not a decision an executor should get to
+// make differently, and the one that forgot would produce a log that traces
+// correctly under --sim and not in production -- the worst place for the
+// difference to live.
+//
+// Here and not inside stamp for the opposite reason: stamp fills identity, is
+// called with a bare []kernel.Event from three places, and one of them
+// (Loop.appendTicks) has no effect at all. Provenance needs the effect, and this
+// is the last point where it is still in hand.
+//
+// All the events of one effect get the SAME cause, flat -- not activated causing
+// llm.response causing turn_done. One effect is one causal step. Chaining them
+// would read prettier in `event trace` and would triple the depth every turn
+// adds, and since wakeWatchers stops at MaxDepth, cascades a blueprint asked for
+// would start dying two generations early for a reason nothing prints.
+func attribute(fx kernel.Effect, events []kernel.Event) []kernel.Event {
+	cause := fx.Provenance()
+	for i := range events {
+		cause.Apply(&events[i])
+	}
+	return events
 }
 
 // dispatch routes one independent effect to the Executor.
