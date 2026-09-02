@@ -25,14 +25,29 @@
 //   - `blueprint create` and `blueprint install`, both still unwired, land in
 //     this same directory with no migration and no conversion.
 //
-// # Why the rendered file declares no stages
+// # Why the rendered file declares one stage
 //
-// A single-agent run has nothing to advance between, and the reducer has an
-// explicit arm for it: applyRunStarted emits no stage.entered when the config
-// declares no stages, pinned by TestRunStartedWithoutStagesEntersNothing.
-// Rendering a synthetic stage so the file resembled examples/feature-team.yaml
-// would put a stage in the state of every single-agent run that the author never
-// declared, and advance rules would then be evaluated against it.
+// Because without one it cannot run, and it took a hand-run to notice.
+//
+// applyRunStarted activates the members of the stage it enters, and returns nil
+// when the config declares none. A stageless one-member file therefore starts,
+// enters nothing, spawns no turn, and records run.quiescent -- "nobody is
+// working and nobody can start" -- as the second event, after zero turns and
+// zero dollars. Every check passed it: blueprint.Load accepted it, `arxi
+// blueprint validate` accepted it, `agent show` printed it, and `agent create`
+// finished by printing `run it:` under it. The only symptom was a run that did
+// nothing, which is the one failure this store exists to prevent.
+//
+// The earlier argument against a stage was that advance rules would then be
+// evaluated against a stage the author never wrote. They are, and for one member
+// `advance_when: all` advances exactly when that member submits -- the only rule
+// a lone member can have. `all` rather than the identical-for-one `any` because
+// this file is meant to be grown: the moment a second member is added by hand,
+// `any` would advance on whichever finished first and ship half the work, where
+// `all` waits. The default that survives being grown is the one to write down.
+//
+// internal/kernel's TestRunStartedWithoutStagesEntersNothing still pins the
+// stageless arm of the reducer. What changed is that no stored agent takes it.
 //
 // # Where the directory lives, and why one file each
 //
@@ -161,9 +176,7 @@ func (r Record) Render() ([]byte, error) {
 	b.WriteString("#\n")
 	b.WriteString("# Editing this by hand is expected: it is an ordinary blueprint, so\n")
 	b.WriteString("# `arxi blueprint validate` checks it, and adding members or stages grows it\n")
-	b.WriteString("# into a team without moving it. There are no stages here because one member\n")
-	b.WriteString("# has nothing to advance between, and the reducer enters no stage when a\n")
-	b.WriteString("# blueprint declares none.\n")
+	b.WriteString("# into a team without moving it.\n")
 	fmt.Fprintf(&b, "name: %s\n\n", yamlScalar(r.Name))
 	b.WriteString("members:\n")
 	fmt.Fprintf(&b, "  - name: %s\n", yamlScalar(r.Name))
@@ -185,6 +198,23 @@ func (r Record) Render() ([]byte, error) {
 	// a column for it on every row, and a knob that only appears in the file once
 	// somebody has already used it is a knob nobody discovers.
 	fmt.Fprintf(&b, "    advisory: %t\n", r.Advisory)
+
+	// One stage, and it is not decoration: without it the agent does not run.
+	//
+	// kernel.applyRunStarted emits stage.entered only when the blueprint declares
+	// a stage and returns no effect at all for an empty list, so a stageless file
+	// starts, activates nobody, and records run.quiescent -- "nobody is working
+	// and nobody can start" -- as the second event, after zero turns. The file
+	// loads, `blueprint validate` passes it, and the only symptom is a run that
+	// does nothing, which is the failure this store exists to make impossible.
+	//
+	// `all` rather than `any`, which for one member are the same rule. They stop
+	// being the same the moment somebody adds a second member, and that edit is
+	// the one this file invites: `any` would then advance on whichever member
+	// finished first, shipping half the work, where `all` waits. The default that
+	// survives being grown is the right one to write.
+	b.WriteString("\nstages:\n")
+	b.WriteString("  - {name: work, advance_when: all}\n")
 
 	raw := []byte(b.String())
 	if _, err := blueprint.Load(raw); err != nil {
@@ -259,12 +289,35 @@ func plainSafe(s string) bool {
 type Store struct{ dir string }
 
 // Open prepares dir, creating it if necessary.
+//
+// For writers. Every reader should take At below, which prepares nothing.
 func Open(dir string) (*Store, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("agentstore: no directory given (default is %q)", DefaultDir)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("agentstore: create %s: %w", dir, err)
+	}
+	return &Store{dir: dir}, nil
+}
+
+// At names a store without touching the filesystem.
+//
+// Reporting on a directory must not create it. `arxi agent list` through Open
+// would leave an empty agents/ behind in a repository that has never had one,
+// and in a checkout the user cannot write to it would fail with "create agents:
+// permission denied" -- an error about a directory the command was never asked
+// to make, in place of the answer "no agents yet".
+//
+// Nothing needs preparing for a read: Names already reads a missing directory as
+// no names, and Load already reports ErrNotExist. Create is the only operation
+// that requires the directory to be there, and Open is what it takes.
+//
+// The blank-directory guard is Open's, for Open's reason: a store rooted at the
+// working directory would make every *.yaml in the repository an agent.
+func At(dir string) (*Store, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, fmt.Errorf("agentstore: no directory given (default is %q)", DefaultDir)
 	}
 	return &Store{dir: dir}, nil
 }
