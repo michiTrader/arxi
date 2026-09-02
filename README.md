@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**41 of 49 declared capabilities are wired — 83.7%.** That figure is measured,
+**42 of 49 declared capabilities are wired — 85.7%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -396,18 +396,17 @@ hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
 moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
 `event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37,
-`run steer` to 38, `event trace` to 39, `state set` to 40 and `state get` to 41,
-and every time the
-number above was
-corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 8 that remain are `agent list` / `create`
-/ `show`, `role define`, `blueprint create` / `install`, `state lock`
-and `design`, which want an agent store, a lock table or a generator
+`run steer` to 38, `event trace` to 39, `state set` to 40, `state get` to 41 and
+`state lock` to 42, and every time the number above was corrected because **the
+suite failed**, not because anybody remembered to check.
+It is deliberately unflattering — the 7 that remain are `agent list` / `create`
+/ `show`, `role define`, `blueprint create` / `install`
+and `design`, which want an agent store, a designer or a generator
 rather than another way to read what a run already wrote. The implemented
-forty-one are
+forty-two are
 `provider add`, `model list` /
 `enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent tool policy`,
-`blueprint validate`, `state set`, `state get`, `event emit`, `event log`, `event trace`, `trigger create` /
+`blueprint validate`, `state set`, `state get`, `state lock`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
 
@@ -439,7 +438,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-83.7% is the CLI surface, and quoting it alone would be misleading in **both**
+85.7% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -447,7 +446,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **41 / 49 — 83.7%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **42 / 49 — 85.7%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -477,14 +476,59 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 83.7% understates and 100% overstates. The `run` group is
-now **14 / 14** and the `event` group **3 / 3**: every verb a person needs to
-inspect, redirect or end a run in flight is wired, and none of the 8 that remain
+That shape is also why 85.7% understates and 100% overstates. The `run` group is
+now **14 / 14**, the `event` group **3 / 3** and the `state` group **3 / 3**:
+every verb a person needs to inspect, redirect, coordinate or end a run in
+flight is wired, and none of the 7 that remain
 is one of them. The list here has been rewritten four times and each rewrite was
 the same admission — it named `replay`, then `attach`, then `steer` as the next
 thing worth building, and each one got built.
 
-The run's **shared store** is the one just finished, both halves of it: what one
+The run's cooperative **lock** is the one just finished, the third and last verb
+of the `state` group: how two members avoid editing the same thing at once
+(docs/design/20-use-cases.md §20.8). `arxi state lock <run> <key> --ttl 10m`
+claims a named key, and the claim is a **lease** — the one shape this paragraph
+correctly predicted the tree did not have. What the prediction missed is that the
+hard part is not holding the key across processes; it is that nobody is running
+to expire it.
+
+The resolution is that **the reducer never expires a lock**, and a test asserts
+that nothing happens. `Decide` has no clock, so `expires_at` is an absolute
+instant it carries and does not judge — if the fold dropped a lapsed lease, the
+same log would answer differently in the morning and in the afternoon, and
+reproducible replay is the property the rest of the design is built on. Judging a
+lease lapsed needs a `now`, so it is a **reading**, and the reader that takes one
+records its judgement: stealing a lapsed lock appends a `lock.released` carrying
+`previous_holder`, `reason` and `expired_at` and then the `lock.acquired`, both in
+one batch, so the next fold reproduces the outcome without a clock and the log
+says who decided the lease was dead.
+
+Everything else is arbitration, and a held key has four answers rather than two.
+The holder re-claiming is a **renewal** — an acquire that moves the expiry in
+place, not a release and a re-take, because a long turn keeps its lock alive that
+way and a handover in the log would read as one member losing the key to another.
+A lapsed lease is **stolen**, with the judgement above recorded. A live lease is
+**refused** with exit 3 — `exitLockHeld` aliased from `run result`'s "not yet",
+the way `run attach` and `state get` alias the same constant, so a caller waiting
+for a key reads the number it already polls on — and stdout stays empty, since a
+lock that was not taken must not print like one that was. A lock with **no
+expiry** is refused with exit **1** instead, and the difference is the whole
+point: there is nothing to wait for, so telling a polling caller "not yet" would
+spin it forever. Retrying is what changes the first refusal and no amount of
+asking changes the second.
+
+Wiring it found a defect in the reducer that had been there for the entire life
+of the event type: the arm that takes a lock was an **unconditional append**.
+Nothing in the tree emitted `lock.acquired`, so nothing had ever folded two of
+them, and what came out of that fold was one key with two holders — both members
+read the state, both believe they may edit `migrations/`, and the coordination
+cost a turn to achieve exactly nothing. `arxi run show` also gained the lease
+beside the holder, because every refusal this verb prints points there, and a
+holder with no expiry answers half of what the reader came for: whether to wait
+or to steal.
+
+The **shared store** is the other two verbs of that group and came just before,
+both halves of it: what one
 member wants another to know without paying for a turn to say it. A member that has
 frozen an API contract writes the key with `state set`; whoever needs it reads it
 back with `state get`. The store is not a file beside the log, and that is the
@@ -634,14 +678,13 @@ the reducer does not implement. Each of those three is right on its own. Togethe
 the verb would have refused **every** plain invocation with exit 2, quoting a
 flag back at a caller who typed none.
 
-The honest reason the remaining 8 will not fall as fast is that none of them is
+The honest reason the remaining 7 will not fall as fast is that none of them is
 a variation on something already here. `agent *` and `role define` want an agent
 store; `blueprint create` / `install` want generation rather than validation;
-`state lock` wants a **lease** — a named key held across processes until it
-expires, with nobody
-running to expire it, which nothing in this tree has. `writer.lock` is not a
-counter-example: it is one file per run directory holding a pid, taken and
-dropped inside a single command.
+`design` wants a terminal UI that holds a screen and a cursor and answers
+keystrokes, where every command here reads argv, writes lines and exits — `serve`
+is its nearest neighbour and is not close, since an NDJSON loop over stdio has a
+request and a reply and nothing to redraw.
 
 `run attach` was built two verbs earlier, and it is the only verb here that reads
 a log while somebody else is writing to it. It joins at the head — the events that
