@@ -120,6 +120,26 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		// trivial merge conflict kill half an hour of work.
 		fx = append(fx, wakeWatchers(&out, e, c)...)
 
+	case StateSet:
+		// The write overwrites and keeps no history here. That is not a loss: the
+		// log already holds every earlier state.set, so `event log --type
+		// state.set` IS the history of a key and State only has to answer what it
+		// is now. Keeping previous values in the state as well would be a second
+		// copy of the log that can disagree with it.
+		//
+		// An empty key is dropped rather than stored. The CLI refuses one up
+		// front, so this fires only on a hand-written log or a bridge that lost
+		// the field, and storing it would put a value in the state under a name
+		// `state get` has no way to ask for. Same judgement as the `if id == ""`
+		// in InboxItem: a keyed collection with an unkeyed entry is a lookup that
+		// can only ever fail.
+		if k := e.Str("key"); k != "" {
+			if out.KV == nil {
+				out.KV = map[string]string{}
+			}
+			out.KV[k] = e.Str("value")
+		}
+
 	case BudgetWarning:
 		out.BudgetWarned = true
 	case BudgetExceeded:
