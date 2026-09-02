@@ -117,12 +117,42 @@ creates an inbox item and leaves `blocked_ref` so the remedy is automatic.
 
 | type | payload |
 |---|---|
-| `lock.acquired` / `lock.released` | `key` |
+| `lock.acquired` | `key`, `expires_at?` |
+| `lock.released` | `key`, `previous_holder?`, `reason?`, `expired_at?` |
 | `resource.conflict` | `path`, `agents?` |
 
 `resource.conflict` does not fail the run. It wakes whoever observes it; if
 nobody observes, it stays recorded and quiescence detects it later. Failing here
 would let a trivial merge conflict kill half an hour of work.
+
+A lock is held by `actor`, or by `source` when no actor signed for it — the way
+`arxi state lock` leaves it, since naming a member there would disable that
+member's own watcher on `lock.*`. One key has one holder: a second `lock.acquired`
+from somebody else is **dropped**, and one from the holder is a **renewal** that
+moves `expires_at` in place rather than a release followed by a re-take. A
+renewal is how a member whose turn outlasts its lease keeps the key, and a
+handover written into the log would read as that member losing it.
+
+`expires_at` is an **absolute** RFC3339 instant, never a duration, and the
+reducer only carries it. Judging a lease lapsed needs a `now`, so it is a
+reading rather than a fold: a `Decide` that dropped an expired lock would make
+the same log answer differently in the morning and in the afternoon, and
+reproducible replay is the property the rest of this spec depends on. The field
+is optional, and **absent is not expired** — it means held until the run ends.
+
+So the reader that has a clock **records its judgement**. `arxi state lock`
+steals a lapsed key by appending a `lock.released` carrying `previous_holder`,
+`reason: "expired"` and `expired_at`, immediately followed by the
+`lock.acquired`, in one batch. The next fold reproduces the steal without a
+clock, and the log says who decided the lease was dead and on what evidence.
+That release is `SourceRuntime` and is honoured **whatever** it comes from: a
+release accepted only from its own holder could never reclaim a key whose holder
+crashed mid-turn, and the only way around it would be for a shell to write an
+event claiming to be that agent.
+
+An acquire with no `key` is dropped rather than stored, on the same ground as
+`state.set`: a row keyed on nothing is one no release can name, and the next
+such event would add another.
 
 ## Shared state
 
