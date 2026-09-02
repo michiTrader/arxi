@@ -87,7 +87,7 @@ concrete command:
 | `blocked_on` | `blocked_ref` | derived remedy |
 |---|---|---|
 | `approval` | `{inbox_id, tool, policy}` | `arxi inbox approve <inbox_id>` |
-| `lock` | `{key, holder}` | `arxi state unlock <key>` |
+| `lock` | `{key, holder}` | `arxi state unlock <run> <key>` |
 | `peer` | `{peer}` | (informational: chained wait) |
 | `budget` | `{}` | `arxi run unpause <run> --budget <higher>` |
 | `timer` | `{timer_id}` | (informational) |
@@ -138,17 +138,42 @@ reducer only carries it. Judging a lease lapsed needs a `now`, so it is a
 reading rather than a fold: a `Decide` that dropped an expired lock would make
 the same log answer differently in the morning and in the afternoon, and
 reproducible replay is the property the rest of this spec depends on. The field
-is optional, and **absent is not expired** — it means held until the run ends.
+is optional, and **absent is not expired** — no clock ever reclaims such a key,
+so it stands until somebody hands it back by name with `arxi state unlock`. A
+caller who says nothing therefore gets a lease, not eternity: the reclaim that
+needs nobody's attention.
 
 So the reader that has a clock **records its judgement**. `arxi state lock`
 steals a lapsed key by appending a `lock.released` carrying `previous_holder`,
 `reason: "expired"` and `expired_at`, immediately followed by the
 `lock.acquired`, in one batch. The next fold reproduces the steal without a
 clock, and the log says who decided the lease was dead and on what evidence.
-That release is `SourceRuntime` and is honoured **whatever** it comes from: a
-release accepted only from its own holder could never reclaim a key whose holder
-crashed mid-turn, and the only way around it would be for a shell to write an
-event claiming to be that agent.
+That steal is `SourceRuntime` because the `lock.acquired` batched behind it
+carries the wake, and a `lock.*` watcher fired twice bills two turns for one
+handover.
+
+A release is honoured **whatever** it comes from, and the reducer does not check
+the holder: a release accepted only from its own holder could never reclaim a key
+whose holder crashed mid-turn, and the only way around it would be for a shell to
+write an event claiming to be that agent. So who MAY release is the writer's
+judgement, and `reason` is where that judgement is recorded:
+
+| `reason` | what the writer decided |
+|---|---|
+| `released` | the holder handed the key back — no ceremony |
+| `expired` | the lease had run out, and `expired_at` is the evidence |
+| `forced` | the lease had **not** run out and was ended anyway |
+
+`arxi state unlock <run> <key>` writes the first two with no flag, and `forced`
+needs `--force`, since it is the only one that ends work in flight. Its release
+is `SourceHuman`, unlike the steal above, because here the release IS the news:
+`wakeWatchers` is skipped outright for `SourceRuntime`, so a runtime hand-back
+would leave a member watching `lock.*` waiting for a key that is already free.
+
+Freeing a key does **not** unblock the member waiting on it. The `lock.released`
+arm removes the row and stops there, and nothing in the tree emits
+`agent.unblocked` — so a lock-blocked member is moved by the turn a `lock.*`
+watcher opens, or not at all.
 
 An acquire with no `key` is dropped rather than stored, on the same ground as
 `state.set`: a row keyed on nothing is one no release can name, and the next
