@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**40 of 49 declared capabilities are wired — 81.6%.** That figure is measured,
+**41 of 49 declared capabilities are wired — 83.7%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -396,17 +396,18 @@ hypothetical: wiring `run list` moved this figure from 24 to 25, `run show`
 moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
 `event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37,
-`run steer` to 38, `event trace` to 39 and `state set` to 40, and every time the
+`run steer` to 38, `event trace` to 39, `state set` to 40 and `state get` to 41,
+and every time the
 number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 9 that remain are `agent list` / `create`
-/ `show`, `role define`, `blueprint create` / `install`, `state get` /
-`lock` and `design`, which want an agent store, a keyed store or a generator
+It is deliberately unflattering — the 8 that remain are `agent list` / `create`
+/ `show`, `role define`, `blueprint create` / `install`, `state lock`
+and `design`, which want an agent store, a lock table or a generator
 rather than another way to read what a run already wrote. The implemented
-forty are
+forty-one are
 `provider add`, `model list` /
 `enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent tool policy`,
-`blueprint validate`, `state set`, `event emit`, `event log`, `event trace`, `trigger create` /
+`blueprint validate`, `state set`, `state get`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
 
@@ -438,7 +439,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-81.6% is the CLI surface, and quoting it alone would be misleading in **both**
+83.7% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -446,7 +447,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **40 / 49 — 81.6%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **41 / 49 — 83.7%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -476,17 +477,17 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 81.6% understates and 100% overstates. The `run` group is
+That shape is also why 83.7% understates and 100% overstates. The `run` group is
 now **14 / 14** and the `event` group **3 / 3**: every verb a person needs to
-inspect, redirect or end a run in flight is wired, and none of the 9 that remain
+inspect, redirect or end a run in flight is wired, and none of the 8 that remain
 is one of them. The list here has been rewritten four times and each rewrite was
 the same admission — it named `replay`, then `attach`, then `steer` as the next
 thing worth building, and each one got built.
 
-`state set` is the one just finished, and it is the first verb that writes to the
-run's **shared store**: what one member wants another to know without paying for a
-turn to say it. A member that has frozen an API contract writes the key; whoever
-needs it reads it back. The store is not a file beside the log, and that is the
+The run's **shared store** is the one just finished, both halves of it: what one
+member wants another to know without paying for a turn to say it. A member that has
+frozen an API contract writes the key with `state set`; whoever needs it reads it
+back with `state get`. The store is not a file beside the log, and that is the
 whole design — a KV file would make `state = fold(Decide, State0, events)` false in
 the direction hardest to notice, since the fold would rebuild every member, lock
 and inbox item from August and then read **today's** value for a key an agent set
@@ -514,6 +515,31 @@ back when the halt clears, while `wakeWatchers` returns `CallTool`
 unconditionally, nothing parks it, and the next drive folds this event into its
 starting state and keeps no effects from it. That tool call would be dropped in
 silence, and nothing has been written yet when the refusal happens.
+
+The read half has no such machinery — there is no store to open, since the value
+*is* `State.KV[key]` and `State` is the fold — so what `state get` had to decide was
+what its output is **for**. Three answers, each taken from a precedent rather than
+invented. Its stdout is the value **alone**, which departs from `run result`, whose
+stdout is deliberately a report with the answer inside it; this value's normal
+destination is another command's argument, so a headline above it would be captured
+too and quietly become part of the value. An unset key exits **3**, aliased from
+`run result`'s "not yet" the way `run attach` aliases the same constant, so a caller
+polling for a key and a caller polling for a run read one number — and `1` stays
+"the run could not be read", which is what stops such a loop spinning forever on a
+run id with a typo in it. In that case stdout stays empty and the explanation goes
+to stderr, for the reason `run result` gives: an explanation written into a redirect
+is read by the next command as the value.
+
+The third answer is the one the store's own design forced. **An empty value is a
+value** — `spec/events.md` has no delete, on the grounds that a key which vanished
+from the fold could not be told from a key nobody ever set, so emptying one is how a
+member retracts it. So `found` is a field of its own in `--json` rather than
+something to infer from `value`, exactly as `run result` keeps `has_result` separate
+from `result`; and in the plain output the empty case prints an empty line plus a
+one-line note on stderr, because in a terminal an empty line and no output at all
+look identical while the exit codes differ. `--json` also carries the run's `seq`,
+which feeds straight back into `state set --if-seq` — ADR-0006's compare-and-set
+loop with the read and the guard taking their number from one fold of one log.
 
 Wiring it also found a **registry** defect that was systematic rather than a slip.
 All three `state` verbs were declared with a key and no run — they had been
@@ -608,11 +634,11 @@ the reducer does not implement. Each of those three is right on its own. Togethe
 the verb would have refused **every** plain invocation with exit 2, quoting a
 flag back at a caller who typed none.
 
-The honest reason the remaining 10 will not fall as fast is that none of them is
+The honest reason the remaining 8 will not fall as fast is that none of them is
 a variation on something already here. `agent *` and `role define` want an agent
 store; `blueprint create` / `install` want generation rather than validation;
-`state get` / `set` / `lock` want a keyed store, and `lock` specifically wants a
-**lease** — a named key held across processes until it expires, with nobody
+`state lock` wants a **lease** — a named key held across processes until it
+expires, with nobody
 running to expire it, which nothing in this tree has. `writer.lock` is not a
 counter-example: it is one file per run directory holding a pid, taken and
 dropped inside a single command.

@@ -15,10 +15,10 @@ import (
 
 // cmdState routes the run's shared key/value store.
 //
-// Only `set` is wired; `get` and `lock` fall through to notImplemented, which
-// reads the group from the registry. A hand-written list of the group's verbs
-// here would be a second copy, and the copy is the one that would forget the next
-// verb to land.
+// `set` and `get` are wired; `lock` falls through to notImplemented, which reads
+// the group from the registry. A hand-written list of the group's verbs here would
+// be a second copy, and the copy is the one that would forget the next verb to
+// land.
 func cmdState(args []string) {
 	if len(args) == 0 {
 		notImplemented([]string{"state"})
@@ -27,6 +27,9 @@ func cmdState(args []string) {
 	switch args[0] {
 	case "set":
 		cmdStateSet(args[1:])
+		return
+	case "get":
+		cmdStateGet(args[1:])
 		return
 	}
 	notImplemented(append([]string{"state"}, args...))
