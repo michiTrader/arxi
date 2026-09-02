@@ -192,6 +192,22 @@ type State struct {
 	Locks []Lock      `json:"locks,omitempty"`
 	Inbox []InboxItem `json:"inbox,omitempty"`
 
+	// KV is the run's shared key/value store: what one member wants another to
+	// know without paying for a turn to say it.
+	//
+	// A map, and not the []Something every other collection here is. The others
+	// are ordered histories -- Members has slots, Inbox has questions in the
+	// order they were asked -- and this is a lookup where the last write is the
+	// whole answer. A slice would scan linearly per read and, worse, would let
+	// two entries share a key, which is a state `state get` cannot answer from.
+	//
+	// The values are strings because the surface declares the parameter as one,
+	// and that is worth keeping rather than widening to `any`: a map[string]any
+	// round-trips through JSON as float64, so a key set in Go and the same key
+	// after a fold from disk would not compare equal, and replay fidelity is the
+	// property this whole design exists for.
+	KV map[string]string `json:"kv,omitempty"`
+
 	ActiveTimer string `json:"active_timer,omitempty"`
 	Result      string `json:"result,omitempty"`
 
@@ -277,6 +293,19 @@ func (s State) Clone() State {
 	}
 	if s.Inbox != nil {
 		out.Inbox = append([]InboxItem(nil), s.Inbox...)
+	}
+	// The second map in this state, after Member.BlockedOn, and it needs the same
+	// treatment for a reason the slices above hide: `out := s` copies a slice
+	// HEADER, so appending to out.Locks leaves s.Locks alone, but it copies a map
+	// REFERENCE, so writing out.KV[k] writes s.KV[k] too. Without this arm the
+	// StateSet arm would mutate the state Decide was handed, the fold would stop
+	// being reproducible, and the tests that assert Decide does not touch its
+	// input would be checking the one field that no longer holds.
+	if s.KV != nil {
+		out.KV = make(map[string]string, len(s.KV))
+		for k, v := range s.KV {
+			out.KV[k] = v
+		}
 	}
 	return out
 }
