@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -73,7 +73,23 @@ func cmdRunStart(args []string) {
 		os.Exit(2)
 	}
 
-	bp, err := blueprint.LoadFile(f.actor)
+	// The actor is a path or the name of a stored agent, resolved in that order.
+	// resolveActor in agent.go argues the precedence; what matters here is that a
+	// name nothing answers to gets its own message. `blueprint is not valid` about
+	// a file that does not exist is the wrong sentence for a typo, and a typo is
+	// the common case now that a bare name is a legal argument.
+	bp, err := resolveActor(f.actor)
+	if errors.Is(err, errUnresolvedActor) {
+		// Exit 1 as well: the invocation is well formed and the thing it names is
+		// missing, which is the same class of failure as an unreadable file.
+		fmt.Fprintf(os.Stderr, "arxi run start: %v\n"+
+			"  looked for a file at %s\n"+
+			"  and a stored agent at %s\n"+
+			"  what is stored: arxi agent list\n"+
+			"  or write it:    arxi agent create %s --model <id> --tools read\n",
+			err, f.actor, readAgents().Path(f.actor), f.actor)
+		os.Exit(1)
+	}
 	if err != nil {
 		// Exit 1, not 2: the invocation was correct, the blueprint is what is
 		// wrong. CI needs to tell "you called this wrong" from "your file is bad".

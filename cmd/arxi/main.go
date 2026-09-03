@@ -5,7 +5,7 @@
 // run prompt, run steer, run result, run pause, run unpause, run cancel,
 // run fork, run replay, run attach, event emit, event log, event trace,
 // state set, state get, state lock, state unlock, serve, the trigger group, the
-// inbox group, agent tool policy, the eval group (--sim only), provider add and
+// inbox group, the agent group, the eval group (--sim only), provider add and
 // the model group; for everything else it answers "declared but not implemented"
 // with the exact name of the capability. That is on purpose: the surface is
 // frozen and verified by tests BEFORE the executor exists, so adding a new
@@ -285,7 +285,7 @@ IMPLEMENTED TODAY
   blueprint validate <file>  check a blueprint and print the resolved config
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
-  run start <bp> <prompt>    run a blueprint, calling real models (or --sim)
+  run start <bp> <prompt>    run a blueprint file or a stored agent (or --sim)
   run result <run>           the recorded result, and an exit code to gate on
   run pause <run>            stop opening turns; a turn already open finishes
   run unpause <run>          pick a run back up (--budget raises the ceiling)
@@ -300,6 +300,9 @@ IMPLEMENTED TODAY
   state lock <run> <key>     claim a key with a --ttl; exit 3 if it is held
   state unlock <run> <key>   hand it back; --force ends a live lease
   inbox                      questions an agent cannot continue without
+  agent create <name>        store an agent: --model, --tools, --role
+  agent list                 the agents in agents/, with model and tools
+  agent show <name>          what 'run start <name>' will actually execute
   agent tool policy          stop being asked about a tool every turn
   trigger list               schedules, and the loop that fires them
   eval run <suite>           suites, pass rates, and two runs side by side
@@ -324,6 +327,10 @@ first run wants 'provider add' before it. --sim drives the same reducer, log and
 loop with no model calls, which is what makes a simulated log worth reading.
 Tools and the inbox are still refused rather than faked, so a stage needing work
 submitted goes quiet and names the member that owes it.
+
+Its first argument is a blueprint file or the name of an agent from
+'agent create'. A file that exists wins, so a stored agent can never shadow the
+file you are editing; './name.yaml' says which one you meant either way.
 
 DESIGN
   docs/design/10-execution.md   the execution model

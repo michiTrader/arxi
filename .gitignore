@@ -26,11 +26,14 @@
 # on evidence that should never have been shipped.
 #
 # The list is the DefaultDir of each store rather than a guess, read from the
-# code: evalstore "evals", modelstore "providers", toolstore "policies",
-# trigstore "triggers", and cmd/arxi's runsDir "runs". A first draft of this
-# entry listed "agents", which no store writes, and omitted "policies", which
-# one does -- an ignore file that names directories nobody creates looks
-# maintained while leaving a real one tracked.
+# code: agentstore "agents", evalstore "evals", modelstore "providers",
+# toolstore "policies", trigstore "triggers", and cmd/arxi's runsDir "runs". A
+# first draft of this entry listed "agents", which no store wrote at the time,
+# and omitted "policies", which one did -- an ignore file that names directories
+# nobody creates looks maintained while leaving a real one tracked. agents/ is
+# now written, by internal/agentstore, so the name is back for the opposite
+# reason: `arxi agent create` in this repository would otherwise offer one
+# developer's agents, and their tool grants, to every clone.
 #
 # providers/ matters most: modelstore writes it 0600 because it holds
 # credentials, and a mode that careful is wasted if the file is committed.
@@ -38,8 +41,14 @@
 # The paths are anchored with a leading slash so they only match at the repo
 # root. A test fixture named runs/ inside a package is a different thing and
 # stays tracked.
+/agents/
 /runs/
 /triggers/
 /evals/
 /providers/
 /policies/
+
+# Per-machine agent settings. .claude/settings.json is shareable if one is ever
+# added; settings.local.json is one developer's local permission decisions and
+# means nothing in another checkout.
+/.claude/settings.local.json
