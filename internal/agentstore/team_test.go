@@ -342,3 +342,40 @@ func TestATeamThatCouldNotRunIsRefusedBeforeItIsAFile(t *testing.T) {
 		}
 	}
 }
+
+// TestStageNamesCanBeCheckedBeforeThereIsATeamToCheckThem is the claim
+// ValidateStages exists for: a caller that has typed some stages and nothing
+// else can find out whether they are legal, and cannot be told no for a reason
+// about somebody else.
+func TestStageNamesCanBeCheckedBeforeThereIsATeamToCheckThem(t *testing.T) {
+	if err := ValidateStages([]string{"draft", "review"}); err != nil {
+		t.Fatalf("a legal stage list was refused: %v", err)
+	}
+	if err := ValidateStages(nil); err != nil {
+		t.Errorf("an empty list was refused: %v\n"+
+			"  no stages is the normal case: stageNames defaults it to [work].", err)
+	}
+	for _, bad := range [][]string{{"x", "x"}, {"  "}, {"build "}, {"a\nb"}} {
+		if ValidateStages(bad) == nil {
+			t.Errorf("ValidateStages accepted %q, and CreateTeam would refuse it", bad)
+		}
+	}
+
+	// The reason the wrapper is not just Team.Validate. This member takes part
+	// only in `build`, which the team does not declare, so Validate refuses --
+	// correctly, at review. But an interactive caller types `draft` first on the
+	// way to [draft, build], and refusing THAT keystroke would make a legal team
+	// unreachable.
+	partial := Team{Name: "release", Stages: []string{"draft"},
+		Members: []kernel.MemberConfig{{Name: "a", Stages: []string{"build"}}}}
+	if partial.Validate() == nil {
+		t.Error("Validate accepted a member that takes part in no declared stage; " +
+			"the cross-check at review is what ValidateStages deliberately leaves to it")
+	}
+	if err := ValidateStages(partial.Stages); err != nil {
+		t.Errorf("ValidateStages refused %q: %v\n"+
+			"  the stage name is legal. This wrapper must answer about the names it "+
+			"was given and nothing else, or the first stage typed toward a legal "+
+			"team is refused as though it were illegal.", partial.Stages, err)
+	}
+}

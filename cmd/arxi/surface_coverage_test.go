@@ -34,18 +34,23 @@ import (
 //
 // Rebuilding the probe from the README's wording -- which is what a reader
 // checking the claim would do, and is exactly what happened -- produces a
-// pattern that matches nothing, so every one of the 49 paths falls into the
-// "implemented" bucket and the probe reports 49/49, 100.0%. A verification tool
+// pattern that matches nothing, so every one of the 49 paths fell into the
+// "implemented" bucket and the probe reported 49/49, 100.0%. A verification tool
 // that cannot fail reports total success. The 100% was believable enough to
 // stop and diagnose only because 25 unwired commands do not appear in an
 // afternoon.
+//
+// That tell is gone. The surface is wired end to end now, so a sentinel that
+// matches nothing reports 50 of 50 and 100.0% -- which is the right answer,
+// arrived at by measuring nothing. Nobody stops to diagnose a number that
+// agrees with the README.
 //
 // So the guard below does two separate jobs, and the second is the one the
 // hand-run probe could never do:
 //
 //  1. Count the wired capabilities and compare against the README.
 //  2. Assert the sentinel this count depends on is really the binary's wording,
-//     by checking a path known to be unimplemented actually prints it.
+//     and that an unrecognised path still reaches the code that prints it.
 //
 // Without (2), (1) is the same trap one layer up: a sentinel that stops
 // matching turns this test into one that certifies 100% and passes.
@@ -55,17 +60,24 @@ import (
 // A wired command invoked with no arguments mostly fails -- `arxi trigger show`
 // wants a name, `arxi eval run` wants two flags. Those failures come from the
 // command's own flag checking, which means the executor ran, which is the thing
-// being counted. Requiring success would need a valid invocation for all 49 and
+// being counted. Requiring success would need a valid invocation for all 50 and
 // would measure fixture-building rather than wiring. The distinction that
 // matters to a user is only ever "does this verb exist yet", and the binary
 // answers exactly that question in one sentence.
 //
-// Every one of the 24 was read by eye once against this rule, and none was a
-// false positive: 20 printed their own usage or flag error, and `model list`,
-// `trigger list`, `inbox` and `eval list` printed real (empty) output.
+// The 24 commands wired at the time were read by eye once against this rule, and
+// none was a false positive: 20 printed their own usage or flag error, and
+// `model list`, `trigger list`, `inbox` and `eval list` printed real (empty)
+// output. Every verb wired since has been held to the same rule, and `design` is
+// the one worth naming: probed here it prints "not a terminal" and exits
+// nonzero, because this runner closes stdin. That is the executor running and
+// refusing an environment, not a gap in the surface, so counting it as
+// implemented is right -- and design_test.go pins that wording apart from a
+// refusal, so the two answers cannot become the same sentence.
 
 // notImplementedSentinel is the phrase the binary prints for a declared command
-// with no executor behind it, copied from cmd/arxi/main.go's notImplemented.
+// with no executor behind it, and the test below checks it against
+// notImplementedMessage in cmd/arxi/main.go rather than trusting this copy.
 //
 // Not a shortened paraphrase. The README's paraphrase is what broke the probe,
 // and a sentinel is the one string in a test that must never be approximated:
@@ -94,32 +106,57 @@ var blockingPaths = map[string]bool{
 func TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes(t *testing.T) {
 	// Job 2 first, because job 1's answer is meaningless if it fails.
 	//
-	// `design` is used as the canary because it is declared, has no executor, and
-	// is the unwired path whose implementation is least like the work already done
-	// here: an interactive blueprint designer holds a screen and a cursor and
-	// answers keystrokes, where every command in this binary reads argv, writes
-	// lines and exits. `serve` is the nearest thing to it and is not close -- an
-	// NDJSON loop over stdio has a request and a reply, nothing to redraw. This
-	// repository wires verbs one per change, so the canary that survives longest
-	// is the one that is not a variation on something already built.
+	// This was a canary for most of its life: run the binary against a path that
+	// was declared and had no executor, and check the sentinel came back. It moved
+	// four times, from `run replay` to `run attach` to `run steer` to `state lock`
+	// to `design`, and every move happened because the verb got built. `design`
+	// was the last one. At 50 of 50 there is no unwired path left to point a
+	// canary at, and a canary aimed at a path that IS built asserts nothing while
+	// looking exactly like it asserts something.
 	//
-	// It has moved four times, from `run replay` to `run attach` to `run steer` to
-	// `state lock` to here, and every move happened because the verb got built. The
-	// test failed exactly as designed each time, with the instruction below naming
-	// the fix, which is the right amount of noise: a demand to re-verify the
-	// sentinel against a path that is genuinely unwired, not a bug.
-	dir := workdir(t)
-	canary := arxi(t, dir, "design")
-	if !strings.Contains(canary.out, notImplementedSentinel) {
-		t.Fatalf("the sentinel this test counts with does not appear for a path known to be unimplemented.\n"+
-			"  probed:   arxi design\n  expected: %q\n  got:\n%s\n"+
+	// So the same question is now asked in two pieces, neither of which needs an
+	// unbuilt verb in order to mean something:
+	//
+	//  1. the sentinel is read out of the function that prints it, so it cannot
+	//     drift into a paraphrase that quietly matches nothing;
+	//  2. main's fallback is shown to still arrive at that function, by way of a
+	//     verb that is misspelled rather than unbuilt -- the same call, the same
+	//     walk back up the prefixes, a different sentence at the end of it.
+	//
+	// Neither half can go stale, and both keep working the day a later surface
+	// version declares something before it is wired.
+	for i := range surface.Registry {
+		c := &surface.Registry[i]
+		if strings.Contains(notImplementedMessage(c), notImplementedSentinel) {
+			continue
+		}
+		t.Fatalf("the sentinel this test counts with is not in the message the binary prints.\n"+
+			"  command:  arxi %s\n  expected: %q\n  got:\n%s\n"+
 			"  consequence: if the sentinel is wrong, NOTHING matches it, every "+
 			"declared path counts as implemented, and this test certifies 100%% "+
 			"coverage while passing. That already happened once with the README's "+
 			"paraphrase of this phrase.\n"+
-			"  fix: copy the wording from notImplemented in main.go -- or, if "+
-			"design is now built, point this canary at another unimplemented path.",
-			notImplementedSentinel, canary.out)
+			"  fix: copy the wording from notImplementedMessage in main.go.",
+			c.CLI(), notImplementedSentinel, notImplementedMessage(c))
+	}
+
+	// The other half: that a path main does not dispatch still lands in that
+	// function. `blueprint` is probed with a verb it does not have because its
+	// case in the dispatch switch falls out of the switch rather than returning,
+	// which is the exact route a declared-but-unbuilt path takes to get there.
+	// The answer is a different sentence from the sentinel on purpose -- only
+	// notImplemented produces it, so seeing it is what proves the arrival.
+	dir := workdir(t)
+	fallback := arxi(t, dir, "blueprint", "frobnicate")
+	if !strings.Contains(fallback.out, "is not a blueprint command") {
+		t.Fatalf("main's fallback no longer answers from notImplemented.\n"+
+			"  probed:   arxi blueprint frobnicate\n  expected to contain: %q\n  got:\n%s\n"+
+			"  consequence: the count below is made of what does NOT print the "+
+			"sentinel. If an unrecognised path is answered somewhere else -- a "+
+			"usage dump, \"unknown command\" -- then a declared path with no "+
+			"executor is counted as implemented, and the percentage is a "+
+			"measurement of nothing.",
+			"is not a blueprint command", fallback.out)
 	}
 
 	implemented, notImplemented, walked := probeSurface(t, dir)

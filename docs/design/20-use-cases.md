@@ -2,7 +2,7 @@
 
 ## 20.0 What this document is for
 
-`arxi surface` lists the 46 declared capabilities. A list is not a design: it
+`arxi surface` lists the 50 declared capabilities. A list is not a design: it
 tells you what exists and nothing about whether the set is *coherent*. Two
 questions a list cannot answer:
 
@@ -14,22 +14,35 @@ questions a list cannot answer:
    document and maintain for nobody.
 
 So this document walks **use cases**, not commands, and every command has to fall
-out of some scenario naturally. The coverage table in §20.12 closes the loop: it
-lists all 46 and names the use case that reaches each one. It is generated from
-the registry, not maintained by hand — see `use_cases_test.go`.
+out of some scenario naturally. §20.13 closes the loop, and there is no table to
+keep in step: `internal/surface/use_cases_test.go` reads this file and checks it
+against the registry in both directions, so a capability no scenario reaches and
+a scenario invoking a verb that does not exist each turn the build red and name
+themselves.
 
-**Status of the commands.** `schema`, `surface`, `why`, `version`, `blueprint
-validate`, `run start` (`--sim` only) and `serve` run today; the rest are
-declared and verified by tests but have no executor (ADR-0001 explains why
-declaring first is deliberate). So the outputs below are **specifications of
-what the command must print**, not transcripts — except in §20.3, which is real
-output from the current binary. Where a scenario depends on behavior the kernel
-already decides, the section names the reducer function so the doc can be
-checked against the code instead of believed.
+**Status of the commands.** All 50 run today. Every capability `arxi surface`
+declares has a command behind it, `design` last of them, and the count is
+measured rather than asserted: `cmd/arxi/surface_coverage_test.go` invokes all 50
+against the built binary and compares the tally with the figure README.md states.
+ADR-0001 explains why declaring the whole surface before building any of it was
+deliberate.
 
-This paragraph is easy to leave stale, and staleness here has a direction that
-costs: it under-reports what exists, so a contributor reads "no executor" and
-reimplements a command that is already in the tree and already tested.
+The outputs below are still **specifications of what the command must print**
+rather than transcripts, except in §20.3, which is real output. Most were written
+before the code behind them existed and have not been regenerated since, so a
+block that disagrees with the binary is a bug in one of the two — a different
+thing from a block describing work not started. Where a scenario depends on
+behavior the kernel already decides, the section names the reducer function so
+the doc can be checked against the code instead of believed.
+
+The paragraph above was stale for most of the project's life, and it was stale in
+the direction that costs: it went on naming seven commands as the ones that run
+long after the other forty-three were built, so a contributor believing it would
+have reimplemented something already in the tree and already tested. The
+direction reverses from here. With nothing left to under-report, the next thing to
+rot is a sample output that quietly stops matching the binary — and no test
+compares these blocks to what the commands print, only the `$ arxi …` lines
+against the registry.
 
 Conventions: `$` is a human shell. `>` is an agent invoking the same capability
 as a tool. Run ids are `r1`, `r2`; inbox ids are `inbox-1`.

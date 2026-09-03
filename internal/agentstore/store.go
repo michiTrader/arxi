@@ -207,6 +207,22 @@ func validName(noun, name string) error {
 // from the one the writers enforce.
 func ValidateName(noun, name string) error { return validName(noun, name) }
 
+// ValidateStages is checkStageNames for a caller holding a stage list and
+// nothing else yet.
+//
+// The interactive designer is that caller. It asks for stages one screen before
+// there is a team to validate, and it has to refuse `  build` while the operator
+// is still looking at the line they typed rather than two screens later.
+//
+// The obvious alternative -- run Team.Validate on the team as it stands so far --
+// refuses for the wrong reason, and that is why this wrapper exists. A picked
+// member carrying `stages: [build]` fails checkMemberStages against a team whose
+// own list is still empty, so the FIRST stage typed on the way to a perfectly
+// legal team would be refused as though it were illegal. Splitting the name rules
+// out lets each check run when its inputs are complete: stage names as they are
+// typed, the cross-check against members at review, both from this file.
+func ValidateStages(stages []string) error { return Team{Stages: stages}.checkStageNames() }
+
 // Render turns a Record into the bytes that will be written, and proves they
 // load before returning them.
 //

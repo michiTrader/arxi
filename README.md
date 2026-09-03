@@ -126,6 +126,7 @@ arxi schema                     emit the surface manifest (JSON)
 arxi surface                    see the whole surface, human readable
 arxi why <file>                 explain why a run is not advancing
 arxi blueprint validate <file>  check a blueprint and print the resolved config
+arxi design                     compose a team on screen from the agents you have
 arxi version                    version of the binary and of the surface
 ```
 
@@ -177,7 +178,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1207 tests, no dependencies**.
+Underneath, every package is done and tested — **1522 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -192,10 +193,10 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
 | package | what it owns | tests |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 50 |
-| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 57 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 67 |
+| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 64 |
 | `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
-| `internal/blueprint` | YAML loading, validation, and freezing by digest | 65 |
+| `internal/blueprint` | YAML loading, validation, and freezing by digest | 69 |
 | `internal/surface` | the capability manifest every command is checked against | 31 |
 | `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 152 |
 | `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
@@ -205,20 +206,27 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
 | `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
 | `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 24 |
-| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 13 |
+| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 16 |
 | `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
 | `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 23 |
 | `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
-| `cmd/arxi` | the CLI, the short flags and the NDJSON protocol server | 383 |
-| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 18 |
+| `internal/agentstore` | stored agents and teams: one file each, and which names a team may compose | 31 |
+| `internal/rolestore` | roles on disk: the defaults `agent create --role` copies once | 14 |
+| `internal/designer` | the designer as a pure function: a model in, a key in, a frame out | 38 |
+| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 582 |
+| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 20 |
 
-Those cells add up to the total, and that is now the point of printing them: an
+Those cells add up to the total, and that is the only reason to print them: an
 earlier version of this table did **not** sum to the figure above it — the total
-was corrected each time it was measured and the nineteen cells were not, so they
-drifted 108 cases behind while looking authoritative. Per-package numbers nobody
-adds up are nineteen more places for a stale figure to hide, so they are only
-worth keeping if the sum is checked. `cmd/arxi` is where the drift had collected;
-it was the row that grew every time a verb was wired.
+was corrected each time it was measured and the cells were not, so they drifted
+108 cases behind while looking authoritative. It then happened a second time and
+worse: `internal/agentstore`, `internal/rolestore` and `internal/designer` were
+written and tested and never given a row at all, so the table was short three
+packages and 315 cases while every row in it still looked checkable. Per-package
+numbers nobody adds up are twenty-two more places for a stale figure to hide, and
+a *missing* row is the only kind of staleness a reader cannot catch by adding, so
+they are worth keeping only while the sum is checked. `cmd/arxi` is where the
+drift collects; it is the row that grows every time a verb is wired.
 
 `blueprint validate` prints the config **as resolved**, not the file read back.
 Most of what it shows the user never wrote:
@@ -380,14 +388,14 @@ was conditional. `{"budget":"2.00"}` is refused rather than coerced, since
 coercion makes it `0` and the most cautious-looking request becomes the most
 dangerous one.
 
-The rest of the surface is **declared and verified by tests, but not wired to a
-command**. The CLI is honest about it: for a command that is declared and not
-implemented it tells you so, with its tool name and its protocol type, instead
-of lying with "unknown command".
+There is no rest of the surface: every declared capability is wired to a command.
+The machinery for the other answer stays, because a later surface version will
+declare something before it is built — for a command that is declared and not
+implemented the CLI tells you so, with its tool name and its protocol type,
+instead of lying with "unknown command".
 
-**49 of 50 declared capabilities are wired — 98.0%.** That figure is measured,
-not estimated, and as of this step it is measured *by the suite* rather than by
-hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
+**50 of 50 declared capabilities are wired — 100.0%.** That figure is measured,
+not estimated, and it is measured *by the suite* rather than by hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
 counts the ones that do not answer *"is declared in the surface but not
 implemented yet"*. It reads the fraction above out of this file, so the sentence
@@ -399,22 +407,23 @@ moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run steer` to 38, `event trace` to 39, `state set` to 40, `state get` to 41,
 `state lock` to 42 and `state unlock` to 43, `agent create`, `agent list`
 and `agent show` took it to 46 in one step, `role define` to 47, and
-`blueprint create` to 48 and `blueprint install` to 49 — and every
-time the number above was
+`blueprint create` to 48 and `blueprint install` to 49, and `design` to 50 — and
+every time the number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 1 that remains is
-`design`, which wants a generator rather than another way to read what a run
-already wrote. It does not want a place to put its output either:
-`internal/agentstore` writes `agents/`,
-a one-member blueprint is a blueprint, and `blueprint create` composes the
-agents already there into a larger one in the same directory, with no migration
-and no conversion. The implemented
-forty-nine are
+
+The number has run out of room to be unflattering, so here is what it does not
+say. It counts *declared* capabilities, and the surface is a list this project
+wrote: reaching the end of it means every verb `arxi surface` publishes runs, not
+that there is nothing left to build. It says nothing about how much of that
+surface an agent may reach either — **34 of the 50** are exposed as tools, and the
+other sixteen are the operator's alone on purpose, `design` loudest among them: a
+socket client that could open a full-screen designer on somebody's terminal is
+not a feature. All fifty are
 `provider add`, `model list` /
 `enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent create` / `list` / `show`, `agent tool policy`, `role define`,
 `blueprint validate`, `blueprint create`, `blueprint install`, `state set`, `state get`, `state lock`, `state unlock`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
-`eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
+`eval run` / `list` / `compare`, `design`, `schema`, `serve`, `surface` and `version`.
 
 
 
@@ -432,19 +441,28 @@ used to describe the probe as counting paths that do not answer *"declared but
 not implemented"* — a paraphrase. The binary says *"is declared in the surface
 but not implemented yet"*. Rebuilding the probe from the README's wording, which
 is exactly what checking the claim from the outside looks like, produces a
-pattern that matches nothing at all: all 49 paths fall into the "implemented"
-bucket and the probe reports **49 / 49 — 100.0%**. It was caught only because 25
+pattern that matches nothing at all: all 49 paths fell into the "implemented"
+bucket and the probe reported **49 / 49 — 100.0%**. It was caught only because 25
 unwired commands do not appear in an afternoon.
 
 The lesson generalises past this one number. **A verification tool that cannot
-fail reports total success**, and it reports it in the flattering direction. So
-the test does not merely count — it first probes a path known to be unwired and
-*requires* the sentinel to appear. If that phrase ever stops matching the
-binary, the suite says so instead of quietly certifying that everything works.
+fail reports total success**, and it reports it in the flattering direction —
+which at 50 of 50 is the direction of the truth. The same broken sentinel today
+prints the right answer for the wrong reason, and nobody stops to diagnose a
+number that agrees with the README.
+
+So the test does not merely count. It used to keep a canary — one path known to
+be unwired, required to print the sentinel — and that canary moved four times as
+each path it named got built, until `design` was the last one and there was
+nothing left to point it at. The check that replaced it needs no unbuilt verb:
+the sentinel is read out of the function that prints it, and a *misspelled* verb
+under a real group proves an unrecognised path still reaches that function. If
+the phrase drifts, or if the fallback stops arriving there, the suite says so
+instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-98.0% is the CLI surface, and quoting it alone would be misleading in **both**
+100.0% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -452,13 +470,17 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **49 / 50 — 98.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **50 / 50 — 100.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
-Read together they say something a single percentage cannot: **the core is
-finished and the edges are not.** The reducer, the log, the fold, the budget
-arithmetic and the trigger/eval/model layers are complete and heavily tested —
-that is where most of the 1207 tests live. What is missing is almost entirely
-*the last mile*: CLI verbs that would read state the runners already produce.
+Read together they say something a single percentage cannot: **what is declared
+is finished, and what is declared is not everything a person could want.** The
+reducer, the log, the fold, the budget arithmetic and the trigger/eval/model
+layers are complete and heavily tested — that is where most of the 1522 tests
+live. What used to be missing was the last mile, CLI verbs that would read state
+the runners already produced, and the last mile is walked: the four rows above are
+the four things this project set out to build, and each is now at its declared
+size. What none of them measures is scale — every number here is coverage of a
+list, and no row says a run has been driven for a week.
 
 That row moved from **1 / 3** to **2 / 3** when `CallTool` was connected to
 `internal/toolrun`, and not when the runner was written. The runner existed,
@@ -482,7 +504,7 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 98.0% understates and 100% overstates. The `run` group is
+That shape is also why 100.0% is worth reading twice. The `run` group is
 now **14 / 14**, the `event` group **3 / 3**, the `state` group **4 / 4**, the
 `agent` group **4 / 4**, the `role` group **1 / 1** and the `blueprint` group
 **3 / 3**: every verb a person needs
@@ -490,20 +512,34 @@ to inspect, redirect, coordinate or end a run in flight is wired, and so is
 naming the thing it runs, the defaults it is named with, composing several of
 those names into one team,
 and taking somebody else's team as it was published.
-The 1 that remains
-is none of them. The list here has been rewritten eight times and each rewrite was
-the same admission — it named `replay`, then `attach`, then `steer` as the next
-thing worth building, and each one got built; a previous rewrite deleted the
-*store* the remainder was said to want, the one after it deleted the last verb
-that wanted it, and the one after that deleted the claim that the `blueprint`
-generators write a file this tree only ever reads. This one deletes the sentence
-that said `blueprint install` needed a registry before it could exist. It did
+This list has been rewritten nine times and every rewrite until this one was the
+same admission — it named `replay`, then `attach`, then `steer` as the next thing
+worth building, and each one got built; one rewrite deleted the *store* the
+remainder was said to want, the next deleted the last verb that wanted it, the
+one after that deleted the claim that the `blueprint` generators write a file
+this tree only ever reads, and the one after that deleted the sentence saying
+`blueprint install` needed a registry before it could exist. It did
 not: a path and an https URL are somewhere to install *from*, the registry is
 how you would **find** a blueprint rather than how you fetch one, and the verb
-that fetches it is finished without it. What is left is not a variation on
-anything here: `design` holds a screen and a cursor.
+that fetches it is finished without it. This rewrite deletes the remainder
+itself. `design` held a screen and a cursor, which is what made it the last one
+left and the one least like anything else here, and it holds them now.
 
-Taking somebody else's team as it was published is the increment just finished,
+Composing a team on screen is the increment just finished, and it is the one the
+counted claims above were waiting on. `arxi design` lists the agents in
+`agents/`, takes a name, a set of members, an ordered set of stages, and writes
+the team through the same `internal/agentstore` that `blueprint create` writes —
+no second path onto disk, and no format only the designer can produce. The split
+is the whole of its design: `internal/designer` is `Update(Model, Input) ->
+(Model, []Command)` and `Render(Model, w, h) Frame`, both pure and neither
+allowed to import `os` or to call `CreateTeam`, which `internal/arch_test.go`
+enforces in both directions. Raw mode, the escape sequences, the real cursor,
+SIGWINCH and the one write live in `cmd/arxi`. What that buys is a full-screen
+program whose behaviour is testable without a terminal: a key goes in, a `Frame`
+of exactly *h* lines comes out, and the test reads the frame rather than a
+screenshot.
+
+Taking somebody else's team as it was published is the increment before it,
 and it completes the three `blueprint` verbs. `arxi blueprint install
 https://example.com/code-review.yaml` writes `agents/code-review.yaml`, and the
 whole design is in one word: **verbatim**. Re-rendering the file through the
@@ -880,18 +916,21 @@ screen and a cursor and answers keystrokes, where every command here reads argv,
 writes lines and exits — `serve` is its nearest neighbour and is not close, since
 an NDJSON loop over stdio has a request and a reply and nothing to redraw.
 
-Six of those seven fell in four increments, and the prediction was right about
+All seven fell, in five increments, and the prediction was right about
 *why* rather than about the pace: the store was the whole cost, and once
 `internal/agentstore` and `internal/rolestore` existed, four verbs were readers
-and writers of a directory — and the last two turned out to want no generation at
-all. `blueprint create` composes agents the store already holds, so the
+and writers of a directory — and two of the rest turned out to want no generation
+at all. `blueprint create` composes agents the store already holds, so the
 "generation rather than validation" it was said to need was really a second
 writer for the same directory; `blueprint install` wanted the *opposite* of
 generation, because re-rendering a published file is exactly what would drop the
 watchers and timeouts that are the reason to install it, and its cost was in the
-refusals around the fetch rather than in producing anything. `design` is the only
-part of that sentence still standing, and it is the part that named something
-other than a missing store: a screen and a cursor.
+refusals around the fetch rather than in producing anything. `design` was the one
+part of that sentence naming something other than a missing store, and about that
+it was right: the screen and the cursor were the cost. They were paid by putting
+them where they cannot spread — the terminal is `cmd/arxi`'s, the four screens are
+a pure function of a model and a key, and an architecture test holds the line in
+both directions.
 
 `run attach` was built two verbs earlier, and it is the only verb here that reads
 a log while somebody else is writing to it. It joins at the head — the events that

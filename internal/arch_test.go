@@ -9,7 +9,10 @@ package internal_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -662,5 +665,132 @@ func TestTheModelStoreIsTheOnlyPlaceProvidersTouchTheDisk(t *testing.T) {
 			"world-readable map to a credential that looks like a working "+
 			"file.\n"+
 			"  what to do: use modelstore.DefaultDir and the Store methods.", line)
+	}
+}
+
+// sourceLines is every non-test line of Go in one of our directories, numbered.
+//
+// Read here rather than shelled out to grep, because the two source rules below
+// have to hold on the machine that runs the suite and a missing grep would make
+// them pass by not running.
+func sourceLines(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil || len(names) == 0 {
+		t.Fatalf("no Go files under %s: %v", dir, err)
+	}
+	out := map[string]string{}
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			out[fmt.Sprintf("%s:%d", filepath.ToSlash(name), i+1)] = line
+		}
+	}
+	return out
+}
+
+// TestTheDesignerCannotReachTheTerminal (rule 19).
+//
+// internal/designer is a full-screen interactive program with no terminal in it:
+// Update(Model, Input) is a fold over keystrokes and Render(Model, w, h) is a
+// function of the model and the window size. cmd/arxi owns raw mode, the escape
+// decoding, the real cursor and the write.
+//
+// The whole return on that split is the tests, and every one of them is a case a
+// driven terminal reaches badly or not at all: forty agents in a twenty-row
+// window, a two-hundred-word refusal that must not push the keys off the bottom
+// row, what `esc` means on the first screen as against the fourth, whether a
+// refusal survives the keystroke that fixed it, a name taken on disk between the
+// listing and the write. Let `os` in and the first of those needs a pty, and the
+// frame contract -- exactly h lines of at most w runes -- stops being checkable
+// at nine sizes in a loop.
+//
+// `time` is the one worth naming separately, because the request will be
+// reasonable: a blinking caret, a redraw timer, a spinner while the file is
+// written. Any of them makes Render a function of WHEN it was called, and the
+// frame is then no longer reproducible from the model the test built.
+func TestTheDesignerCannotReachTheTerminal(t *testing.T) {
+	banned := map[string]string{
+		"os":           "raw mode, stdin, the window size and the file all belong to cmd/arxi. An os here means the frame at 200x2 needs a terminal to assert, and it is asserted in a loop today",
+		"syscall":      "termios is the adapter's business. A designer that could set raw mode would have to be tested by driving one, which is the reason this package exists",
+		"os/exec":      "nothing here runs anything: the model returns a Write command and somebody else performs it",
+		"bufio":        "keystrokes arrive as Key values, decoded by the adapter. A reader here is a second escape parser, tested against no terminal",
+		"io":           "a frame is a []string handed back, not bytes written somewhere",
+		"time":         "a blinking caret or a redraw timer makes Render a function of when it was called, and the frame stops being reproducible from the model",
+		"net":          "the designer reads a listing it was handed and returns a team; neither is a request",
+		"net/http":     "the designer reads a listing it was handed and returns a team; neither is a request",
+		"math/rand":    "every screen must be a function of the keys pressed, or a refusal cannot be reproduced from the sequence that caused it",
+		"crypto/rand":  "every screen must be a function of the keys pressed, or a refusal cannot be reproduced from the sequence that caused it",
+		"database/sql": "the store owns the bytes; the designer owns the questions",
+	}
+	for _, imp := range list(t, mod+"internal/designer").Imports {
+		if why, bad := banned[imp]; bad {
+			t.Errorf("internal/designer imports %q.\n  why this is wrong: %s\n"+
+				"  what to do: it belongs in cmd/arxi beside the raw-mode setup. "+
+				"If the model needs the outside world to answer something, add a "+
+				"Command for the adapter to perform and an Input for it to feed "+
+				"the answer back through -- which is what Write and Written are.",
+				imp, why)
+		}
+	}
+}
+
+// TestTheDesignerDoesNotPerformTheWriteItDescribes (rule 20).
+//
+// Two obligations, and they fail together.
+//
+// The designer may depend on internal/agentstore -- Team, Validate, ValidateName,
+// ValidateStages and the listing are what it asks the same questions with -- and
+// on nothing else of ours. Not the executor, not the log: composing a team is
+// four questions and a file, and it must stay answerable with no run present.
+//
+// And it must not call CreateTeam. That is the one with teeth. The whole output
+// of Update is a Write command carrying the team, performed by cmd/arxi, which
+// feeds the answer back as Written. A designer that wrote the file itself would
+// turn every test of the last screen into a test that needs a directory, and the
+// two cases that matter there are exactly the ones a directory makes awkward: a
+// name that became taken between the listing and enter, and a write that failed
+// for any other reason and must land the operator back on review with the
+// refusal rather than on a receipt.
+func TestTheDesignerDoesNotPerformTheWriteItDescribes(t *testing.T) {
+	permitted := map[string]bool{
+		mod + "internal/agentstore": true,
+		mod + "internal/blueprint":  true, // inherited through agentstore
+		mod + "internal/kernel":     true, // inherited
+		mod + "internal/surface":    true, // inherited, and a declaration
+		mod + "internal/tool":       true, // inherited
+	}
+	for _, d := range list(t, mod+"internal/designer").Deps {
+		if !strings.HasPrefix(d, mod) || permitted[d] {
+			continue
+		}
+		t.Errorf("internal/designer depends on %s.\n"+
+			"  why this is wrong: the designer asks four questions and hands back "+
+			"a team. It must stay foldable with no log, no clock and no run, the "+
+			"way internal/blueprint stays callable by `blueprint validate`.\n"+
+			"  what to do: return a Command for cmd/arxi to perform, and an Input "+
+			"for it to feed the result back through.", d)
+	}
+
+	for where, line := range sourceLines(t, "designer") {
+		if !strings.Contains(line, "CreateTeam(") || strings.Contains(line, "//") {
+			continue // a comment naming the function is documentation
+		}
+		t.Errorf("internal/designer calls CreateTeam at %s:\n  %s\n"+
+			"  why this is wrong: Update returns a Write command, cmd/arxi "+
+			"performs it, and the outcome comes back as one Written input "+
+			"carrying a typed error -- which is what makes the last screen "+
+			"testable. A store call here is a directory in every test of it, and "+
+			"the cases worth having are a name taken between the listing and "+
+			"enter (ErrExists, so the operator lands on the name screen) and any "+
+			"other failure, which lands them back on review.\n"+
+			"  what to do: keep the write in the adapter and feed the outcome "+
+			"back as an Input.", where, strings.TrimSpace(line))
 	}
 }
