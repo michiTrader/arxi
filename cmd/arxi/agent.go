@@ -437,12 +437,20 @@ func grantSummary(granted []string, overrides map[string]surface.Policy) string 
 // with today's default is still a file on disk that will keep applying if the
 // default changes, and it is still the thing `--reset` removes.
 //
-// `not a known tool` marks a name the runtime has no implementation for.
-// `agent create` refuses those, but a hand-edited `tools: [reed]` reaches here,
-// and every other layer stays silent about it: blueprint.Load takes any string
-// list, and ResolveAll answers `allow` for an unknown grant rather than failing.
-// So the operator's typo looks like a granted tool everywhere except at the
-// moment an agent calls it. This screen is where that is cheap to learn.
+// `not a known tool` marks a name the runtime has no implementation for. It was
+// the only warning once, and it is belt and braces now. `agent create` refused
+// such a name, but a hand-edited `tools: [reed]` reached this screen with nothing
+// else objecting: blueprint.Load took any string list, and ResolveAll answered
+// `allow` for a name outside the mutating set, so the typo read as a granted tool
+// everywhere except at the call -- after the turn that made the call was billed.
+//
+// Both of those are closed. The loader refuses the grant against
+// kernel.KnownTools, so no display path can be handed a name that is not in it,
+// and Resolve denies an unknown name rather than allowing it. Kept anyway because
+// tool.Known is a derived view of that same list, and this annotation is the
+// visible symptom if the derivation is ever replaced by a copy that drifts: the
+// line reads `reed (deny, not a known tool)`, which states what happened, rather
+// than a listing that silently disagrees with the loader that let it through.
 func grantList(granted []string, overrides map[string]surface.Policy) string {
 	if len(granted) == 0 {
 		return "none"
