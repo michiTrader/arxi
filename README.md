@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**43 of 50 declared capabilities are wired — 86.0%.** That figure is measured,
+**46 of 50 declared capabilities are wired — 92.0%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -397,15 +397,18 @@ moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
 `event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37,
 `run steer` to 38, `event trace` to 39, `state set` to 40, `state get` to 41,
-`state lock` to 42 and `state unlock` to 43, and every time the number above was
+`state lock` to 42 and `state unlock` to 43, and `agent create`, `agent list`
+and `agent show` took it to 46 in one step — and every time the number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 7 that remain are `agent list` / `create`
-/ `show`, `role define`, `blueprint create` / `install`
-and `design`, which want an agent store, a designer or a generator
-rather than another way to read what a run already wrote. The implemented
-forty-three are
+It is deliberately unflattering — the 4 that remain are `role define`,
+`blueprint create` / `install` and `design`, which want a designer or a
+generator rather than another way to read what a run already wrote. The two
+`blueprint` verbs no longer want a place to put their output: `internal/agentstore`
+writes `agents/`, a one-member blueprint is a blueprint, and a larger one lands in
+the same directory with no migration. The implemented
+forty-six are
 `provider add`, `model list` /
-`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent tool policy`,
+`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent create` / `list` / `show`, `agent tool policy`,
 `blueprint validate`, `state set`, `state get`, `state lock`, `state unlock`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
@@ -438,7 +441,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-86.0% is the CLI surface, and quoting it alone would be misleading in **both**
+92.0% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -446,7 +449,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **43 / 50 — 86.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **46 / 50 — 92.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -476,16 +479,57 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 86.0% understates and 100% overstates. The `run` group is
-now **14 / 14**, the `event` group **3 / 3** and the `state` group **4 / 4**:
-every verb a person needs to inspect, redirect, coordinate or end a run in
-flight is wired, and none of the 7 that remain
-is one of them. The list here has been rewritten four times and each rewrite was
+That shape is also why 92.0% understates and 100% overstates. The `run` group is
+now **14 / 14**, the `event` group **3 / 3**, the `state` group **4 / 4** and the
+`agent` group **4 / 4**: every verb a person needs to inspect, redirect,
+coordinate or end a run in flight is wired, and so is naming the thing it runs,
+and none of the 4 that remain
+is one of them. The list here has been rewritten five times and each rewrite was
 the same admission — it named `replay`, then `attach`, then `steer` as the next
-thing worth building, and each one got built.
+thing worth building, and each one got built; this rewrite deletes the *store*
+the remainder was said to want, because it is now on disk.
 
-Releasing that lock is the one just finished, and it is the fourth and last verb
-of the `state` group. `arxi state unlock <run> <key>` hands a key back, and it
+Naming the actor is the increment just finished, and it is the whole `agent`
+group. `arxi agent create reviewer --model claude-sonnet-4-6 --tools read,grep`
+stores an agent, `agent list` and `agent show` read it back, and `run start
+reviewer` runs it without a path (docs/design/20-use-cases.md §20.1). What an
+agent *is* on disk is the decision worth recording: a **blueprint with one
+member**, rendered to `agents/<name>.yaml` and validated by loading it back
+through `blueprint.Load`. A record of its own was the first plan and the wrong
+one, because "an agent" and "a member of a blueprint" are the same noun — both
+carry a name, a role, a model, a tool grant and the advisory trait — and a second
+record type needs a second loader, a second validator and a second answer to
+every question the blueprint schema already answers. That the two would drift is
+not hypothetical: `model` was added to `kernel.MemberConfig` after the fact. So
+this store cannot write a file `arxi blueprint validate` would reject, `agent
+show` prints the resolved config `run start` executes rather than a parallel
+description of it, and `run start reviewer` and `run start ./reviewer.yaml` load
+the same bytes — the frozen snapshot and its SHA are identical either way.
+
+**The file it wrote could not run**, and every check passed it. `agent create`
+rendered a stageless blueprint and printed `run it:` underneath.
+`applyRunStarted` activates the members of the stage it enters and returns nil
+when the config declares none, so the run started, entered nothing, spawned no
+turn, and recorded `run.quiescent` — *nobody is working and nobody can start* —
+as its second event, after zero turns and zero dollars. `blueprint.Load` accepted
+the file, `arxi blueprint validate` accepted it, `agent show` printed it, and the
+store's own test asserted the absence of a `stages:` block **as a feature**. It
+took starting one by hand to see. The rendered file now declares
+`stages: [{name: work, advance_when: all}]` — `all` rather than the
+identical-for-one `any` because this file is meant to be grown, and the moment a
+second member is added by hand `any` advances on whichever finished first and
+ships half the work. The test that pinned the defect was replaced by one that
+drives `kernel.Decide` twice and looks for a `SpawnTurn` naming the member:
+through the reducer rather than by counting stages, because the stage is the
+mechanism and being asked to work is the property. `agent create --advisory` lost
+its `run it:` line to the same class of false promise, and that one cannot be
+fixed in the file — an advisory member starts inactive, so a run of that agent
+alone enters the stage, activates nobody and goes quiescent after zero turns. It
+now prints what the flag means and how to use the file instead of a command that
+would fail.
+
+Releasing that lock came just before, and it is the fourth and last verb of the
+`state` group. `arxi state unlock <run> <key>` hands a key back, and it
 closes a hole the previous increment opened rather than filling: the only
 `lock.released` this binary wrote was the steal of a **lapsed** lease, so a
 holder that finished its work early had no way to say so and the key stood until
