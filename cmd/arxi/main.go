@@ -5,12 +5,12 @@
 // run prompt, run steer, run result, run pause, run unpause, run cancel,
 // run fork, run replay, run attach, event emit, event log, event trace,
 // state set, state get, state lock, state unlock, serve, the trigger group, the
-// inbox group, the agent group, the eval group (--sim only), provider add and
-// the model group; for everything else it answers "declared but not implemented"
-// with the exact name of the capability. That is on purpose: the surface is
-// frozen and verified by tests BEFORE the executor exists, so adding a new
-// command is implementing something that was already promised, not inventing a
-// new promise.
+// inbox group, the agent group, role define, the eval group (--sim only),
+// provider add and the model group; for everything else it answers "declared but
+// not implemented" with the exact name of the capability. That is on purpose: the
+// surface is frozen and verified by tests BEFORE the executor exists, so adding a
+// new command is implementing something that was already promised, not inventing
+// a new promise.
 //
 // The measured figure, rather than this list, is the one to trust. See the
 // README, where a probe that walks the registry against the built binary
@@ -163,6 +163,9 @@ func main() {
 	case "agent":
 		cmdAgent(args[1:])
 		return
+	case "role":
+		cmdRole(args[1:])
+		return
 	case "state":
 		cmdState(args[1:])
 		return
@@ -304,6 +307,7 @@ IMPLEMENTED TODAY
   agent list                 the agents in agents/, with model and tools
   agent show <name>          what 'run start <name>' will actually execute
   agent tool policy          stop being asked about a tool every turn
+  role define <name>         defaults for 'agent create --role', copied once
   trigger list               schedules, and the loop that fires them
   eval run <suite>           suites, pass rates, and two runs side by side
   serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
