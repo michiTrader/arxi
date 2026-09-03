@@ -84,7 +84,7 @@ func cmdRoleDefine(args []string) {
 	r := rolestore.Record{
 		Name:     vals["name"],
 		Advisory: vals["advisory"] == "true",
-		Tools:    splitTools(vals["tools"]),
+		Tools:    splitCSV(vals["tools"]),
 	}
 	if err := r.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "arxi role define: %v\n", err)
