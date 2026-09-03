@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**48 of 50 declared capabilities are wired — 96.0%.** That figure is measured,
+**49 of 50 declared capabilities are wired — 98.0%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -399,20 +399,20 @@ moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run steer` to 38, `event trace` to 39, `state set` to 40, `state get` to 41,
 `state lock` to 42 and `state unlock` to 43, `agent create`, `agent list`
 and `agent show` took it to 46 in one step, `role define` to 47, and
-`blueprint create` to 48 — and every
+`blueprint create` to 48 and `blueprint install` to 49 — and every
 time the number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 2 that remain are
-`blueprint install` and `design`, which want a registry to install from or a
-generator rather than another way to read what a run already wrote. Neither
-wants a place to put its output any more: `internal/agentstore` writes `agents/`,
+It is deliberately unflattering — the 1 that remains is
+`design`, which wants a generator rather than another way to read what a run
+already wrote. It does not want a place to put its output either:
+`internal/agentstore` writes `agents/`,
 a one-member blueprint is a blueprint, and `blueprint create` composes the
 agents already there into a larger one in the same directory, with no migration
 and no conversion. The implemented
-forty-eight are
+forty-nine are
 `provider add`, `model list` /
 `enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent create` / `list` / `show`, `agent tool policy`, `role define`,
-`blueprint validate`, `blueprint create`, `state set`, `state get`, `state lock`, `state unlock`, `event emit`, `event log`, `event trace`, `trigger create` /
+`blueprint validate`, `blueprint create`, `blueprint install`, `state set`, `state get`, `state lock`, `state unlock`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
 
@@ -444,7 +444,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-96.0% is the CLI surface, and quoting it alone would be misleading in **both**
+98.0% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -452,7 +452,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **48 / 50 — 96.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **49 / 50 — 98.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -482,26 +482,57 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 96.0% understates and 100% overstates. The `run` group is
+That shape is also why 98.0% understates and 100% overstates. The `run` group is
 now **14 / 14**, the `event` group **3 / 3**, the `state` group **4 / 4**, the
 `agent` group **4 / 4**, the `role` group **1 / 1** and the `blueprint` group
-**2 / 3**: every verb a person needs
+**3 / 3**: every verb a person needs
 to inspect, redirect, coordinate or end a run in flight is wired, and so is
-naming the thing it runs, the defaults it is named with, and composing several of
+naming the thing it runs, the defaults it is named with, composing several of
 those names into one team,
-and neither of the 2 that remain
-is one of them. The list here has been rewritten seven times and each rewrite was
+and taking somebody else's team as it was published.
+The 1 that remains
+is none of them. The list here has been rewritten eight times and each rewrite was
 the same admission — it named `replay`, then `attach`, then `steer` as the next
 thing worth building, and each one got built; a previous rewrite deleted the
 *store* the remainder was said to want, the one after it deleted the last verb
-that wanted it, and this one deletes the claim that the `blueprint` generators
-write a file this tree only ever reads. `blueprint create` writes one. What is
-left is not a variation on anything here: `design` holds a screen and a cursor,
-and `blueprint install` needs somewhere to install *from*, which is a registry
-and not a verb.
+that wanted it, and the one after that deleted the claim that the `blueprint`
+generators write a file this tree only ever reads. This one deletes the sentence
+that said `blueprint install` needed a registry before it could exist. It did
+not: a path and an https URL are somewhere to install *from*, the registry is
+how you would **find** a blueprint rather than how you fetch one, and the verb
+that fetches it is finished without it. What is left is not a variation on
+anything here: `design` holds a screen and a cursor.
 
-Composing those names is the increment just finished, and it is the second of the
-three `blueprint` verbs. `arxi blueprint create platform --members
+Taking somebody else's team as it was published is the increment just finished,
+and it completes the three `blueprint` verbs. `arxi blueprint install
+https://example.com/code-review.yaml` writes `agents/code-review.yaml`, and the
+whole design is in one word: **verbatim**. Re-rendering the file through the
+composer would produce something with the same members and the same stage names
+and no watchers, no stage timeouts, no advance rules — exactly the declarations
+that are the reason to install a published blueprint instead of composing your
+own — so what lands on disk is the bytes that were fetched, plus a provenance
+header of YAML comments recording the source, the sha256 of what was fetched, and
+the fact that the digest describes the fetched bytes rather than the file the
+header sits in. Comments, so the loader strips them, the reducer never sees them,
+and the file stays one a person can edit; a store test pins that a comment block
+above `name:` parses, so the header cannot quietly become something `run start`
+refuses.
+
+A ref is a path or an https URL and nothing else. `--as` renames on install,
+because the name a stranger chose can already be taken here and that is the only
+way to have both — and the `name:` line inside the file is *not* rewritten, since
+the digest was computed over the fetched bytes. The rest of the verb is refusals,
+and the interesting one is `http`: a blueprint decides which tools an agent may
+call and what a run may spend, so over plaintext anybody on the path chooses that,
+and the failure mode is not a corrupt download but a working blueprint with `bash`
+added. It is accepted for loopback only, where there is no path to be on — which
+is also what makes the fetch path testable against `httptest` without a
+certificate in the tree. Every redirect hop is re-checked, because a rule applied
+only to the URL you typed is not a rule. A bare word gets told there is no
+registry yet rather than a file-not-found about a path nobody typed.
+
+Composing those names came before that, and it is the second of the three
+`blueprint` verbs. `arxi blueprint create platform --members
 backend,frontend,security --stages build,review` writes `agents/platform.yaml`:
 the same kind of file in the same directory, so `agent list` shows it and `run
 start platform` runs it with no new noun and no migration
@@ -849,15 +880,18 @@ screen and a cursor and answers keystrokes, where every command here reads argv,
 writes lines and exits — `serve` is its nearest neighbour and is not close, since
 an NDJSON loop over stdio has a request and a reply and nothing to redraw.
 
-Five of those seven fell in three increments, and the prediction was right about
+Six of those seven fell in four increments, and the prediction was right about
 *why* rather than about the pace: the store was the whole cost, and once
 `internal/agentstore` and `internal/rolestore` existed, four verbs were readers
-and writers of a directory — and the fifth, `blueprint create`, turned out to
-want no generation at all. It composes agents the store already holds, so the
+and writers of a directory — and the last two turned out to want no generation at
+all. `blueprint create` composes agents the store already holds, so the
 "generation rather than validation" it was said to need was really a second
-writer for the same directory. `design` and `blueprint install` are the part of
-that sentence that still stands, and they are the part that named something other
-than a missing store: a screen and a cursor, and somewhere to install *from*.
+writer for the same directory; `blueprint install` wanted the *opposite* of
+generation, because re-rendering a published file is exactly what would drop the
+watchers and timeouts that are the reason to install it, and its cost was in the
+refusals around the fetch rather than in producing anything. `design` is the only
+part of that sentence still standing, and it is the part that named something
+other than a missing store: a screen and a cursor.
 
 `run attach` was built two verbs earlier, and it is the only verb here that reads
 a log while somebody else is writing to it. It joins at the head — the events that
