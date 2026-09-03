@@ -306,6 +306,90 @@ conflating those two states is what made the first implementation never detect
 quiescence at all (§10.4). Here that distinction is what tells you the run is
 correctly waiting on `backend` rather than stalled.
 
+### The default that IS asked for
+
+`team.yaml` above writes `role: implementer` twice, and beside it almost the same
+tool grant twice. `arxi role define` is where that pair stops being retyped:
+
+```
+$ arxi role define implementer --tools read,write,bash
+role implementer defined (tools: bash (ask), read (allow), write (ask))
+  file:   roles/implementer.json
+  note:   copied into an agent as it is created, so redefining this role
+          later changes nothing that already named it. that is deliberate:
+          a run is judged by the rules frozen when it started.
+  use it: arxi agent create <name> --role implementer --model <id>
+
+$ arxi agent create backend --model claude-sonnet-4-6 --role implementer
+agent backend created (tools: bash (ask), read (allow), write (ask))
+  file:   agents/backend.yaml
+  role:   implementer supplied the tool grant (roles/implementer.json).
+          copied as this agent was written, so redefining the role later
+          will not change this one.
+  run it: arxi run start backend "<objective>" --budget 5.00
+```
+
+**A role is read by exactly one thing: `arxi agent create --role`.** The `role:`
+line in `team.yaml` is not affected by any of this, and that is deliberate rather
+than unfinished — see the note on copying below. A role holds two fields, the tool
+grant and `advisory`, because those are the two that are a house style rather than
+a property of the individual. The model is not one of them: `--model` is the field
+most likely to differ between two agents that do the same job, and putting it in a
+role would make `--role` the wrong place to change it.
+
+Three properties are worth stating, because each is a thing a reader will
+otherwise assume the other way round.
+
+**An explicit flag wins, and the command says which fields the role actually
+supplied.** A role that was named but had nothing left to contribute is reported,
+not passed over in silence — otherwise it is indistinguishable from a role that
+was ignored:
+
+```
+$ arxi agent create frontend --model claude-sonnet-4-6 --role implementer --tools read,write
+agent frontend created (tools: read (allow), write (ask))
+  file:   agents/frontend.yaml
+  role:   implementer is defined and supplied nothing: the command line already
+          named every field it sets, and an explicit flag wins.
+  run it: arxi run start frontend "<objective>" --budget 5.00
+```
+
+**The defaults are copied into `agents/<name>.yaml` as it is written, and never
+read again.** Redefining `implementer` tomorrow changes nothing that already named
+it; deleting `roles/` entirely leaves every stored agent runnable. This follows
+from ADR-0001: `run start` freezes the blueprint into
+`runs/<id>/blueprint.snapshot.yaml`, so a role resolved at run time would put part
+of a run's rules outside the snapshot, and a redefinition could silently change an
+agent that had already been reviewed and approved. The copy is what makes
+redefining safe.
+
+**A role nobody defined is a note, not a refusal.** `role:` is a free-form label
+that the reducer reads — it picks the steer target by `role == coordinator` and
+builds each member's identity from it — and the blueprints in this tree name roles
+nothing defines. Refusing an unknown one would break files that are already
+correct, so the name is stored and the roles that do exist are printed beside it:
+
+```
+$ arxi agent create qa --model claude-sonnet-4-6 --role reviewr --tools read
+agent qa created (tools: read (allow))
+  file:   agents/qa.yaml
+  role:   reviewr is not defined, so no defaults were applied. that is not
+          an error: `role:` is a free-form label, and the blueprints in this
+          tree name roles nobody defined. it is how a misspelling shows up.
+          defined: implementer, reviewer
+  run it: arxi run start qa "<objective>" --budget 5.00
+```
+
+That list is the whole value of registering a name that carries no defaults:
+`--role reviewr` goes from an accepted string to a visible typo. A role file that
+exists and cannot be used — unparseable JSON, or a grant naming a tool that does
+not exist — is the opposite case and refuses with exit 1, leaving no agent behind,
+because there the user asked for defaults that cannot be applied.
+
+`roles/<name>.json` is also the only way to read a role back: the surface declares
+no `role list` and no `role show`. It is written 0644, where `providers/` is 0600 —
+a role is a default a team commits and reviews, not a credential.
+
 ---
 
 ## 20.5 UC-5 — Steering a run without restarting it
