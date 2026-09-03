@@ -61,9 +61,10 @@ var Known = map[string]bool{
 
 // Resolve returns the effective policy for one tool on one agent.
 //
-// The three rules the design commits to, in the order they apply:
+// The four rules the design commits to, in the order they apply:
 //
 //	a tool not granted to the agent  -> deny
+//	a granted name that is not Known -> deny
 //	a granted tool that mutates      -> ask
 //	a granted tool that reads        -> allow
 //
@@ -73,13 +74,29 @@ var Known = map[string]bool{
 // never allow by default for the same reason: if an agent can change the world
 // without asking, that has to be a written decision.
 //
-// Overrides are consulted first and can say allow for a mutating tool, because
-// `arxi agent tool policy --agent backend --allow bash` is a real command in the
-// surface and the person typing it is making exactly that written decision. An
-// override cannot grant a tool the agent was never given, though -- that would
-// make the grant list decorative.
+// The Known check is why the second rule exists, and it is not defensive
+// tidiness. Mutating is a closed list, so anything absent from it read as a
+// reader and fell through to allow: `tools: [bahs]` resolved to ALLOW while
+// `bash` resolved to ASK. A one-character typo did not disable the tool, it
+// disabled the approval gate on the tool -- and it did so invisibly, because
+// `arxi agent show` printed a policy for the misspelled name as if it were real.
+// Resolving to deny instead means the worst a typo can do is refuse work.
+//
+// It sits before the override consult, not after, because an overrides file is
+// hand-edited and `--allow bahs` must not be able to resurrect a name that has
+// no implementation behind it. Overrides pick between the policies that apply to
+// a real tool; they are not a second grant list.
+//
+// Overrides are otherwise consulted first and can say allow for a mutating tool,
+// because `arxi agent tool policy --agent backend --allow bash` is a real
+// command in the surface and the person typing it is making exactly that written
+// decision. An override cannot grant a tool the agent was never given, though --
+// that would make the grant list decorative.
 func Resolve(granted []string, overrides map[string]surface.Policy, name string) surface.Policy {
 	if !hasTool(granted, name) {
+		return surface.PolicyDeny
+	}
+	if !Known[name] {
 		return surface.PolicyDeny
 	}
 	if p, ok := overrides[name]; ok {
