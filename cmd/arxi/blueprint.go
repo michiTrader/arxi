@@ -14,12 +14,16 @@ import (
 )
 
 const blueprintUsage = "usage: arxi blueprint create <name> --members a,b,c [--stages s1,s2]\n" +
+	"       arxi blueprint install <path|https URL> [--as <name>]\n" +
 	"       arxi blueprint validate <file.yaml>\n" +
 	"  create composes agents already in " + agentstore.DefaultDir + "/ into one file of the\n" +
 	"  same kind, in the same directory: `arxi agent list` shows it and\n" +
 	"  `arxi run start <name>` runs it. members are COPIED, not referenced, so\n" +
 	"  editing an agent afterwards does not change a team already composed.\n" +
-	"  without --stages there is one stage named work, and every member is in it.\n"
+	"  without --stages there is one stage named work, and every member is in it.\n" +
+	"  install puts somebody else's blueprint in the same directory, byte for byte,\n" +
+	"  under its own `name:` unless --as says otherwise. read it before you run it:\n" +
+	"  it is a file that names tools and a budget is what runs it.\n"
 
 // cmdBlueprintCreate implements `arxi blueprint create <name> --members a,b,c`.
 //
@@ -252,7 +256,7 @@ func printTeamCreated(t agentstore.Team, path string, from map[string]string) {
 			"has submitted)\n", strings.Join(stages, " -> "))
 	}
 
-	printTeamCaveats(t, stages)
+	printTeamCaveats(t.Name, t.Members, stages)
 	fmt.Print("  edit it: it is an ordinary blueprint -- add a watcher, a timeout, or\n" +
 		"           advance_when: quorum:2, then arxi blueprint validate " + path + "\n")
 }
@@ -261,7 +265,20 @@ func printTeamCreated(t agentstore.Team, path string, from map[string]string) {
 //
 // Two of them, and both are the same kind of failure: a run that starts, reports
 // nothing wrong, and does not do the work.
-func printTeamCaveats(t agentstore.Team, stages []string) {
+//
+// It takes a name, members and stages rather than an agentstore.Team because
+// `blueprint install` reports on a file it did not compose: what it holds is a
+// kernel.Config off the loader, and there is no Team behind it -- a Team cannot
+// carry the watchers and timeouts an installed blueprint is likely to have. The
+// caveats are properties of the members and the stage list, so nothing here needed
+// the Team; taking one meant install would have had to fabricate one, or copy these
+// three warnings. Copying them is the failure mode worth avoiding: they are the
+// money warnings, and the installed file is the one nobody in this process wrote.
+//
+// stages must be non-empty. Both callers guarantee it and neither can do so by
+// construction -- ResolveDefaults synthesises no stage, so an installed blueprint
+// can genuinely have none, and install says so itself before calling this.
+func printTeamCaveats(name string, members []kernel.MemberConfig, stages []string) {
 	// A team of only advisory members is the expensive one, and it is the reason
 	// this caveat exists at all. applyStageEntered skips advisory members
 	// (internal/kernel/decide.go: `if m.Advisory || !participates(...)`), so the
@@ -269,7 +286,7 @@ func printTeamCaveats(t agentstore.Team, stages []string) {
 	// zero turns -- the same dead end `agent create --advisory` prints, arrived at
 	// with three names on the command line instead of one flag.
 	var workers, advisory []string
-	for _, m := range t.Members {
+	for _, m := range members {
 		if m.Advisory {
 			advisory = append(advisory, m.Name)
 			continue
@@ -280,7 +297,7 @@ func printTeamCaveats(t agentstore.Team, stages []string) {
 		fmt.Printf("  caveat: every member is advisory, so `arxi run start %s` enters "+
 			"%s,\n          activates nobody, and goes quiescent after zero turns.\n"+
 			"          add a member that works, or edit `advisory: true` out of one.\n",
-			t.Name, stages[0])
+			name, stages[0])
 		return
 	}
 	if len(advisory) > 0 {
@@ -299,7 +316,7 @@ func printTeamCaveats(t agentstore.Team, stages []string) {
 	// line covers all of them, so naming the ones that need it is the difference
 	// between a fix and a guess.
 	var modelless []string
-	for _, m := range t.Members {
+	for _, m := range members {
 		if m.Model == "" {
 			modelless = append(modelless, m.Name)
 		}
@@ -310,7 +327,7 @@ func printTeamCaveats(t agentstore.Team, stages []string) {
 			"file to stop repeating it.\n", strings.Join(modelless, ", "))
 	}
 
-	next := fmt.Sprintf("arxi run start %s \"<objective>\" --budget 5.00", t.Name)
+	next := fmt.Sprintf("arxi run start %s \"<objective>\" --budget 5.00", name)
 	if len(modelless) > 0 {
 		next += " --model <id>"
 	}
