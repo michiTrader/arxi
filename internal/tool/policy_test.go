@@ -318,3 +318,44 @@ func TestKnownIsASetAndMutatingIsTheAnswerAboutMutation(t *testing.T) {
 			len(Mutating), len(Known))
 	}
 }
+
+// TestKnownIsTheKernelsListAndNotACopyOfIt.
+//
+// Known is built from kernel.KnownTools because the blueprint loader needs the
+// same closed list and cannot import this package -- internal/arch_test.go holds
+// the loader to kernel-only dependencies, and this package pulls in
+// internal/surface. So the kernel is the single declaration and this is a view of
+// it.
+//
+// What this catches is the repair that looks harmless: someone restores the
+// literal map here, everything compiles, every other test in this file passes,
+// and the two lists are now free to drift. They drift in one direction that
+// matters -- a tool the kernel knows and this package does not is a grant the
+// loader accepts and Resolve denies, so the blueprint is valid and the agent
+// silently cannot use what it was granted.
+func TestKnownIsTheKernelsListAndNotACopyOfIt(t *testing.T) {
+	if len(Known) != len(kernel.KnownTools) {
+		t.Errorf("Known has %d entries, kernel.KnownTools has %d\n"+
+			"  consequence: the two lists have drifted, which means a grant is "+
+			"accepted by one layer and refused by the other with no message tying "+
+			"them together.\n"+
+			"  remedy: Known must stay derived from kernel.KnownTools.",
+			len(Known), len(kernel.KnownTools))
+	}
+	for _, name := range kernel.KnownTools {
+		if !Known[name] {
+			t.Errorf("kernel.KnownTools lists %q and Known does not\n"+
+				"  consequence: `blueprint validate` accepts the grant and Resolve "+
+				"denies it, so the member holds a tool it can never call and nothing "+
+				"reports the contradiction.", name)
+		}
+	}
+	for name := range Known {
+		if !kernel.ToolIsKnown(name) {
+			t.Errorf("Known lists %q and kernel.KnownTools does not\n"+
+				"  consequence: the loader refuses a grant this package would allow, "+
+				"so the tool is unreachable from a blueprint -- which is the only way "+
+				"a run gets one.", name)
+		}
+	}
+}

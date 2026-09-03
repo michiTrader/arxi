@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -46,17 +47,26 @@ var Mutating = map[string]bool{
 // so, rather than silently granting a tool that will fail at the moment it is
 // first needed, which is halfway through a paid run.
 //
-// The value carries no meaning: it is a set, and every entry is true. An
-// earlier version of this comment said the value recorded "whether each
-// mutates", which is what Mutating above is for. A reader who trusted it would
-// have concluded that read and grep mutate, and looked for an approval gate on
-// a search. Membership is the only question this map answers.
-var Known = map[string]bool{
-	"read":  true,
-	"grep":  true,
-	"write": true,
-	"edit":  true,
-	"bash":  true,
+// The entries come from kernel.KnownTools rather than being written again here.
+// They were written twice for exactly as long as it took the blueprint loader to
+// need the same answer, and a second copy of a closed list is only ever one
+// commit away from being a different closed list -- with the difference showing
+// up as a grant the loader accepts and this package resolves as if it named
+// nothing.
+//
+// The shape is still a set, because that is what callers ask it: membership. An
+// earlier version of this comment said the value recorded "whether each mutates",
+// which is what Mutating above is for. A reader who trusted it would have
+// concluded that read and grep mutate, and looked for an approval gate on a
+// search. Membership is the only question this map answers.
+var Known = knownSet()
+
+func knownSet() map[string]bool {
+	m := make(map[string]bool, len(kernel.KnownTools))
+	for _, t := range kernel.KnownTools {
+		m[t] = true
+	}
+	return m
 }
 
 // Resolve returns the effective policy for one tool on one agent.

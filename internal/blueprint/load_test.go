@@ -3,6 +3,8 @@ package blueprint
 import (
 	"strings"
 	"testing"
+
+	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 const designDocBlueprint = `name: feature-team
@@ -125,6 +127,86 @@ func TestUnknownKeysAreRejectedWithASuggestion(t *testing.T) {
 					"file whose typo they already cannot see", err, tc.wantIntent)
 			}
 		})
+	}
+}
+
+// TestAGrantOfAToolThatDoesNotExistIsRejected closes the one way an unknown tool
+// name used to reach a run.
+//
+// Every other writer of a grant validated already -- agentstore, rolestore,
+// toolstore.Set, `agent create`, `role define` -- and a file did not, so this was
+// the gap: `tools: [bahs]` passed `blueprint validate`, got frozen into
+// blueprint.snapshot.yaml looking reviewed, resolved to ALLOW rather than to
+// nothing (it is absent from the mutating set, so it read as a reader), and then
+// stopped the run on ErrUnknownTool at the first call -- after the turn that
+// produced that call was billed.
+//
+// Refusing here costs nothing, which is the whole argument: nothing has been
+// spent at validate time.
+func TestAGrantOfAToolThatDoesNotExistIsRejected(t *testing.T) {
+	_, err := Load([]byte("name: t\nmembers:\n  - {name: a, tools: [read, telepathy]}\n"))
+	if err == nil {
+		t.Fatal("tools: [read, telepathy] was accepted\n" +
+			"  consequence: the grant resolves to allow because it is not in the " +
+			"mutating set, `agent show` prints a policy for a tool with no body, and " +
+			"the run dies at the first call to it with the turn already paid for.")
+	}
+	if !strings.Contains(err.Error(), "telepathy") {
+		t.Fatalf("error was %q; it must name the offending tool, or the user diffs "+
+			"the grant list against the known tools by hand", err)
+	}
+	if !strings.Contains(err.Error(), "members[0]") {
+		t.Fatalf("error was %q; it must locate the member, because a team of six "+
+			"otherwise turns one typo into six candidates", err)
+	}
+}
+
+// TestAToolTypoSuggestsTheToolThatWasMeant. Naming the bad value is the floor;
+// this is the difference between a refusal and a fix. `bahs` and `bash` differ by
+// a transposition the eye reads straight over, which is exactly why the file was
+// saved that way in the first place.
+func TestAToolTypoSuggestsTheToolThatWasMeant(t *testing.T) {
+	for typo, want := range map[string]string{"bahs": "bash", "reed": "read", "wirte": "write"} {
+		_, err := Load([]byte("name: t\nmembers:\n  - {name: a, tools: [" + typo + "]}\n"))
+		if err == nil {
+			t.Fatalf("tools: [%s] was accepted", typo)
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("tools: [%s] gave %q; it must suggest %q, otherwise the user "+
+				"re-reads a grant list whose typo they already could not see",
+				typo, err, want)
+		}
+	}
+}
+
+// TestEveryKnownToolIsAcceptedInAGrant is the other half, and it is not padding:
+// a validator that rejects a real tool name is worse than the hole it replaced,
+// because the file it refuses is correct and the user has nothing to fix. It
+// reads the list from the kernel so adding a tool cannot leave this behind.
+func TestEveryKnownToolIsAcceptedInAGrant(t *testing.T) {
+	for _, name := range kernel.KnownTools {
+		raw := "name: t\nmembers:\n  - {name: a, tools: [" + name + "]}\n"
+		bp, err := Load([]byte(raw))
+		if err != nil {
+			t.Errorf("tools: [%s] was refused: %v\n"+
+				"  consequence: a grant the binary implements does not load, so the "+
+				"remedy the message asks for is impossible.", name, err)
+			continue
+		}
+		if got := bp.Config.Members[0].Tools; len(got) != 1 || got[0] != name {
+			t.Errorf("tools: [%s] loaded as %v, want exactly [%s]", name, got, name)
+		}
+	}
+}
+
+// TestADuplicateGrantIsNotAnError. `[read, read]` is redundant, not wrong, and
+// ResolveAll already collapses it. Refusing it would reject a file that behaves
+// correctly, and the validator's job is to catch what cannot work.
+func TestADuplicateGrantIsNotAnError(t *testing.T) {
+	if _, err := Load([]byte("name: t\nmembers:\n  - {name: a, tools: [read, read]}\n")); err != nil {
+		t.Errorf("tools: [read, read] was refused: %v\n"+
+			"  consequence: a redundant grant is treated as a broken one, and the "+
+			"user is asked to fix a file that already does what they meant.", err)
 	}
 }
 

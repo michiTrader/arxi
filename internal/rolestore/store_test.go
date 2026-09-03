@@ -234,16 +234,18 @@ func TestAnUnknownToolNeverBecomesARole(t *testing.T) {
 	}
 }
 
-// TestAToolAddedByHandIsRefusedAtTheReadAndNamesTheFile pins the asymmetry with
-// agentstore, which deliberately does NOT re-check tool names when it loads.
+// TestAToolAddedByHandIsRefusedAtTheReadAndNamesTheFile asserts the PATH is in
+// the message, not merely that the read failed.
 //
-// The two are right for opposite reasons. A hand-added tool in an agent file is
-// run by `run start`, so a reader that refused it would be stricter than the thing
-// that executes it. A hand-added tool in a role file is never run: it is copied
-// into an agent, and agentstore then refuses `agent create` with "unknown tool(s):
-// reed" -- blaming a --tools flag the user never typed, for a name that came from
-// a file the message does not mention. So the path must appear in the refusal, and
-// that is what is asserted here rather than merely that it failed.
+// Both stores refuse an unknown tool on load now, so this is no longer the
+// asymmetric case it was written as -- an earlier version of this comment said
+// agentstore deliberately does not re-check tool names, which stopped being true
+// when blueprint.Load started validating grants. What survives that change is the
+// reason the path matters here specifically. A role is never run: it is copied
+// into an agent, and the refusal that follows blames `agent create --tools reed`
+// -- a flag the user never typed, carrying a name that came from a file the
+// message does not mention. Failing without the path would leave that hunt
+// exactly as long as it was before this check existed.
 func TestAToolAddedByHandIsRefusedAtTheReadAndNamesTheFile(t *testing.T) {
 	s := open(t)
 	if _, err := s.Create(Record{Name: "auditor", Tools: []string{"read"}}); err != nil {
