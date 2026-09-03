@@ -99,9 +99,21 @@ func Explain(s State, c Config) Why {
 	}
 
 	for _, m := range s.Members {
-		if m.Busy() {
-			add(1, "%s is in fact working (%s) since seq %d", m.Name, m.State, m.SinceSeq)
+		if !m.Busy() {
+			continue
 		}
+		// An idle member that is busy is the commission window: the reducer decided
+		// its turn and the runner has not begun it yet (see Member.TurnOpen). It is
+		// busy for every decision this package makes, and it must be, or quiescence
+		// fires in the middle of a healthy run. But "working (idle)" reads as a
+		// contradiction to the person trying to find out why nothing is moving,
+		// which is the only audience this command has, so the two are worded apart.
+		if m.State == MemberIdle {
+			add(1, "%s has a turn opening that has not started yet (idle since seq %d)",
+				m.Name, m.SinceSeq)
+			continue
+		}
+		add(1, "%s is in fact working (%s) since seq %d", m.Name, m.State, m.SinceSeq)
 	}
 
 	// Questions waiting on a human, which is a cause in its own right.

@@ -322,9 +322,23 @@ var Registry = []Cmd{
 	{Path: []string{"blueprint", "validate"}, Desc: "validate a blueprint without executing it",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
 		Params: []Param{pos(p("path", "string", "blueprint file"))}},
+	// `members` and `stages` were ADDED when this verb was wired, the same way the
+	// `run` positional was added to the four `state` verbs below. The entry was
+	// written when a blueprint was only ever a file a human typed, so `name` was
+	// the whole of it; composing one from agents already in the store is what gave
+	// the command something to be told.
+	//
+	// `members` is required, and `parseInvocation` enforces requiredness from this
+	// declaration, so the refusal names the flag and quotes this description
+	// without cmd/arxi holding a list of its own. A blueprint with no members is
+	// accepted by internal/blueprint on purpose -- a run with no members is caught
+	// when the run starts -- which would make `blueprint create t` write a file
+	// that validates and can never take a turn. Required here, not there.
 	{Path: []string{"blueprint", "create"}, Desc: "create a blueprint",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "name"))}},
+		Params: []Param{pos(p("name", "string", "name")),
+			req(p("members", "string", "agents to compose, comma-separated")),
+			p("stages", "string", "stage names in order, comma-separated (default: one stage, work)")}},
 	{Path: []string{"blueprint", "install"}, Desc: "install a published blueprint",
 		Kind: CLIOnly, Mutates: true, Since: 1,
 		Params: []Param{pos(p("ref", "string", "blueprint reference"))}},

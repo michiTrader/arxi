@@ -73,6 +73,22 @@ func promptableRun(t *testing.T, dir string) string {
 // the only one whose remedy is `run prompt` -- but it is reached by a log that
 // stopped mid-flight, not by a run that ran to a standstill in one process.
 //
+// BOTH members are given a turn and both turns are closed, and that is the whole
+// shape of the fixture rather than a detail of it. Entering a stage COMMISSIONS a
+// turn for every non-advisory member (spawnFor sets Member.TurnOpen), and Busy()
+// is true for as long as that flag is set -- so a log in which frontend never
+// appears describes a member who is permanently mid-turn, and a run with a busy
+// member is not quiescent. `run why` says so: "frontend has a turn opening that
+// has not started yet". frontend finishes its turn WITHOUT submitting, which is
+// the ordinary way this state is reached -- it had nothing to submit yet -- and
+// leaves the stage's `all` rule unmet with nobody left working on it.
+//
+// Every line carries `actor`, because that is the only field the reducer reads:
+// applyActivated, applyTurnDone and applyStageSubmitted all resolve their member
+// with out.Member(e.Actor) and return silently when it is empty. A payload-only
+// `{"agent":"backend"}` folds to nothing at all, so a fixture written that way
+// describes a state it does not produce.
+//
 // simulated:true is on run.started deliberately. Without it the drive builds a
 // LIVE executor, which on a machine with no configured model spawns the turn
 // and produces nothing -- so the test would report "the prompt opened no turn"
@@ -97,11 +113,17 @@ func quiescentRun(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 
+	// backend's submit lands BEFORE its turn_done because that is the only order a
+	// real run produces: an agent submits by calling a tool while its turn is open.
+	// applyTurnDone's Submitted exception depends on that order, so a fixture with
+	// the two swapped would exercise a path the runtime never takes.
 	log := `{"id":"e1","seq":1,"ts":"2026-01-01T00:00:00Z","type":"run.started","source":"human","payload":{"actor":"feature-team","run_id":"q1","budget_usd":10,"simulated":true}}
 {"id":"e2","seq":2,"ts":"2026-01-01T00:00:01Z","type":"stage.entered","source":"system","payload":{"stage":"build","index":0}}
-{"id":"e3","seq":3,"ts":"2026-01-01T00:00:02Z","type":"agent.activated","source":"system","payload":{"agent":"backend"}}
-{"id":"e4","seq":4,"ts":"2026-01-01T00:00:03Z","type":"agent.turn_done","source":"system","payload":{"agent":"backend"}}
-{"id":"e5","seq":5,"ts":"2026-01-01T00:00:04Z","type":"stage.submitted","source":"agent","payload":{"agent":"backend","stage":"build"}}
+{"id":"e3","seq":3,"ts":"2026-01-01T00:00:02Z","type":"agent.activated","source":"system","actor":"backend","payload":{"agent":"backend"}}
+{"id":"e4","seq":4,"ts":"2026-01-01T00:00:03Z","type":"agent.activated","source":"system","actor":"frontend","payload":{"agent":"frontend"}}
+{"id":"e5","seq":5,"ts":"2026-01-01T00:00:04Z","type":"stage.submitted","source":"agent","actor":"backend","payload":{"agent":"backend","stage":"build"}}
+{"id":"e6","seq":6,"ts":"2026-01-01T00:00:05Z","type":"agent.turn_done","source":"system","actor":"backend","payload":{"agent":"backend"}}
+{"id":"e7","seq":7,"ts":"2026-01-01T00:00:06Z","type":"agent.turn_done","source":"system","actor":"frontend","payload":{"agent":"frontend"}}
 `
 	if err := os.WriteFile(filepath.Join(run, "events.ndjson"),
 		[]byte(log), 0o644); err != nil {

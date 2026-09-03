@@ -50,6 +50,33 @@ was going to continue — destroys trust in the signal, and a signal you do not
 trust is worse than no signal, because it gets ignored exactly when it is true.
 `QuiescentEmitted` additionally guarantees it is emitted only once.
 
+### `anyBusy` covers turns that were commissioned and have not started
+
+The `pending` list above is the effects of the fold **currently** being performed,
+and that is not the same as the effects in flight. The loop folds one event,
+advances the cursor, and then runs *all* of that fold's effects before any of their
+events is folded back in — so a `SpawnTurn` decided one event ago is invisible to
+the next event's `pending`.
+
+That window produced the exact false positive this bias exists to prevent. On a
+two-member stage, member #2's turn had been decided and had produced nothing yet
+when member #1's `agent.turn_done` was folded: #2 was not `anyBusy` (still idle, no
+`agent.activated` yet) and not `anyRunnable` (its cause had already been spent
+commissioning the turn), so `checkQuiescence` fired. A two-member team reported
+`failed` on every `--sim` run.
+
+The fix is a marker on the member rather than a wider look at the effect queue:
+`spawnFor` sets `Member.TurnOpen` at commission time and `agent.turn_done` is the
+only event that clears it, so `Busy()` spans the whole interval from decision to
+completion, including the part where the turn exists only as an effect nobody has
+run yet. The same class of window, one batch wide instead of one fold, is why
+`StageResolved` is checked here too.
+
+Making the member busy for that interval is also what obliges the executor to
+write `agent.failed` when a commissioned turn cannot be delivered — otherwise the
+marker is never cleared and quiescence can never fire again, which trades a false
+positive for a permanent false negative. See `docs/design/10-execution.md`.
+
 ### The diagnosis always names the advance rule
 
 This came out of a test that failed and was right. The first version said
@@ -97,3 +124,15 @@ the cause is the entire value.
 requires the diagnosis to contain the advance rule and the word `unsatisfiable`.
 Other tests verify it is not emitted while there is a pending effect, an armed
 timer or an unanswered inbox.
+
+The commission window has its own test, and it is in `internal/exec` rather than
+in the reducer because the reducer alone cannot reach the window:
+`TestAStageWithNoTimeoutIsNotDiagnosedAsSilent` (`loop_test.go`) drives a healthy
+two-member stage with **no** stage timeout and requires no `run.quiescent`. The
+"no timeout" is the point — every other two-member loop test carries `TimeoutMs`,
+and `checkQuiescence` returns early while a timer is armed, so an armed timer was
+the only thing suppressing the diagnosis and every guard it was supposed to rely on
+passed. A single untimed stage is also the exact shape `agent create` and
+`blueprint create` render, so it is what the commands that compose teams put on
+disk. The other end is covered in `exec_test.go`: an effect that panics or is
+cancelled has to leave `agent.failed` in the log naming its member.

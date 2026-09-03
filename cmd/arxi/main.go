@@ -1,8 +1,8 @@
 // Command arxi is the binary.
 //
-// Today it implements schema, surface, why, blueprint validate, run start
-// (live, calling real models, or --sim), run list, run show, run why, run tree,
-// run prompt, run steer, run result, run pause, run unpause, run cancel,
+// Today it implements schema, surface, why, blueprint validate, blueprint create,
+// run start (live, calling real models, or --sim), run list, run show, run why,
+// run tree, run prompt, run steer, run result, run pause, run unpause, run cancel,
 // run fork, run replay, run attach, event emit, event log, event trace,
 // state set, state get, state lock, state unlock, serve, the trigger group, the
 // inbox group, the agent group, role define, the eval group (--sim only),
@@ -83,6 +83,10 @@ func main() {
 	case "blueprint":
 		if len(args) > 1 && args[1] == "validate" {
 			cmdBlueprintValidate(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "create" {
+			cmdBlueprintCreate(args[2:])
 			return
 		}
 	case "run":
@@ -286,6 +290,7 @@ IMPLEMENTED TODAY
   surface                    see the whole surface, human readable
   why <file>                 explain why a run is not advancing
   blueprint validate <file>  check a blueprint and print the resolved config
+  blueprint create <name>    compose stored agents into a team: --members a,b
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
   run start <bp> <prompt>    run a blueprint file or a stored agent (or --sim)

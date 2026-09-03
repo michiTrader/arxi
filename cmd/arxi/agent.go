@@ -133,7 +133,7 @@ func cmdAgentCreate(args []string) {
 		Name:     vals["name"],
 		Model:    vals["model"],
 		Role:     vals["role"],
-		Tools:    splitTools(vals["tools"]),
+		Tools:    splitCSV(vals["tools"]),
 		Advisory: vals["advisory"] == "true",
 	}
 	// The role is applied BEFORE Validate, so the record that is checked is the
@@ -372,21 +372,29 @@ func printAgentCreated(r agentstore.Record, path string, rd roleDefaults) {
 	fmt.Printf("  run it: %s\n", next)
 }
 
-// splitTools reads a `--tools a,b` value.
+// splitCSV reads a comma-separated flag value: `--tools a,b`, `--members a,b`,
+// `--stages build,review`.
 //
 // Empty entries are dropped instead of being passed through. `--tools read,` is a
 // trailing comma somebody typed, and grant validation would otherwise refuse it
 // with `unknown tool ""` -- an error naming a tool the user never wrote, about a
-// character they can barely see.
+// character they can barely see. `--members backend,` is the same typo with a
+// worse message: agentstore would report no agent named "".
 //
 // Whitespace is trimmed for the same reason: `--tools "read, grep"` is one shell
 // argument with a space in it, and refusing " grep" would be refusing a spelling
-// the shell handed over, not one the user chose.
+// the shell handed over, not one the user chose. It is also what makes `--members
+// "backend, frontend"` resolve, which is how a person types a list.
 //
-// Duplicates are kept. `--tools read,read` renders `tools: [read, read]`, which
-// the blueprint schema accepts and tool.Resolve answers identically for, so
-// there is nothing to protect against; ResolveAll de-duplicates for display.
-func splitTools(csv string) []string {
+// Duplicates are KEPT, and what happens to them is the caller's decision rather
+// than this function's. `--tools read,read` renders `tools: [read, read]`, which
+// the blueprint schema accepts and tool.Resolve answers identically for, so there
+// is nothing to protect against; ResolveAll de-duplicates for display. `--members
+// backend,backend` is a different matter -- two members with one name is a
+// blueprint the kernel cannot address -- and Team.Validate refuses it naming both
+// positions. Silently collapsing it here would turn a mistake into a team one
+// member smaller than the command line says.
+func splitCSV(csv string) []string {
 	var out []string
 	for _, t := range strings.Split(csv, ",") {
 		if t = strings.TrimSpace(t); t != "" {

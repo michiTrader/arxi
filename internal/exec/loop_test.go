@@ -97,6 +97,21 @@ func hasType(log *memLog, want kernel.EventType) bool {
 	return countType(log, want) > 0
 }
 
+// eventsOfType returns the events of one type, for assertions that care about a
+// payload or an actor rather than a count. It reads the log and not the fake
+// because attribution is a property of what was WRITTEN: an event the runner
+// stamped onto the wrong member is invisible in the effect it came from.
+func eventsOfType(log *memLog, want kernel.EventType) []kernel.Event {
+	evs, _ := log.Read(1, 0)
+	var out []kernel.Event
+	for _, e := range evs {
+		if e.Type == want {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // spawnedFor reports whether the fake was asked to open a turn for an agent.
 // Assertions read the fake rather than the log because an effect that produced
 // no event is exactly the bug worth catching.
@@ -203,6 +218,96 @@ func TestLoopDrivesAStagedRunToCompletion(t *testing.T) {
 	if out.State.ActiveTimer != "" {
 		t.Errorf("ActiveTimer = %q after the run succeeded; a finished run with an "+
 			"armed timer can still fire a stage timeout", out.State.ActiveTimer)
+	}
+}
+
+// A healthy two-member stage with NO timeout must not be diagnosed as silent.
+//
+// This is the test that was missing, and its absence is the whole reason the bug
+// it guards lived in the reducer for its entire life. TestLoopDrivesAStagedRunToCompletion
+// above asserts exactly this and passed throughout, because teamCfg's build stage
+// carries TimeoutMs and checkQuiescence returns early while a timer is armed. The
+// arming timer was the only thing suppressing the diagnosis; the guards it was
+// meant to rely on all passed. Every OTHER two-member loop test wants the
+// quiescent event, so no test in the suite could see the difference.
+//
+// The mechanism, because a future reader will be tempted to "simplify" the
+// TurnOpen assignment in spawnFor back to applyActivated: the runner executes ALL
+// the effects of one fold before any of the events they append is folded
+// (loop.go: Decide, then Runner.Run). Entering a stage commissions two turns, so
+// while member #1's agent.turn_done is being folded member #2's turn exists in no
+// event yet -- it is not thinking, not idle-with-a-pending-cause, and not armed.
+// Without the commission marker every guard in checkQuiescence therefore passed
+// in the middle of a run that was working perfectly, `run start <team> --sim`
+// reported it as failed, and the watcher on run.quiescent paid for a turn to
+// discuss a silence that was not happening.
+//
+// A single stage with no timeout is also precisely the shape `agent create` and
+// `blueprint create` render, so this is not a synthetic configuration: it is what
+// the two commands that compose teams write to disk.
+func TestAStageWithNoTimeoutIsNotDiagnosedAsSilent(t *testing.T) {
+	c := kernel.Config{
+		Blueprint: "feature-team",
+		Members: []kernel.MemberConfig{
+			{Name: "backend", Tools: []string{"write"}},
+			{Name: "frontend", Tools: []string{"write"}},
+		},
+		Stages: []kernel.StageConfig{{Name: "build", AdvanceWhen: "all"}},
+	}.ResolveDefaults()
+
+	// The premise, asserted rather than assumed. If a default ever fills this in,
+	// this test starts passing for the reason the old one did and stops testing
+	// anything at all.
+	if ms := c.Stages[0].TimeoutMs; ms != 0 {
+		t.Fatalf("the build stage has a timeout of %d ms; this test needs none, "+
+			"because an armed timer is what silences checkQuiescence and would "+
+			"mask exactly the false positive being guarded here.", ms)
+	}
+
+	loop, log, fake, _ := newLoop(c)
+	seedRun(t, log, c, nil)
+
+	out, err := loop.Run(context.Background())
+	if err != nil {
+		t.Fatalf("the loop failed to drive the run: %v", err)
+	}
+	if err := errors.Join(out.Errs...); err != nil {
+		t.Fatalf("effect errors during a run that should be clean: %v", err)
+	}
+
+	if hasType(log, kernel.RunQuiescent) {
+		t.Errorf("a two-member stage in which both members worked and submitted was "+
+			"diagnosed as silent.\n"+
+			"  consequence: every team file `blueprint create` writes reports a "+
+			"healthy run as stuck, and the watcher on run.quiescent pays for a turn "+
+			"to answer a question about nothing.\n"+
+			"  the log was: %v", types(log))
+	}
+	if out.State.Status != kernel.StatusSucceeded {
+		t.Fatalf("run ended %q (stopped by %q, %d steps), expected succeeded.\n"+
+			"  consequence: `run result` exits non-zero on a run that did everything "+
+			"it was asked to do.\n"+
+			"  the log was: %v",
+			out.State.Status, out.StoppedBy, out.Steps, types(log))
+	}
+	for _, who := range []string{"backend", "frontend"} {
+		if !spawnedFor(fake, who) {
+			t.Errorf("no turn was ever opened for %q; a run that reached succeeded "+
+				"without working is not the success this test wants. The fake saw: %v",
+				who, fake.Kinds())
+		}
+	}
+	// Nobody may be left owing a turn. A marker set at commission time and never
+	// cleared is the opposite failure and the expensive one (ADR-0004): Busy()
+	// stays true, quiescence can never fire again, and the next real silence in
+	// this run goes unreported forever.
+	for _, m := range out.State.Members {
+		if m.TurnOpen {
+			t.Errorf("%q still owes a turn after the run finished; agent.turn_done "+
+				"and agent.failed are the only two things that clear it, so a member "+
+				"left marked here means one of them never arrived and no later "+
+				"silence in this run can ever be diagnosed.", m.Name)
+		}
 	}
 }
 
@@ -1391,9 +1496,13 @@ func TestLoopSurvivesALogThatRefusesSnapshots(t *testing.T) {
 //
 // So the assertions are that the run KEEPS GOING, that the failure is REPORTED
 // rather than swallowed, and that the log stays replayable. The last is the
-// subtle one: a broken turn must leave nothing behind, because a member the
-// reducer believes is thinking has an open turn that can never close, and it
-// would then look eternally busy and mask every later silence.
+// subtle one, and it is the reason a broken turn is not free of consequence in
+// the log: the reducer marks a member as owing a turn the moment it commissions
+// one, so a spawn that never reached its provider has to append agent.failed to
+// say the turn will not happen. Without that event the member looks eternally
+// busy -- Busy() true forever -- and masks every later silence. Errs cannot serve
+// instead: it dies with the process, while the state is rebuilt by folding the
+// log.
 func TestLoopCarriesOnAfterATurnThatCouldNotBeReached(t *testing.T) {
 	c := teamCfg()
 	c.Watchers = nil
@@ -1444,6 +1553,27 @@ func TestLoopCarriesOnAfterATurnThatCouldNotBeReached(t *testing.T) {
 			"a provider hiccups.", out.State.Result)
 	}
 
+	// The turn that could not be delivered has to say so IN THE LOG, naming the
+	// member. This is the mechanism behind the assertion after it, and the two are
+	// kept apart on purpose: TurnOpen going false is the consequence, the event is
+	// the cause, and a failure that reports only the consequence sends the reader
+	// looking in the reducer for something the runner never wrote.
+	if !hasType(log, kernel.AgentFailed) {
+		t.Errorf("no agent.failed reached the log after a turn could not be started.\n"+
+			"  the log was: %v\n"+
+			"  consequence: Outcome.Errs dies with the process while the state is "+
+			"rebuilt by folding the log, so a resumed run comes back with a member "+
+			"owing a turn nothing can ever close.", types(log))
+	}
+	for _, e := range eventsOfType(log, kernel.AgentFailed) {
+		if e.Actor != "backend" {
+			t.Errorf("agent.failed is attributed to %q, want \"backend\".\n"+
+				"  consequence: the reducer clears the marker on the member the actor "+
+				"names, so a misattributed failure frees a member that is fine and "+
+				"leaves the broken one busy forever.", e.Actor)
+		}
+	}
+
 	// And backend must not be left looking busy forever.
 	if m := out.State.Member("backend"); m != nil && m.TurnOpen {
 		t.Error("backend still has TurnOpen after its turn failed to start.\n" +
@@ -1465,5 +1595,14 @@ func TestLoopCarriesOnAfterATurnThatCouldNotBeReached(t *testing.T) {
 			"  consequence: State = fold(log) is broken by a failed effect, so "+
 			"`run why` contradicts the run it is explaining.",
 			folded.Status, out.State.Status)
+	}
+	// The folded state is the one a RESUMED run starts from, so this is where the
+	// closed marker actually has to hold. The live check above could pass on
+	// process memory alone; this one cannot.
+	if m := folded.Member("backend"); m != nil && m.TurnOpen {
+		t.Error("the log folds to a backend that still owes a turn.\n" +
+			"  consequence: resume reads the log, so the member comes back busy " +
+			"forever and the run can never be diagnosed as silent again -- with no " +
+			"event left anywhere that could clear it.")
 	}
 }

@@ -872,10 +872,21 @@ func TestResumeDoesNotQuietlyTightenTheCeiling(t *testing.T) {
 
 // The two halves of a resume are independent, and the drain is the older one.
 // Raising a ceiling must not cost the run the work the block withheld.
+//
+// THE agent.turn_done BELOW IS LOAD-BEARING, and leaving it out made this test
+// pass for the wrong reason for as long as it existed. Entering a stage
+// commissions a turn for every non-advisory member, so without closing backend's
+// turn first the steer is parked because the member is BUSY, not because the run
+// is halted -- and the drain then correctly declines to hand a second concurrent
+// turn to a member whose first one is still running. The two parks are
+// indistinguishable in the state (both are PendingCauses), so the assertion below
+// cannot tell them apart; only the setup can. Closing the turn makes the halt the
+// single reason the cause is parked, which is what the test claims to be about.
 func TestARaiseStillHandsBackTheParkedWork(t *testing.T) {
 	c := bp()
 	s := started(c)
 	s, _ = drive(s, ev(StageEntered, "", map[string]any{"stage": "execute", "index": 0}), c)
+	s, _ = Decide(s, ev(AgentTurnDone, "backend", nil), c)
 	s, _ = Decide(s, ev(BudgetExceeded, "", map[string]any{
 		"tree_spent_usd": 5.0, "budget_usd": 5.0,
 	}), c)

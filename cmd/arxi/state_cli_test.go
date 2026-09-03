@@ -44,7 +44,12 @@ const watchState = "  - {agent: security, pattern: state.*, action: notify}\n"
 const watchStateRunsATool = "  - {agent: security, pattern: state.*, action: run_tool, tool: read}\n"
 
 // paused is the halt a person caused and can undo in one command.
-const pausedAt3 = `{"id":"e3","seq":3,"type":"run.paused","payload":{}}
+//
+// seq 4 and not 3: emitRunAt's log closes security's commissioned turn at seq 3,
+// which every halt fixture here depends on -- a cause parked behind a busy member
+// is not a cause the halt withheld, so a pause on top of a mid-turn security
+// would be a fixture in which these refusals cannot fire at all.
+const pausedAt4 = `{"id":"e4","seq":4,"type":"run.paused","payload":{}}
 `
 
 // stateLog is the run's log as bytes, for the assertions that have to prove a
@@ -257,7 +262,7 @@ func TestStateSetDoesNotCallAnUnwatchedKeyUnobserved(t *testing.T) {
 // cause, and the only thing that can say so is this line.
 func TestStateSetStillWritesIntoAPausedRunAndSaysTheTurnIsParked(t *testing.T) {
 	dir := t.TempDir()
-	emitRunAt(t, dir, "r1", watchState, pausedAt3, true)
+	emitRunAt(t, dir, "r1", watchState, pausedAt4, true)
 
 	got := arxi(t, dir, "state", "set", "r1", "api.contract", "frozen")
 	if got.code != 0 {
@@ -303,7 +308,7 @@ func TestStateSetPointsABlockedRunAtRunWhy(t *testing.T) {
 	// budget.exceeded, not tool.call_denied: decide.go:128 is what actually sets
 	// StatusBlocked, and the other one looks like it should and does not.
 	emitRunAt(t, dir, "r1", watchState,
-		`{"id":"e3","seq":3,"type":"budget.exceeded","payload":{"spent_usd":1.2}}
+		`{"id":"e4","seq":4,"type":"budget.exceeded","payload":{"spent_usd":1.2}}
 `, true)
 
 	got := arxi(t, dir, "state", "set", "r1", "api.contract", "frozen")
@@ -344,7 +349,7 @@ func TestStateSetPointsABlockedRunAtRunWhy(t *testing.T) {
 // repeating the command is a whole recovery. Writing costs the tool call.
 func TestStateSetRefusesAHaltedRunWhenAWatcherWouldRunATool(t *testing.T) {
 	dir := t.TempDir()
-	emitRunAt(t, dir, "r1", watchStateRunsATool, pausedAt3, true)
+	emitRunAt(t, dir, "r1", watchStateRunsATool, pausedAt4, true)
 
 	got := arxi(t, dir, "state", "set", "r1", "api.contract", "frozen")
 	if got.code != 1 {
@@ -392,8 +397,8 @@ func TestStateSetRefusesAHaltedRunWhenAWatcherWouldRunATool(t *testing.T) {
 func TestStateSetRefusesATerminalRun(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchState,
-		`{"id":"e3","seq":3,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
-{"id":"e4","seq":4,"type":"run.result","payload":{"summary":"done"}}
+		`{"id":"e4","seq":4,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
+{"id":"e5","seq":5,"type":"run.result","payload":{"summary":"done"}}
 `, true)
 
 	got := arxi(t, dir, "state", "set", "r1", "api.contract", "frozen")

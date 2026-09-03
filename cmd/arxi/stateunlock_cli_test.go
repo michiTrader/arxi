@@ -50,18 +50,24 @@ import (
 // rather than by running `arxi state lock`, per emit_cli_test.go -- a fixture built
 // with the code under test cannot distinguish a bug in the fixture from a bug in
 // the thing being measured.
-const ownLiveLock = `{"id":"e3","seq":3,"type":"lock.acquired","source":"human","payload":{"key":"migrations/","expires_at":"2099-01-01T00:00:00Z"}}
-`
-
-// The paused pairs put the halt AFTER the lock, at seq 4.
 //
-// pausedAt3 cannot be composed with the lock fixtures: it is seq 3 and so is every
-// one of them, and a log with two seq 3 rows is not one this binary would write --
-// logstore would refuse the second. Built by hand so the sequence stays honest.
-const ownLiveLockThenPaused = ownLiveLock + `{"id":"e4","seq":4,"type":"run.paused","payload":{}}
+// The turn_done at seq 5 is the same one the three locks in statelock_cli_test.go
+// carry, and for the reason given there: the acquire matches a lock.* watcher, so
+// it commissions security's turn, and a fixture that leaves it open answers every
+// release with "queued: security is mid-turn".
+const ownLiveLock = `{"id":"e4","seq":4,"type":"lock.acquired","source":"human","payload":{"key":"migrations/","expires_at":"2099-01-01T00:00:00Z"}}
+{"id":"e5","seq":5,"type":"agent.turn_done","actor":"security"}
 `
 
-const liveBackendLockThenPaused = liveBackendLock + `{"id":"e4","seq":4,"type":"run.paused","payload":{}}
+// The paused pairs put the halt AFTER the lock, at seq 6.
+//
+// pausedAt4 cannot be composed with the lock fixtures: it is seq 4 and so is every
+// acquire, and a log with two seq 4 rows is not one this binary would write --
+// logstore would refuse the second. Built by hand so the sequence stays honest.
+const ownLiveLockThenPaused = ownLiveLock + `{"id":"e6","seq":6,"type":"run.paused","payload":{}}
+`
+
+const liveBackendLockThenPaused = liveBackendLock + `{"id":"e6","seq":6,"type":"run.paused","payload":{}}
 `
 
 // blockedOnMigrations is the member this command must not claim to have freed.
@@ -72,7 +78,7 @@ const liveBackendLockThenPaused = liveBackendLock + `{"id":"e4","seq":4,"type":"
 // blueprint at run.started -- and agent.blocked does not halt the run, which is
 // budget.exceeded's job, so the run below is running and the outlook this drives is
 // the ordinary one.
-const blockedOnMigrations = `{"id":"e4","seq":4,"type":"agent.blocked","actor":"security","payload":{"blocked_on":"lock","blocked_ref":{"key":"migrations/"}}}
+const blockedOnMigrations = `{"id":"e6","seq":6,"type":"agent.blocked","actor":"security","payload":{"blocked_on":"lock","blocked_ref":{"key":"migrations/"}}}
 `
 
 // TestStateUnlockRefusesAKeyThatCouldNotMatchTheLockItNames.
@@ -148,7 +154,10 @@ func TestReleasingOurOwnLockIsRecordedWithoutCeremony(t *testing.T) {
 			"cannot perform, so a key claimed by hand is held until the run ends.",
 			got.code, got.out)
 	}
-	for _, want := range []string{"released migrations/ (seq 4)", "it was held by human"} {
+	// seq 6: the fixture runs to seq 5, so the release this command appends is the
+	// sixth event. Spelled out rather than computed, because a seq the test derives
+	// from the log it is checking would agree with any number the binary printed.
+	for _, want := range []string{"released migrations/ (seq 6)", "it was held by human"} {
 		if !strings.Contains(got.out, want) {
 			t.Errorf("the release does not print %q:\n%s\n"+
 				"  consequence: the seq is what `event show` is given to check this against "+
@@ -539,8 +548,8 @@ func TestAnUnheldKeyIsRefusedWithTheCodeNoPollerWaitsOn(t *testing.T) {
 func TestStateUnlockRefusesATerminalRunWhereTheReleaseWouldFreeNothing(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchLock, ownLiveLock+
-		`{"id":"e4","seq":4,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
-{"id":"e5","seq":5,"type":"run.result","payload":{"summary":"done"}}
+		`{"id":"e6","seq":6,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
+{"id":"e7","seq":7,"type":"run.result","payload":{"summary":"done"}}
 `, true)
 
 	got := arxi(t, dir, "state", "unlock", "r1", "migrations/")

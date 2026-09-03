@@ -34,6 +34,21 @@ import (
 // has two members because a watcher must name a declared member -- blueprint
 // validation refuses `agent: qa` outright, which is how the "watcher names a
 // member that does not exist" branch turned out to be unreachable.
+//
+// The seeded log closes security's turn, and that line is the fixture, not
+// decoration. Entering a stage COMMISSIONS a turn for every non-advisory member
+// (spawnFor sets Member.TurnOpen), so a log that stops at stage.entered describes
+// a run in which everybody is permanently mid-turn -- and emitWatcherOutcomes
+// checks Busy() before it checks anything a test here cares about. Every emit
+// into such a run is "queued: security is mid-turn" whatever else is true of it:
+// the paused and blocked refusals below never fire, because a cause that is
+// parked behind a busy member is not a cause the halt withheld.
+//
+// backend's turn is deliberately left OPEN. A run in which nobody is busy and
+// nobody is runnable is quiescent, and the loop that `event emit` drives says so
+// by ending the run -- correctly, since neither member has submitted and
+// advance_when is all. The fixture has to describe a run that is still alive, and
+// one member still working is the cheapest honest way to be one.
 func emitRunAt(t *testing.T, dir, id, watchers, extra string, simulated bool) {
 	t.Helper()
 
@@ -65,6 +80,7 @@ func emitRunAt(t *testing.T, dir, id, watchers, extra string, simulated bool) {
 	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"feature-team","run_id":"` +
 		id + `","budget_usd":1,"simulated":` + sim + `}}
 {"id":"e2","seq":2,"type":"stage.entered","payload":{"stage":"execute","index":0}}
+{"id":"e3","seq":3,"type":"agent.turn_done","actor":"security"}
 ` + extra
 	if err := os.WriteFile(filepath.Join(run, "events.ndjson"), []byte(log), 0o644); err != nil {
 		t.Fatal(err)
@@ -264,7 +280,7 @@ func TestEventEmitSaysWhenARunDeclaresNoWatchersAtAll(t *testing.T) {
 func TestEventEmitRefusesWhenAPausedRunWouldParkTheCause(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchCustom,
-		`{"id":"e3","seq":3,"type":"run.paused","payload":{}}
+		`{"id":"e4","seq":4,"type":"run.paused","payload":{}}
 `, true)
 
 	got := arxi(t, dir, "event", "emit", "r1", "custom.deploy")
@@ -296,7 +312,7 @@ func TestEventEmitRefusesWhenAPausedRunWouldParkTheCause(t *testing.T) {
 func TestEventEmitStillRecordsIntoAPausedRunWhenNothingWatches(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchSomethingElse,
-		`{"id":"e3","seq":3,"type":"run.paused","payload":{}}
+		`{"id":"e4","seq":4,"type":"run.paused","payload":{}}
 `, true)
 
 	got := arxi(t, dir, "event", "emit", "r1", "custom.note")
@@ -323,7 +339,7 @@ func TestEventEmitPointsABlockedRunAtRunWhy(t *testing.T) {
 	// budget.exceeded, checked against decide.go:128 -- it is what actually sets
 	// StatusBlocked. tool.call_denied looks like it should and does not.
 	emitRunAt(t, dir, "r1", watchCustom,
-		`{"id":"e3","seq":3,"type":"budget.exceeded","payload":{"spent_usd":1.2}}
+		`{"id":"e4","seq":4,"type":"budget.exceeded","payload":{"spent_usd":1.2}}
 `, true)
 
 	got := arxi(t, dir, "event", "emit", "r1", "custom.deploy")
@@ -348,8 +364,8 @@ func TestEventEmitPointsABlockedRunAtRunWhy(t *testing.T) {
 func TestEventEmitRefusesATerminalRun(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchCustom,
-		`{"id":"e3","seq":3,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
-{"id":"e4","seq":4,"type":"run.result","payload":{"summary":"done"}}
+		`{"id":"e4","seq":4,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
+{"id":"e5","seq":5,"type":"run.result","payload":{"summary":"done"}}
 `, true)
 
 	got := arxi(t, dir, "event", "emit", "r1", "custom.deploy")
@@ -425,7 +441,7 @@ func TestEventEmitDrivesTheRunItWakes(t *testing.T) {
 func TestEventEmitNamesAWaitingAgentWithoutAnEmptyParenthetical(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchCustom,
-		`{"id":"e3","seq":3,"type":"agent.blocked","actor":"security","payload":{"agent":"security"}}
+		`{"id":"e4","seq":4,"type":"agent.blocked","actor":"security","payload":{"agent":"security"}}
 `, true)
 
 	got := arxi(t, dir, "event", "emit", "r1", "custom.deploy")
