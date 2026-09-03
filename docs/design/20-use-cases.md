@@ -390,6 +390,115 @@ because there the user asked for defaults that cannot be applied.
 no `role list` and no `role show`. It is written 0644, where `providers/` is 0600 —
 a role is a default a team commits and reviews, not a credential.
 
+### Composing the team, instead of writing it
+
+The `team.yaml` at the top of this section was typed by hand, and its three members
+are the three agents the previous subsection just created. `arxi blueprint create`
+is what turns the second thing into the first:
+
+```
+$ arxi blueprint create feature-team --members backend,frontend,security
+blueprint feature-team created: a team of 3
+  file:   agents/feature-team.yaml
+  - backend: tools: bash (ask), read (allow), write (ask)
+      claude-sonnet-4-6, implementer, counts toward advance
+      copied from agents/backend.yaml
+  - frontend: tools: read (allow), write (ask)
+      claude-sonnet-4-6, implementer, counts toward advance
+      copied from agents/frontend.yaml
+  - security: tools: read (allow)
+      claude-sonnet-4-6, reviewer, advisory
+      copied from agents/security.yaml
+  stages: work  (the default -- no --stages, so one stage and everybody in it)
+  note:   security is advisory: no turn at stage entry and no vote in the
+          advance rule, so each stage advances when backend and frontend have submitted.
+  run it: arxi run start feature-team "<objective>" --budget 5.00
+  edit it: it is an ordinary blueprint -- add a watcher, a timeout, or
+           advance_when: quorum:2, then arxi blueprint validate agents/feature-team.yaml
+```
+
+The team lands in `agents/`, beside the files it was composed from, and is a file
+of the same kind: `agent list` shows it, `run start feature-team` runs it,
+`blueprint validate` checks it after an edit. A one-member blueprint was always a
+blueprint; this is the same shape with three members in it.
+
+Three lines of that screen are the ones worth their width.
+
+**The grants are resolved, per member.** `--tools read,write,bash` looks like three
+equal grants and two of them resolve to `ask`. One agent's worth of that surprise is
+survivable; three members composed on three different days is the same surprise
+three times over, and this is the first screen where all of them stand together.
+
+**Every line names the file its member came from.** That is the one thing the screen
+knows which the new file does not record, because members are **copied, not
+referenced** — the same decision as roles above, for the same reason: `run start`
+freezes the blueprint into `runs/<id>/blueprint.snapshot.yaml` and hashes it
+(ADR-0001, ADR-0002), so a reference would leave part of a run's rules outside the
+sha that is meant to be the whole of it. Editing `agents/backend.yaml` tomorrow
+changes that agent and no team already composed from it.
+
+**The note does the advance arithmetic.** `advance_when: all` over three members one
+of whom is advisory does not mean three, it means backend and frontend. The rule is
+in the file; the count it resolves to is not, so the count is printed.
+
+Copying is also what makes the refusals matter: nothing revisits
+`agents/backend.yaml` afterwards, so composition is the only moment a team can be
+checked against the files it is made of. A member that is itself a team is refused
+rather than spliced in, and the refusal prints the `--members` line that names its
+members instead. Two members resolving to one name is refused naming both files,
+because the name inside a file need not match the filename and the collision is
+invisible on the command line. A member whose own `stages:` list names none of the
+team's is refused before anything is written — it would otherwise be a team that
+runs, spends, and activates that member in no stage at all. All three exit 2 and
+leave `agents/` untouched; `cmd/arxi/blueprint_cli_test.go` walks each one at
+process level.
+
+What comes out is not quite the `team.yaml` this section opened with. Set them side
+by side: the members are the same and the stages are not.
+
+```
+$ arxi blueprint validate agents/feature-team.yaml
+blueprint feature-team is valid (1 stages, 3 members)
+  workspace: worktree  (resolved: backend and frontend can write)
+  stage work: advance_when=all on_timeout=escalate
+  security is advisory: gives an opinion, does not count toward advance rules
+  sha: 70db35843708
+```
+
+`--stages build,review` closes half the distance: two stages instead of one, in
+order, every member in both. What no flag renders is `timeout_ms`, `quorum:2` or
+`interaction.steer_target` — and that is a decision, not an unfinished command. A
+flag per blueprint field is a second, worse YAML with a `--` in front of every key,
+and the file it would be competing with is already on disk. So the screen's last
+line is `edit it:` and it names the verb that checks the edit.
+
+The `workspace:` line is what composing buys over writing. Nobody typed it: the run
+of the hand-written team above passed `--workspace worktree` on the command line,
+and here it is resolved from `backend` and `frontend` holding `write` — the default
+this section has already argued is not optional. Started as the screen suggests, the
+team runs and stops where the rule says:
+
+```
+$ arxi run start feature-team "implement rate limiting on /api/login" \
+    --budget 20.00 --sim --run-id r1
+run r1 started (budget 20.00 USD, workspace auto→worktree)
+run r1 succeeded (seq 11, stopped by reaching a terminal status)
+  stage:  work
+  turns:  2
+  spent:  0.0200 of 20.0000 USD in the tree
+```
+
+Two turns, not three, and `run show r1` says which member did not take one:
+
+```
+  backend   submitted  (submitted)   role implementer, 1 turn, 0.01 USD
+  frontend  submitted  (submitted)   role implementer, 1 turn, 0.01 USD
+  security  inactive   (advisory)    role reviewer
+```
+
+Which is the reading this section began with, three transcripts earlier and on a
+file nobody wrote by hand: `inactive` is not idle, and `submitted` is not available.
+
 ---
 
 ## 20.5 UC-5 — Steering a run without restarting it
