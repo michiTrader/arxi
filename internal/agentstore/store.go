@@ -192,6 +192,21 @@ func validName(noun, name string) error {
 	return nil
 }
 
+// ValidateName is validName for a caller that has a name and nothing else yet.
+//
+// Record and Team carry their own name to Validate, so nothing needed this until
+// `blueprint install`: `--as` is a name typed on the command line with no record
+// behind it, and the bytes it will name have not been fetched. Checking it early
+// is the ordering `blueprint create` already uses when it validates a Team before
+// opening the store -- an invocation that cannot succeed should not first make a
+// request to somebody else's server, and when both the name and the URL are wrong
+// the refusal should be about the one the user typed.
+//
+// Exported rather than copied into cmd/arxi, because the rules are about what may
+// become a file in THIS store, and a second copy of them would be free to drift
+// from the one the writers enforce.
+func ValidateName(noun, name string) error { return validName(noun, name) }
+
 // Render turns a Record into the bytes that will be written, and proves they
 // load before returning them.
 //
