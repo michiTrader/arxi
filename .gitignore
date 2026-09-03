@@ -27,13 +27,21 @@
 #
 # The list is the DefaultDir of each store rather than a guess, read from the
 # code: agentstore "agents", evalstore "evals", modelstore "providers",
-# toolstore "policies", trigstore "triggers", and cmd/arxi's runsDir "runs". A
-# first draft of this entry listed "agents", which no store wrote at the time,
+# rolestore "roles", toolstore "policies", trigstore "triggers", and cmd/arxi's
+# runsDir "runs". A first draft of this entry listed "agents", which no store
+# wrote at the time,
 # and omitted "policies", which one did -- an ignore file that names directories
 # nobody creates looks maintained while leaving a real one tracked. agents/ is
 # now written, by internal/agentstore, so the name is back for the opposite
 # reason: `arxi agent create` in this repository would otherwise offer one
 # developer's agents, and their tool grants, to every clone.
+#
+# Ignored HERE does not mean "do not commit these". rolestore writes roles/
+# 0644 precisely because a role is a default a team is expected to read and
+# commit, and the same is true of agents/: in a project that USES arxi, both
+# belong in version control, which is why the stores sit beside runs/ in the
+# working directory instead of in $HOME. This repository is arxi's own source,
+# where everything either directory holds is debris from probing the CLI.
 #
 # providers/ matters most: modelstore writes it 0600 because it holds
 # credentials, and a mode that careful is wasted if the file is committed.
@@ -47,6 +55,7 @@
 /evals/
 /providers/
 /policies/
+/roles/
 
 # Per-machine agent settings. .claude/settings.json is shareable if one is ever
 # added; settings.local.json is one developer's local permission decisions and
