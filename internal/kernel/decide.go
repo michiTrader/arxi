@@ -89,6 +89,12 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 			m.State = MemberFailed
 			m.Detail = e.Str("error")
 			m.SinceSeq = e.Seq
+			// The turn is over, whether or not it ever began. Busy() already
+			// returns false for MemberFailed, so leaving the flag set would not
+			// mask quiescence today -- but it would say the member has a turn
+			// running, `run show` prints that as busy (cmd/arxi/runshow.go), and
+			// `run pause` counts it as a turn that will finish and never does.
+			m.TurnOpen = false
 		}
 
 	case ToolCall:
@@ -891,7 +897,7 @@ func drainParked(out *State, e Event, c Config) []Effect {
 		causes := m.PendingCauses
 		m.PendingCauses = nil
 		m.State = MemberIdle
-		fx = append(fx, spawnFor(out, *m, c, causeOf(e, causes...), len(causes)))
+		fx = append(fx, spawnFor(out, m, c, causeOf(e, causes...), len(causes)))
 	}
 	return fx
 }
@@ -1218,19 +1224,43 @@ func spawnCauses(out *State, m *Member, c Config, cause Cause, coalesced int) []
 		m.PendingCauses = append(m.PendingCauses, cause.Events...)
 		return nil
 	}
-	return []Effect{spawnFor(out, *m, c, cause, coalesced)}
+	return []Effect{spawnFor(out, m, c, cause, coalesced)}
 }
 
-func spawnFor(out *State, m Member, c Config, cause Cause, coalesced int) Effect {
+// spawnFor builds the turn AND records on the member that it is owed one.
+//
+// The recording is why it takes a *Member. A SpawnTurn is executed after the
+// fold that produced it returns, so from the moment this function is called
+// until agent.activated lands, the turn exists in the effect list and nowhere in
+// the state -- and the fold of the NEXT event, which may be another member's
+// turn_done from the same batch, sees a member that is neither Busy (no
+// TurnOpen) nor Runnable (its causes were spent, not parked) and nothing pending
+// in its own effects. Every guard in checkQuiescence passed, and a two-member
+// stage with no timeout arming ActiveTimer reported a finished run as `failed`,
+// missing the submit of a member that submits two events later. See
+// Member.TurnOpen; the timeout on teamCfg's first stage is the only reason the
+// suite did not see this for the whole life of the reducer.
+//
+// Setting it here rather than at each of the seven call sites is the same
+// argument spawnCauses makes about the budget: a marker that six sites set and
+// the seventh forgets is worse than none, because the one that forgets is the
+// one that fires the false diagnosis.
+//
+// The marker is cleared by agent.turn_done -- and, when the turn could not be
+// started at all, by agent.failed, which internal/exec now appends for exactly
+// this reason. Nothing may commission a turn and then leave the marker set: that
+// is a member busy forever, which masks every later silence.
+func spawnFor(out *State, m *Member, c Config, cause Cause, coalesced int) Effect {
 	slice := 0.0
 	if out.BudgetUSD > 0 {
 		if rest := out.BudgetUSD - out.TreeSpentUSD; rest > 0 {
 			slice = rest
 		}
 	}
+	m.TurnOpen = true
 	return SpawnTurn{
 		Agent:       m.Name,
-		Context:     buildContext(out, m, c, cause.Events),
+		Context:     buildContext(out, *m, c, cause.Events),
 		Cause:       cause,
 		BudgetSlice: slice,
 		Coalesced:   coalesced,

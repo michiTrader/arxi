@@ -64,8 +64,9 @@ type Member struct {
 	Turns     int            `json:"turns"`
 	Submitted bool           `json:"submitted,omitempty"`
 
-	// TurnOpen records that this member has been activated and its turn has not
-	// finished yet, independently of the state it is currently displaying.
+	// TurnOpen records that this member has a turn that has not finished yet --
+	// commissioned by spawnFor, or already begun -- independently of the state it
+	// is currently displaying.
 	//
 	// It exists because State alone cannot answer "is a turn still running".
 	// A member that submits mid-turn moves to MemberSubmitted, which is neither
@@ -74,6 +75,24 @@ type Member struct {
 	// busy, nobody runnable and nothing armed, and diagnosed a run that was
 	// working normally as silent forever. Since a watcher on run.quiescent opens a
 	// paid turn, that false positive cost money as well as trust.
+	//
+	// COMMISSIONED, not activated, and the difference is a whole class of the same
+	// bug. The turn a SpawnTurn effect describes is executed by the runner AFTER
+	// the fold that decided it returns (internal/exec/loop.go: Decide then
+	// Runner.Run), so between those two moments the turn exists in no event at
+	// all. Recording it only on agent.activated left every member but the first
+	// invisible to the fold of member #1's turn_done: a two-member stage with no
+	// timeout to arm ActiveTimer had every guard in checkQuiescence pass while
+	// member #2's turn was in flight, and `run start pair --sim` reported a
+	// completed run as `failed`, missing the submit of a member that submits two
+	// events later. The marker has to exist from the moment the turn is owed.
+	//
+	// Which is also why nothing may commission a turn and then leave: the marker
+	// is cleared by agent.turn_done or by agent.failed, and a SpawnTurn that
+	// cannot reach its provider therefore has to append the second one
+	// (internal/exec/exec.go: turnFailure). Without that, Busy() stays true
+	// forever and quiescence can never fire again -- the false NEGATIVE, which
+	// ADR-0004 rates as the expensive direction.
 	TurnOpen bool `json:"turn_open,omitempty"`
 
 	// PendingCauses are events that arrived while the member was busy. They are

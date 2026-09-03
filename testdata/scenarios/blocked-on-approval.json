@@ -29,14 +29,16 @@
         "since_seq": 7,
         "spent_usd": 0.42,
         "turns": 0,
-        "submitted": true
+        "submitted": true,
+        "turn_open": true
       },
       {
         "name": "frontend",
         "state": "idle",
         "since_seq": 1,
         "spent_usd": 0,
-        "turns": 0
+        "turns": 0,
+        "turn_open": true
       },
       {
         "name": "mediator",
@@ -90,6 +92,14 @@
       {
         "depth": 2,
         "text": "to avoid being asked about this tool again:"
+      },
+      {
+        "depth": 1,
+        "text": "designer is in fact working (submitted) since seq 7"
+      },
+      {
+        "depth": 1,
+        "text": "frontend has a turn opening that has not started yet (idle since seq 1)"
       },
       {
         "depth": 1,
