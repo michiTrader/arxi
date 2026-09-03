@@ -379,8 +379,10 @@ func TestALiveForeignLeaseIsRefusedAndPricesTheWait(t *testing.T) {
 // backend" would send the caller away to poll something that will never change.
 //
 // It also names what --force writes, quoted, before the caller types it. The flag ends
-// somebody's claim; the case for typing it is that the release is accountable -- the log
-// says who ended it and whose it was -- and that case cannot be made after the fact.
+// somebody's claim, and the case for typing it has to be made before the fact: the log
+// records whose lease ended and that a decision rather than a clock ended it. It does
+// not record whose decision -- see the release arm of cmdStateUnlock -- so the refusal
+// promises previous_holder and nothing more.
 func TestALockThatCannotLapseIsTheStallForceExistsFor(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchLock, eternalBackendLock, true)
@@ -414,7 +416,7 @@ func TestALockThatCannotLapseIsTheStallForceExistsFor(t *testing.T) {
 	}
 }
 
-// TestForcingALiveLeaseRecordsWhoEndedItAndClaimsNoLapse is the assertion this whole
+// TestForcingALiveLeaseRecordsWhoLostItAndClaimsNoLapse is the assertion this whole
 // file is arranged around.
 //
 // A forced release and an expired one free the same key and print the same seq. The
@@ -423,12 +425,18 @@ func TestALockThatCannotLapseIsTheStallForceExistsFor(t *testing.T) {
 // the only place it is recorded. `event log --type 'lock.*'` is where the member that
 // lost the key finds out which happened.
 //
+// WhoLostIt, not who ended it, and the name is precise because the older one was not.
+// previous_holder is the only name in the payload; Actor is empty by lockEvent's design,
+// so nothing here identifies the caller and this test never asserted that it did. A
+// reader who takes the old name at face value goes looking for an accountability field,
+// finds source: human, and concludes it names somebody.
+//
 // So expired_at must be ABSENT. The instant is right there in held.ExpiresAt and writing
 // it would be one line -- and it would record a lapse at an instant that has not
 // arrived, which is exactly the judgement --force exists to say nobody made. That is the
 // only defect in this command that no message on screen could reveal: both releases
 // print correctly and only the log is wrong, permanently.
-func TestForcingALiveLeaseRecordsWhoEndedItAndClaimsNoLapse(t *testing.T) {
+func TestForcingALiveLeaseRecordsWhoLostItAndClaimsNoLapse(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchSomethingElse, liveBackendLock, true)
 

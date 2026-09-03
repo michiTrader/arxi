@@ -383,8 +383,23 @@ var Registry = []Cmd{
 	// declare a flag the CLI has and an agent does not, and an allow-policy tool with
 	// this param lets one agent end another's LIVE lease. Kept anyway, because the
 	// alternative -- a lease only a human can end -- means every agent lock runs to
-	// expiry, which is the stall §20.8 names. The release is accountable instead: it
-	// records previous_holder and reason: "forced", and the log says who did it.
+	// expiry, which is the stall §20.8 names.
+	//
+	// What the release records is the VICTIM, and this comment used to claim it
+	// recorded the forcer. previous_holder names who lost the key and reason: "forced"
+	// says a decision ended a live lease rather than a clock -- both of which the
+	// member that lost it needs. No field names who decided. lockEvent leaves Actor
+	// empty deliberately, because wakeWatchers skips a watcher whose agent equals the
+	// actor and stamping the caller there would silently disable that caller's own
+	// lock.* watcher, and with Actor empty lockHolder falls back to the source, so
+	// every forced release folds to holder "human" no matter who typed it.
+	//
+	// The correction matters because that sentence was the half of the argument that
+	// answered "why is this safe enough to ship allow", and it was not true. The
+	// victim's half stands on its own -- the loss is visible and attributed to a
+	// decision -- and the missing half is a known gap. Written down as a gap it can be
+	// closed by a field that is not Actor; written down as a property it never gets
+	// looked at again.
 	{Path: []string{"state", "unlock"}, Desc: "release a cooperative lock",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id")),

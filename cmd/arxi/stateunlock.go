@@ -282,8 +282,11 @@ func cmdStateUnlock(args []string) {
 			held.Holder, held.ExpiresAt, strconv.Quote("expired"))
 	case "forced":
 		fmt.Printf("  taken from %s, whose lease ran to %s and had not run out: "+
-			"recorded as %s, and the log names this shell as the one that ended it\n",
-			held.Holder, held.ExpiresAt, strconv.Quote("forced"))
+			"recorded as %s, with previous_holder naming them. The event does not "+
+			"record who ended it -- every release from a shell folds to holder %s -- "+
+			"so if that matters here, say it somewhere the log keeps\n",
+			held.Holder, held.ExpiresAt, strconv.Quote("forced"),
+			strconv.Quote("human"))
 	default:
 		fmt.Printf("  it was held by %s\n", held.Holder)
 	}

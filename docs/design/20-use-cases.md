@@ -711,17 +711,24 @@ a crash; the release is how the normal case stays fast.
 $ arxi state unlock r1 migrations/ --force
 run r1 released migrations/ (seq 47)
   taken from backend, whose lease ran to 2026-08-26T14:11:00Z and had not run
-  out: recorded as "forced", and the log names this shell as the one that ended it
+  out: recorded as "forced", with previous_holder naming them. The event does
+  not record who ended it -- every release from a shell folds to holder
+  "human" -- so if that matters here, say it somewhere the log keeps
   frontend is blocked on migrations/ and is NOT woken by this: ...
 ```
 
 `--force` is needed in exactly one case: a lease that has **not** lapsed and
 belongs to somebody else. Ending work in flight is a decision, so it has to be
-spelled and it is recorded as one — the release carries
-`previous_holder: "backend"` and `reason: "forced"`, and `arxi event log r1
---type lock.*` says who ended it. A lease that has already lapsed needs no flag
-and is recorded as `expired`, with `expired_at` as the evidence for the judgement;
-the holder releasing its own key is neither.
+spelled, and the release records what it cost somebody: `previous_holder:
+"backend"` and `reason: "forced"`, which is how the member that lost the key
+learns a decision took it rather than a clock. It does **not** record whose
+decision. `Actor` is left empty on lock events on purpose — `wakeWatchers` skips
+a watcher whose agent equals the actor, so naming the caller would silently
+disable that caller's own `lock.*` watcher — and an empty actor folds to holder
+`"human"` for every forced release. Treat that as a known gap rather than a
+property: it is closable by a payload field that is not `Actor`. A lease that has
+already lapsed needs no flag and is recorded as `expired`, with `expired_at` as
+the evidence for the judgement; the holder releasing its own key is neither.
 
 The reducer does not check who releases, and that is the design rather than a gap:
 a release honoured only from its own holder could never reclaim the key of an
@@ -984,10 +991,12 @@ so there is no way to declare a flag the CLI has and an agent does not. It is
 `allow` anyway for the reason §20.8 opens with — a release only a human can
 perform means every agent lock runs to its full expiry, so the crashed-holder
 stall returns for every early finish — and what makes that tolerable is that the
-authority is **not deniable**: the release records `previous_holder` and
-`reason: "forced"`, so `arxi event log <run> --type lock.*` names who broke whose
-lease. `ask` was the alternative and was rejected because the common case,
-releasing a lock you hold yourself, would then cost a human approval every turn.
+loss is **visible**: the release records `previous_holder` and
+`reason: "forced"`, so `arxi event log <run> --type lock.*` shows whose lease
+ended and that a decision rather than a clock ended it. It does not show whose
+decision; §20.8 says why `Actor` cannot be the field that fixes it. `ask` was the
+alternative and was rejected because the common case, releasing a lock you hold
+yourself, would then cost a human approval every turn.
 
 The general rule: an agent may do things **inside** a run, and may not change the
 rules the run is judged by. `state set` is a tool and `agent tool policy` is not,

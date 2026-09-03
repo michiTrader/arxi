@@ -559,7 +559,7 @@ func refuseHeldLock(st kernel.State, held kernel.Lock, key string, now time.Time
 		"then acquires, so a holder that crashed mid-turn costs one lease rather than a "+
 		"human noticing.\n"+
 		"  or do not wait: arxi state unlock %s %s --force ends the lease now, and the "+
-		"log names who ended it.\n"+
+		"log names whose lease it was.\n"+
 		"  who holds what: arxi run show %s\n",
 		held.ExpiresAt, until.Sub(now).Round(time.Second), exitLockHeld, st.RunID, key,
 		kernel.LockReleased, st.RunID, key, st.RunID)
