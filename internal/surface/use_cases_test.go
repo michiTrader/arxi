@@ -45,9 +45,19 @@ func readUseCases(t *testing.T) string {
 // The numbers themselves are minor. The claim they support is not: the gap
 // between capabilities and tools is a security boundary, and a reader deciding
 // whether to trust it has no way to tell a current count from a stale one.
+//
+// useCaseDoc is in this list too, and it is here because "guarded only the design
+// document" was never quite true. What that test reads is §20.12: the tool split,
+// and the one sentence stating it. The document opens four hundred lines earlier
+// with `arxi surface` lists the N declared capabilities, and nothing read that,
+// so it sat at 46 through four capabilities — in the file whose own §20.13 says
+// it cannot drift without turning the build red. A guard aimed at one sentence
+// says nothing about the rest of the file, and the sentence a reader meets first
+// is the one that was wrong.
 var countedDocs = []string{
 	"../../README.md",
 	"../../AGENTS.md",
+	useCaseDoc,
 }
 
 // TestEveryDocumentStatingTheSplitIsCurrent checks the counts wherever they
@@ -90,8 +100,9 @@ func TestEveryDocumentStatingTheSplitIsCurrent(t *testing.T) {
 				"why this matters: the gap between capabilities and agent tools is a "+
 				"security boundary, and a stale count is a claim the reader cannot "+
 				"verify.\n"+
-				"what to do: correct the number in %s. It drifted because only "+
-				"docs/design was test-guarded; this test now covers this file too.",
+				"what to do: correct the number in %s, and check the rest of that "+
+				"file for the same figure written a second way -- only the first "+
+				"statement in each document is read here.",
 				path, got, total, path)
 		}
 

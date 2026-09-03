@@ -80,6 +80,9 @@ func main() {
 	case "why":
 		cmdWhy(args[1:])
 		return
+	case "design":
+		cmdDesign(args[1:])
+		return
 	case "blueprint":
 		if len(args) > 1 && args[1] == "validate" {
 			cmdBlueprintValidate(args[2:])
@@ -220,11 +223,7 @@ func article(name string) string {
 func notImplemented(args []string) {
 	for n := len(args); n >= 1; n-- {
 		if c := surface.Lookup(args[:n]...); c != nil {
-			fmt.Fprintf(os.Stderr,
-				"arxi %s is declared in the surface but not implemented yet.\n\n"+
-					"  description: %s\n  tool:        %s\n  protocol:    %s\n  since:       surface v%d\n\n"+
-					"See the whole surface: arxi surface\n",
-				c.CLI(), c.Desc, c.Name(), c.ProtocolType(), c.Since)
+			fmt.Fprint(os.Stderr, notImplementedMessage(c))
 			os.Exit(2)
 		}
 	}
@@ -283,6 +282,32 @@ func notImplemented(args []string) {
 	os.Exit(2)
 }
 
+// notImplementedMessage is the wording of that answer, split out from the
+// printing of it.
+//
+// The split is here for a test, and the test needed it because the surface is
+// now fully built. Checking this wording used to mean running the binary
+// against a path that really was unwired and reading what came back -- and
+// `design` was the last one. At 50 of 50 there is no path left to point that
+// check at, and a test that asserts a copy of the sentence instead is a test of
+// its own copy: it passes forever while the sentence it is guarding drifts.
+//
+// So the check reads the string from the function that prints it, and stays
+// exactly as strong as it was. What it can no longer prove on its own -- that
+// main's fallback still arrives here at all -- is proved next to it, by a
+// subcommand that is misspelled rather than unbuilt: only this function answers
+// that, and it answers with a different sentence.
+//
+// The day surface v-next declares something before it is wired, both halves
+// keep working, and neither has to be remembered.
+func notImplementedMessage(c *surface.Cmd) string {
+	return fmt.Sprintf(
+		"arxi %s is declared in the surface but not implemented yet.\n\n"+
+			"  description: %s\n  tool:        %s\n  protocol:    %s\n  since:       surface v%d\n\n"+
+			"See the whole surface: arxi surface\n",
+		c.CLI(), c.Desc, c.Name(), c.ProtocolType(), c.Since)
+}
+
 func usage() {
 	fmt.Print(`arxi - agent systems you can actually debug
 
@@ -293,6 +318,7 @@ IMPLEMENTED TODAY
   schema                     emit the surface manifest (JSON)
   surface                    see the whole surface, human readable
   why <file>                 explain why a run is not advancing
+  design                     compose a team on screen from the agents you have
   blueprint validate <file>  check a blueprint and print the resolved config
   blueprint create <name>    compose stored agents into a team: --members a,b
   blueprint install <ref>    install a blueprint from a path or https URL: --as
@@ -331,9 +357,10 @@ SHORT FLAGS
 
   arxi surface --flags       the whole assignment, and what each letter reaches
 
-The rest of the surface is declared and verified by tests, but is not wired to a
-command yet. 'arxi surface' lists everything that is going to exist, and asking
-for one of those says so by name rather than calling it unknown.
+Every capability 'arxi surface' declares is now wired to a command. This page is
+the short list; 'arxi surface' is the whole one, and it names the protocol
+message and the tool name for each. Something declared by a later surface version
+and not built yet says so by name rather than calling itself unknown.
 
 'run start' calls real models. It resolves each member's model against the
 registered providers and charges --budget from the tokens they report, so a
