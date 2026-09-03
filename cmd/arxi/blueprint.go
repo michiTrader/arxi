@@ -451,16 +451,7 @@ func cmdBlueprintValidate(args []string) {
 // something the user can check, and it is the difference between accepting the
 // isolation and overriding it because it looked arbitrary.
 func workspaceReason(c kernel.Config) string {
-	var writers []string
-	for _, m := range c.Members {
-		for _, t := range m.Tools {
-			if t == "write" || t == "bash" || t == "edit" {
-				writers = append(writers, m.Name)
-				break
-			}
-		}
-	}
-	sort.Strings(writers)
+	writers := writeCapableMembers(c)
 
 	switch {
 	case len(writers) == 0:
@@ -471,6 +462,30 @@ func workspaceReason(c kernel.Config) string {
 		return "resolved: " + strings.Join(writers[:len(writers)-1], ", ") +
 			" and " + writers[len(writers)-1] + " can write"
 	}
+}
+
+// writeCapableMembers names the members that can change something outside the
+// conversation, sorted.
+//
+// The write/bash/edit trio is the same test ResolveDefaults uses to pick
+// `worktree` (internal/kernel/config.go: the loop that sets out.Workspace), and
+// two callers need it for different sentences: workspaceReason explains why the
+// isolation was chosen, and `blueprint install` warns that these are the members
+// a file from somewhere else may run. Extracted rather than copied so the two
+// sentences cannot come to disagree about which grants count as writing -- a
+// fourth write-capable tool would otherwise be added to one of them.
+func writeCapableMembers(c kernel.Config) []string {
+	var writers []string
+	for _, m := range c.Members {
+		for _, t := range m.Tools {
+			if t == "write" || t == "bash" || t == "edit" {
+				writers = append(writers, m.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(writers)
+	return writers
 }
 
 // humanMs renders a duration the way the user wrote it in their head.
