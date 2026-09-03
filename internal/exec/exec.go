@@ -343,6 +343,10 @@ func (r *Runner) runSnapshot(v kernel.Snapshot, res *Result) {
 // and the tool call has already touched the filesystem. Dropping their events
 // would leave the log describing a world that does not exist, which is the one
 // thing the log is not allowed to do.
+//
+// A failing SpawnTurn does, however, owe the log one event of its own. See
+// turnFailure: the reducer records a commissioned turn on the member, and only
+// the log can close it.
 func (r *Runner) runIndependent(ctx context.Context, fx []kernel.Effect, res *Result) {
 	if len(fx) == 0 {
 		return
@@ -387,8 +391,66 @@ func (r *Runner) runIndependent(ctx context.Context, fx []kernel.Effect, res *Re
 			}
 		}
 		if outcomes[i].err != nil {
+			if ev := turnFailure(fx[i], outcomes[i].events, outcomes[i].err); ev != nil {
+				written, err := r.Log.Append(r.stamp(attribute(fx[i], []kernel.Event{*ev})))
+				if err != nil {
+					res.Errs = append(res.Errs, fmt.Errorf("append the failure of %T: %w", fx[i], err))
+				} else {
+					res.Events = append(res.Events, written...)
+				}
+			}
 			res.Errs = append(res.Errs, outcomes[i].err)
 		}
+	}
+}
+
+// turnFailure is the agent.failed event a commissioned turn owes the log when it
+// could not be delivered, or nil when the effect owes nothing.
+//
+// It exists because the reducer now records a commissioned turn on the member
+// (kernel.Member.TurnOpen, set by spawnFor) and clears it on agent.turn_done. A
+// SpawnTurn that returns an error without one leaves that marker set for the rest
+// of the run, so Busy() stays true, quiescence can never fire again and a genuine
+// stall later on goes unreported. Result.Errs cannot close it: Errs belongs to one
+// step and dies with the process, while the state is rebuilt by folding the log,
+// so anything the state must survive has to BE in the log. agent.failed was
+// already declared, catalogued (spec/events.md) and reduced to MemberFailed
+// (internal/kernel/decide.go) with nothing emitting it; this is the emitter
+// docs/design/10-execution.md said it was waiting for.
+//
+// The condition is "no agent.turn_done among the events it did produce", not "no
+// events at all". A turn that wrote agent.activated and then died is the same
+// disease -- a member the reducer believes is working, with a turn that can never
+// close -- and a refusal that legitimately returns llm.response{ok:false} plus
+// turn_done has already closed its own turn and must NOT be marked failed, since
+// MemberFailed takes the member out of every later stage.
+//
+// Only SpawnTurn. A CallTool or AskHuman that fails strands nothing in the state:
+// the member is left where it was, and the reducer's own timers and blocks still
+// apply. Inventing an event for those would be writing a guess into the log,
+// which is the rule this stays inside rather than an exception to it -- the fact
+// recorded here is that a turn this run commissioned did not happen, not any
+// claim about what the agent did.
+func turnFailure(fx kernel.Effect, produced []kernel.Event, cause error) *kernel.Event {
+	st, ok := fx.(kernel.SpawnTurn)
+	if !ok {
+		return nil
+	}
+	for _, e := range produced {
+		if e.Type == kernel.AgentTurnDone {
+			return nil
+		}
+	}
+	return &kernel.Event{
+		Type:   kernel.AgentFailed,
+		Source: kernel.SourceRuntime,
+		Actor:  st.Agent,
+		// The payload key is `error`, which is what the catalogue promises and what
+		// the reducer reads into Member.Detail -- so this text is what `run show`
+		// and `run why` put in front of the operator. The provider's message is
+		// carried verbatim: "503 from the provider" is the whole diagnosis, and a
+		// summary of it would send somebody to the wrong page.
+		Payload: map[string]any{"agent": st.Agent, "error": cause.Error()},
 	}
 }
 

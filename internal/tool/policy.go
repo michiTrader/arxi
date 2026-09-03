@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -46,24 +47,34 @@ var Mutating = map[string]bool{
 // so, rather than silently granting a tool that will fail at the moment it is
 // first needed, which is halfway through a paid run.
 //
-// The value carries no meaning: it is a set, and every entry is true. An
-// earlier version of this comment said the value recorded "whether each
-// mutates", which is what Mutating above is for. A reader who trusted it would
-// have concluded that read and grep mutate, and looked for an approval gate on
-// a search. Membership is the only question this map answers.
-var Known = map[string]bool{
-	"read":  true,
-	"grep":  true,
-	"write": true,
-	"edit":  true,
-	"bash":  true,
+// The entries come from kernel.KnownTools rather than being written again here.
+// They were written twice for exactly as long as it took the blueprint loader to
+// need the same answer, and a second copy of a closed list is only ever one
+// commit away from being a different closed list -- with the difference showing
+// up as a grant the loader accepts and this package resolves as if it named
+// nothing.
+//
+// The shape is still a set, because that is what callers ask it: membership. An
+// earlier version of this comment said the value recorded "whether each mutates",
+// which is what Mutating above is for. A reader who trusted it would have
+// concluded that read and grep mutate, and looked for an approval gate on a
+// search. Membership is the only question this map answers.
+var Known = knownSet()
+
+func knownSet() map[string]bool {
+	m := make(map[string]bool, len(kernel.KnownTools))
+	for _, t := range kernel.KnownTools {
+		m[t] = true
+	}
+	return m
 }
 
 // Resolve returns the effective policy for one tool on one agent.
 //
-// The three rules the design commits to, in the order they apply:
+// The four rules the design commits to, in the order they apply:
 //
 //	a tool not granted to the agent  -> deny
+//	a granted name that is not Known -> deny
 //	a granted tool that mutates      -> ask
 //	a granted tool that reads        -> allow
 //
@@ -73,13 +84,29 @@ var Known = map[string]bool{
 // never allow by default for the same reason: if an agent can change the world
 // without asking, that has to be a written decision.
 //
-// Overrides are consulted first and can say allow for a mutating tool, because
-// `arxi agent tool policy --agent backend --allow bash` is a real command in the
-// surface and the person typing it is making exactly that written decision. An
-// override cannot grant a tool the agent was never given, though -- that would
-// make the grant list decorative.
+// The Known check is why the second rule exists, and it is not defensive
+// tidiness. Mutating is a closed list, so anything absent from it read as a
+// reader and fell through to allow: `tools: [bahs]` resolved to ALLOW while
+// `bash` resolved to ASK. A one-character typo did not disable the tool, it
+// disabled the approval gate on the tool -- and it did so invisibly, because
+// `arxi agent show` printed a policy for the misspelled name as if it were real.
+// Resolving to deny instead means the worst a typo can do is refuse work.
+//
+// It sits before the override consult, not after, because an overrides file is
+// hand-edited and `--allow bahs` must not be able to resurrect a name that has
+// no implementation behind it. Overrides pick between the policies that apply to
+// a real tool; they are not a second grant list.
+//
+// Overrides are otherwise consulted first and can say allow for a mutating tool,
+// because `arxi agent tool policy --agent backend --allow bash` is a real
+// command in the surface and the person typing it is making exactly that written
+// decision. An override cannot grant a tool the agent was never given, though --
+// that would make the grant list decorative.
 func Resolve(granted []string, overrides map[string]surface.Policy, name string) surface.Policy {
 	if !hasTool(granted, name) {
+		return surface.PolicyDeny
+	}
+	if !Known[name] {
 		return surface.PolicyDeny
 	}
 	if p, ok := overrides[name]; ok {

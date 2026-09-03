@@ -306,6 +306,199 @@ conflating those two states is what made the first implementation never detect
 quiescence at all (§10.4). Here that distinction is what tells you the run is
 correctly waiting on `backend` rather than stalled.
 
+### The default that IS asked for
+
+`team.yaml` above writes `role: implementer` twice, and beside it almost the same
+tool grant twice. `arxi role define` is where that pair stops being retyped:
+
+```
+$ arxi role define implementer --tools read,write,bash
+role implementer defined (tools: bash (ask), read (allow), write (ask))
+  file:   roles/implementer.json
+  note:   copied into an agent as it is created, so redefining this role
+          later changes nothing that already named it. that is deliberate:
+          a run is judged by the rules frozen when it started.
+  use it: arxi agent create <name> --role implementer --model <id>
+
+$ arxi agent create backend --model claude-sonnet-4-6 --role implementer
+agent backend created (tools: bash (ask), read (allow), write (ask))
+  file:   agents/backend.yaml
+  role:   implementer supplied the tool grant (roles/implementer.json).
+          copied as this agent was written, so redefining the role later
+          will not change this one.
+  run it: arxi run start backend "<objective>" --budget 5.00
+```
+
+**A role is read by exactly one thing: `arxi agent create --role`.** The `role:`
+line in `team.yaml` is not affected by any of this, and that is deliberate rather
+than unfinished — see the note on copying below. A role holds two fields, the tool
+grant and `advisory`, because those are the two that are a house style rather than
+a property of the individual. The model is not one of them: `--model` is the field
+most likely to differ between two agents that do the same job, and putting it in a
+role would make `--role` the wrong place to change it.
+
+Three properties are worth stating, because each is a thing a reader will
+otherwise assume the other way round.
+
+**An explicit flag wins, and the command says which fields the role actually
+supplied.** A role that was named but had nothing left to contribute is reported,
+not passed over in silence — otherwise it is indistinguishable from a role that
+was ignored:
+
+```
+$ arxi agent create frontend --model claude-sonnet-4-6 --role implementer --tools read,write
+agent frontend created (tools: read (allow), write (ask))
+  file:   agents/frontend.yaml
+  role:   implementer is defined and supplied nothing: the command line already
+          named every field it sets, and an explicit flag wins.
+  run it: arxi run start frontend "<objective>" --budget 5.00
+```
+
+**The defaults are copied into `agents/<name>.yaml` as it is written, and never
+read again.** Redefining `implementer` tomorrow changes nothing that already named
+it; deleting `roles/` entirely leaves every stored agent runnable. This follows
+from ADR-0001: `run start` freezes the blueprint into
+`runs/<id>/blueprint.snapshot.yaml`, so a role resolved at run time would put part
+of a run's rules outside the snapshot, and a redefinition could silently change an
+agent that had already been reviewed and approved. The copy is what makes
+redefining safe.
+
+**A role nobody defined is a note, not a refusal.** `role:` is a free-form label
+that the reducer reads — it picks the steer target by `role == coordinator` and
+builds each member's identity from it — and the blueprints in this tree name roles
+nothing defines. Refusing an unknown one would break files that are already
+correct, so the name is stored and the roles that do exist are printed beside it:
+
+```
+$ arxi agent create qa --model claude-sonnet-4-6 --role reviewr --tools read
+agent qa created (tools: read (allow))
+  file:   agents/qa.yaml
+  role:   reviewr is not defined, so no defaults were applied. that is not
+          an error: `role:` is a free-form label, and the blueprints in this
+          tree name roles nobody defined. it is how a misspelling shows up.
+          defined: implementer, reviewer
+  run it: arxi run start qa "<objective>" --budget 5.00
+```
+
+That list is the whole value of registering a name that carries no defaults:
+`--role reviewr` goes from an accepted string to a visible typo. A role file that
+exists and cannot be used — unparseable JSON, or a grant naming a tool that does
+not exist — is the opposite case and refuses with exit 1, leaving no agent behind,
+because there the user asked for defaults that cannot be applied.
+
+`roles/<name>.json` is also the only way to read a role back: the surface declares
+no `role list` and no `role show`. It is written 0644, where `providers/` is 0600 —
+a role is a default a team commits and reviews, not a credential.
+
+### Composing the team, instead of writing it
+
+The `team.yaml` at the top of this section was typed by hand, and its three members
+are the three agents the previous subsection just created. `arxi blueprint create`
+is what turns the second thing into the first:
+
+```
+$ arxi blueprint create feature-team --members backend,frontend,security
+blueprint feature-team created: a team of 3
+  file:   agents/feature-team.yaml
+  - backend: tools: bash (ask), read (allow), write (ask)
+      claude-sonnet-4-6, implementer, counts toward advance
+      copied from agents/backend.yaml
+  - frontend: tools: read (allow), write (ask)
+      claude-sonnet-4-6, implementer, counts toward advance
+      copied from agents/frontend.yaml
+  - security: tools: read (allow)
+      claude-sonnet-4-6, reviewer, advisory
+      copied from agents/security.yaml
+  stages: work  (the default -- no --stages, so one stage and everybody in it)
+  note:   security is advisory: no turn at stage entry and no vote in the
+          advance rule, so each stage advances when backend and frontend have submitted.
+  run it: arxi run start feature-team "<objective>" --budget 5.00
+  edit it: it is an ordinary blueprint -- add a watcher, a timeout, or
+           advance_when: quorum:2, then arxi blueprint validate agents/feature-team.yaml
+```
+
+The team lands in `agents/`, beside the files it was composed from, and is a file
+of the same kind: `agent list` shows it, `run start feature-team` runs it,
+`blueprint validate` checks it after an edit. A one-member blueprint was always a
+blueprint; this is the same shape with three members in it.
+
+Three lines of that screen are the ones worth their width.
+
+**The grants are resolved, per member.** `--tools read,write,bash` looks like three
+equal grants and two of them resolve to `ask`. One agent's worth of that surprise is
+survivable; three members composed on three different days is the same surprise
+three times over, and this is the first screen where all of them stand together.
+
+**Every line names the file its member came from.** That is the one thing the screen
+knows which the new file does not record, because members are **copied, not
+referenced** — the same decision as roles above, for the same reason: `run start`
+freezes the blueprint into `runs/<id>/blueprint.snapshot.yaml` and hashes it
+(ADR-0001, ADR-0002), so a reference would leave part of a run's rules outside the
+sha that is meant to be the whole of it. Editing `agents/backend.yaml` tomorrow
+changes that agent and no team already composed from it.
+
+**The note does the advance arithmetic.** `advance_when: all` over three members one
+of whom is advisory does not mean three, it means backend and frontend. The rule is
+in the file; the count it resolves to is not, so the count is printed.
+
+Copying is also what makes the refusals matter: nothing revisits
+`agents/backend.yaml` afterwards, so composition is the only moment a team can be
+checked against the files it is made of. A member that is itself a team is refused
+rather than spliced in, and the refusal prints the `--members` line that names its
+members instead. Two members resolving to one name is refused naming both files,
+because the name inside a file need not match the filename and the collision is
+invisible on the command line. A member whose own `stages:` list names none of the
+team's is refused before anything is written — it would otherwise be a team that
+runs, spends, and activates that member in no stage at all. All three exit 2 and
+leave `agents/` untouched; `cmd/arxi/blueprint_cli_test.go` walks each one at
+process level.
+
+What comes out is not quite the `team.yaml` this section opened with. Set them side
+by side: the members are the same and the stages are not.
+
+```
+$ arxi blueprint validate agents/feature-team.yaml
+blueprint feature-team is valid (1 stages, 3 members)
+  workspace: worktree  (resolved: backend and frontend can write)
+  stage work: advance_when=all on_timeout=escalate
+  security is advisory: gives an opinion, does not count toward advance rules
+  sha: 70db35843708
+```
+
+`--stages build,review` closes half the distance: two stages instead of one, in
+order, every member in both. What no flag renders is `timeout_ms`, `quorum:2` or
+`interaction.steer_target` — and that is a decision, not an unfinished command. A
+flag per blueprint field is a second, worse YAML with a `--` in front of every key,
+and the file it would be competing with is already on disk. So the screen's last
+line is `edit it:` and it names the verb that checks the edit.
+
+The `workspace:` line is what composing buys over writing. Nobody typed it: the run
+of the hand-written team above passed `--workspace worktree` on the command line,
+and here it is resolved from `backend` and `frontend` holding `write` — the default
+this section has already argued is not optional. Started as the screen suggests, the
+team runs and stops where the rule says:
+
+```
+$ arxi run start feature-team "implement rate limiting on /api/login" \
+    --budget 20.00 --sim --run-id r1
+run r1 started (budget 20.00 USD, workspace auto→worktree)
+run r1 succeeded (seq 11, stopped by reaching a terminal status)
+  stage:  work
+  turns:  2
+  spent:  0.0200 of 20.0000 USD in the tree
+```
+
+Two turns, not three, and `run show r1` says which member did not take one:
+
+```
+  backend   submitted  (submitted)   role implementer, 1 turn, 0.01 USD
+  frontend  submitted  (submitted)   role implementer, 1 turn, 0.01 USD
+  security  inactive   (advisory)    role reviewer
+```
+
+Which is the reading this section began with, three transcripts earlier and on a
+file nobody wrote by hand: `inactive` is not idle, and `submitted` is not available.
+
 ---
 
 ## 20.5 UC-5 — Steering a run without restarting it
@@ -518,17 +711,24 @@ a crash; the release is how the normal case stays fast.
 $ arxi state unlock r1 migrations/ --force
 run r1 released migrations/ (seq 47)
   taken from backend, whose lease ran to 2026-08-26T14:11:00Z and had not run
-  out: recorded as "forced", and the log names this shell as the one that ended it
+  out: recorded as "forced", with previous_holder naming them. The event does
+  not record who ended it -- every release from a shell folds to holder
+  "human" -- so if that matters here, say it somewhere the log keeps
   frontend is blocked on migrations/ and is NOT woken by this: ...
 ```
 
 `--force` is needed in exactly one case: a lease that has **not** lapsed and
 belongs to somebody else. Ending work in flight is a decision, so it has to be
-spelled and it is recorded as one — the release carries
-`previous_holder: "backend"` and `reason: "forced"`, and `arxi event log r1
---type lock.*` says who ended it. A lease that has already lapsed needs no flag
-and is recorded as `expired`, with `expired_at` as the evidence for the judgement;
-the holder releasing its own key is neither.
+spelled, and the release records what it cost somebody: `previous_holder:
+"backend"` and `reason: "forced"`, which is how the member that lost the key
+learns a decision took it rather than a clock. It does **not** record whose
+decision. `Actor` is left empty on lock events on purpose — `wakeWatchers` skips
+a watcher whose agent equals the actor, so naming the caller would silently
+disable that caller's own `lock.*` watcher — and an empty actor folds to holder
+`"human"` for every forced release. Treat that as a known gap rather than a
+property: it is closable by a payload field that is not `Actor`. A lease that has
+already lapsed needs no flag and is recorded as `expired`, with `expired_at` as
+the evidence for the judgement; the holder releasing its own key is neither.
 
 The reducer does not check who releases, and that is the design rather than a gap:
 a release honoured only from its own holder could never reclaim the key of an
@@ -791,10 +991,12 @@ so there is no way to declare a flag the CLI has and an agent does not. It is
 `allow` anyway for the reason §20.8 opens with — a release only a human can
 perform means every agent lock runs to its full expiry, so the crashed-holder
 stall returns for every early finish — and what makes that tolerable is that the
-authority is **not deniable**: the release records `previous_holder` and
-`reason: "forced"`, so `arxi event log <run> --type lock.*` names who broke whose
-lease. `ask` was the alternative and was rejected because the common case,
-releasing a lock you hold yourself, would then cost a human approval every turn.
+loss is **visible**: the release records `previous_holder` and
+`reason: "forced"`, so `arxi event log <run> --type lock.*` shows whose lease
+ended and that a decision rather than a clock ended it. It does not show whose
+decision; §20.8 says why `Actor` cannot be the field that fixes it. `ask` was the
+alternative and was rejected because the common case, releasing a lock you hold
+yourself, would then cost a human approval every turn.
 
 The general rule: an agent may do things **inside** a run, and may not change the
 rules the run is judged by. `state set` is a tool and `agent tool policy` is not,

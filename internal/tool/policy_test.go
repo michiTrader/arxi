@@ -78,6 +78,57 @@ func TestAnOverrideCannotGrantAToolTheAgentNeverHad(t *testing.T) {
 	}
 }
 
+// TestATypoInAGrantIsDeniedRatherThanAllowed protects the rule that costs the
+// most to get wrong, because getting it wrong looks like nothing.
+//
+// Mutating is a closed list. Before the Known check existed, a granted name
+// absent from that list fell through to allow as if it were a reader, so
+// `tools: [bahs]` resolved to ALLOW while `bash` resolved to ASK. The typo did
+// not disable the tool; it disabled the approval gate on the tool. Nothing
+// surfaced it either: `agent show` printed a policy for the misspelling as
+// though it named something real, and the run only failed later, at the moment
+// the model asked for the tool, after the turn that produced the call was paid
+// for.
+//
+// If this fails, an unrecognised grant is being treated as a harmless read
+// again. The remedy is the Known check in Resolve, which must stay before the
+// override consult -- see the sibling test for why.
+func TestATypoInAGrantIsDeniedRatherThanAllowed(t *testing.T) {
+	for _, typo := range []string{"bahs", "reed", "writ", "arxi_state_unlock", ""} {
+		got := Resolve([]string{typo}, nil, typo)
+		if got != surface.PolicyDeny {
+			t.Errorf("granted but unknown tool %q = %q, want deny\n"+
+				"  consequence: %q is not in Mutating, so it reads as a reader and "+
+				"resolves to allow -- a one-character typo silently turns an "+
+				"approval gate into a pre-approval.\n"+
+				"  remedy: keep the `if !Known[name]` check in Resolve.", typo, got, typo)
+		}
+	}
+}
+
+// TestAnOverrideCannotResurrectAnUnknownTool pins the ORDER of the Known check,
+// which is the part a later reader is most likely to shuffle.
+//
+// An overrides file is hand-edited, and `--allow bahs` would otherwise hand back
+// exactly what the Known check was added to take away -- with a written decision
+// attached to it, which is worse, because it looks reviewed. Overrides pick
+// between the policies that apply to a real tool; they are not a second grant
+// list. Moving the check after the override lookup compiles, keeps every other
+// test in this file green, and reopens the hole.
+func TestAnOverrideCannotResurrectAnUnknownTool(t *testing.T) {
+	for _, p := range []surface.Policy{surface.PolicyAllow, surface.PolicyAsk} {
+		over := map[string]surface.Policy{"bahs": p}
+		got := Resolve([]string{"bahs"}, over, "bahs")
+		if got != surface.PolicyDeny {
+			t.Errorf("unknown tool bahs with override %q = %q, want deny\n"+
+				"  consequence: the Known check has been moved after the override "+
+				"lookup, so a hand-edited overrides file can grant a name with no "+
+				"implementation behind it.\n"+
+				"  remedy: the check belongs immediately after the grant check.", p, got)
+		}
+	}
+}
+
 // TestAnOverrideCanTightenAsWellAsLoosen: policy is not a one-way ratchet.
 func TestAnOverrideCanTightenAsWellAsLoosen(t *testing.T) {
 	over := map[string]surface.Policy{"read": surface.PolicyAsk}
@@ -265,5 +316,46 @@ func TestKnownIsASetAndMutatingIsTheAnswerAboutMutation(t *testing.T) {
 			"  Mutating is meant to be a strict subset; if it is not, the two maps "+
 			"answer the same question and one of them is redundant",
 			len(Mutating), len(Known))
+	}
+}
+
+// TestKnownIsTheKernelsListAndNotACopyOfIt.
+//
+// Known is built from kernel.KnownTools because the blueprint loader needs the
+// same closed list and cannot import this package -- internal/arch_test.go holds
+// the loader to kernel-only dependencies, and this package pulls in
+// internal/surface. So the kernel is the single declaration and this is a view of
+// it.
+//
+// What this catches is the repair that looks harmless: someone restores the
+// literal map here, everything compiles, every other test in this file passes,
+// and the two lists are now free to drift. They drift in one direction that
+// matters -- a tool the kernel knows and this package does not is a grant the
+// loader accepts and Resolve denies, so the blueprint is valid and the agent
+// silently cannot use what it was granted.
+func TestKnownIsTheKernelsListAndNotACopyOfIt(t *testing.T) {
+	if len(Known) != len(kernel.KnownTools) {
+		t.Errorf("Known has %d entries, kernel.KnownTools has %d\n"+
+			"  consequence: the two lists have drifted, which means a grant is "+
+			"accepted by one layer and refused by the other with no message tying "+
+			"them together.\n"+
+			"  remedy: Known must stay derived from kernel.KnownTools.",
+			len(Known), len(kernel.KnownTools))
+	}
+	for _, name := range kernel.KnownTools {
+		if !Known[name] {
+			t.Errorf("kernel.KnownTools lists %q and Known does not\n"+
+				"  consequence: `blueprint validate` accepts the grant and Resolve "+
+				"denies it, so the member holds a tool it can never call and nothing "+
+				"reports the contradiction.", name)
+		}
+	}
+	for name := range Known {
+		if !kernel.ToolIsKnown(name) {
+			t.Errorf("Known lists %q and kernel.KnownTools does not\n"+
+				"  consequence: the loader refuses a grant this package would allow, "+
+				"so the tool is unreachable from a blueprint -- which is the only way "+
+				"a run gets one.", name)
+		}
 	}
 }

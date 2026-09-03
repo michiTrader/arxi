@@ -11,6 +11,7 @@ import (
 	"github.com/michiTrader/arxi/internal/agentstore"
 	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/rolestore"
 	"github.com/michiTrader/arxi/internal/surface"
 	"github.com/michiTrader/arxi/internal/tool"
 	"github.com/michiTrader/arxi/internal/toolstore"
@@ -66,7 +67,9 @@ const agentUsage = "usage: arxi agent create <name> [--model M] [--role R] [--to
 	"       arxi agent tool policy --agent <name> [--allow <tool>] [--ask <tool>]\n" +
 	"                              [--deny <tool>] [--reset <tool>]\n" +
 	"  an agent is a blueprint with one member, stored in " + agentstore.DefaultDir + "/<name>.yaml.\n" +
-	"  edit it by hand to grow it into a team: arxi blueprint validate checks it.\n"
+	"  edit it by hand to grow it into a team: arxi blueprint validate checks it.\n" +
+	"  --role names a role from `arxi role define`, whose defaults fill the flags you\n" +
+	"  leave out; they are copied in as the agent is written, not looked up later.\n"
 
 // cmdAgent routes the agent subcommands.
 //
@@ -130,9 +133,14 @@ func cmdAgentCreate(args []string) {
 		Name:     vals["name"],
 		Model:    vals["model"],
 		Role:     vals["role"],
-		Tools:    splitTools(vals["tools"]),
+		Tools:    splitCSV(vals["tools"]),
 		Advisory: vals["advisory"] == "true",
 	}
+	// The role is applied BEFORE Validate, so the record that is checked is the
+	// record that will be written. The other order looks equivalent and is not: it
+	// would let a role-supplied field reach the store without passing the one gate
+	// this function claims covers everything the user is about to commit.
+	rd := applyRole(&r, vals["role"])
 	if err := r.Validate(); err != nil {
 		// Checked before the store is touched, following `agent tool policy`: an
 		// unknown tool is the invocation being wrong, not the filesystem. The tool
@@ -158,7 +166,147 @@ func cmdAgentCreate(args []string) {
 		// Exit 1: the invocation was fine and the filesystem refused.
 		os.Exit(1)
 	}
-	printAgentCreated(r, path)
+	printAgentCreated(r, path, rd)
+}
+
+// roleDefaults records what a `--role` contributed, for the message printed after.
+//
+// Carried rather than recomputed, because "what did the role supply" cannot be
+// read back off the finished record: an agent with `tools: [read]` looks identical
+// whether the user typed `--tools read` or a role did, and the whole reason to say
+// so is that the second one came out of a file the user is not looking at.
+type roleDefaults struct {
+	name        string   // the role that was named, defined or not
+	found       bool     // it is defined
+	hasDefaults bool     // it defines something -- an empty role is legal
+	tools       bool     // the tool grant came from it
+	advisory    bool     // it is what made this agent advisory
+	path        string   // the file it came from
+	defined     []string // what IS defined, when the named role is not
+}
+
+// applyRole fills the fields the user left blank from a defined role.
+//
+// Resolved here, at create time, and copied into the agent's YAML: the rendered
+// file records the outcome and carries no reference back to roles/. rolestore's
+// package doc argues that at length -- a `role:` meaning "read roles/reviewer.json
+// when the run starts" would put part of a run's rules outside the snapshot
+// `run start` freezes, so redefining a role would silently change agents somebody
+// reviewed months earlier. The consequence here is the one worth printing: a role
+// reaches the agents created after it and no others.
+//
+// An undefined role is a NOTE and not a refusal. `role:` is a free-form string
+// that predates this store by the whole history of the tree: kernel.Decide picks
+// the steer target by Role == "coordinator", builds each member's identity as
+// "name (role)", and every blueprint in examples/ names roles nothing has ever
+// defined. Refusing an unknown one would make `role define` a prerequisite for a
+// field that never had one, and would break those files. Saying it is still worth
+// the line -- it is the only spelling check `--role` can offer, which is the whole
+// argument for letting an empty role be defined at all.
+//
+// A role that IS defined and does not load is exit 1, because the opposite choice
+// loses something the user asked for: it would write an agent missing the defaults
+// they named the role to get, and the only sign would be a note in output they
+// have already scrolled past.
+func applyRole(r *agentstore.Record, name string) roleDefaults {
+	rd := roleDefaults{name: name}
+	if strings.TrimSpace(name) == "" {
+		return rd
+	}
+
+	st := readRoles()
+	rec, err := st.Load(name)
+	if errors.Is(err, rolestore.ErrNotExist) {
+		// The error from Names is dropped, and the note degrades to "none defined".
+		// Load has just answered ErrNotExist, which means the read got as far as a
+		// missing file, so the directory is readable or absent -- and neither is
+		// worth failing a create over when the agent is about to be written anyway.
+		rd.defined, _ = st.Names()
+		return rd
+	}
+	if err != nil {
+		// The second line says why a bad role file stops a create rather than
+		// degrading to one, and it deliberately does not repeat rolestore's own
+		// "text a human can edit" -- that sentence is already on screen directly
+		// above for a parse failure, and printing it twice reads as a machine
+		// padding out an error it does not understand.
+		fmt.Fprintf(os.Stderr, "arxi agent create: %v\n", err)
+		fmt.Fprint(os.Stderr, "  no agent was written: --role names that file, so its defaults are part\n"+
+			"  of this agent. fix it, or leave --role out and type the fields yourself.\n")
+		os.Exit(1)
+	}
+	rd.found = true
+	rd.path = st.Path(name)
+	rd.hasDefaults = len(rec.Tools) > 0 || rec.Advisory
+
+	// An explicit --tools wins, and the role only fills a blank: a flag typed just
+	// now beats a file written last week. Note what cannot be spelled -- `--tools
+	// ""` is indistinguishable from an absent flag after parseInvocation, and the
+	// declaration has no negation, so an agent that must NOT have the role's grant
+	// does not name the role.
+	//
+	// Nothing re-validates rec.Tools, and that is not an omission: rolestore.Load
+	// runs the same tool.ValidateGrants on the way in, so a name that reaches here
+	// has already passed the check r.Validate is about to repeat. It is also why
+	// Load validates at all -- refused there, the message can name the role's file;
+	// refused here, it would blame a `--tools` flag the user never typed.
+	if len(r.Tools) == 0 && len(rec.Tools) > 0 {
+		r.Tools = rec.Tools
+		rd.tools = true
+	}
+
+	// Advisory is OR'd rather than assigned, and the asymmetry is real: --advisory
+	// can only add the trait, so an advisory role cannot be declined for one agent.
+	// `role define --advisory` prints that, and printAgentCreated says it again in
+	// the caveat, because the consequence is an agent that never takes a turn.
+	if rec.Advisory && !r.Advisory {
+		r.Advisory = true
+		rd.advisory = true
+	}
+	return rd
+}
+
+// printRoleInherited says what the role gave this agent, and where it came from.
+//
+// Printed for a defined role that supplied nothing, too. A role is defaults for
+// flags the user did not type, so `--role auditor --tools read` legitimately
+// inherits nothing at all, and silence there is indistinguishable from the role
+// having been ignored -- which is the bug this line would be the only way to see.
+func printRoleInherited(rd roleDefaults) {
+	if rd.name == "" {
+		return
+	}
+
+	if !rd.found {
+		fmt.Printf("  role:   %s is not defined, so no defaults were applied. that is not\n"+
+			"          an error: `role:` is a free-form label, and the blueprints in this\n"+
+			"          tree name roles nobody defined. it is how a misspelling shows up.\n", rd.name)
+		if len(rd.defined) == 0 {
+			fmt.Printf("          no roles are defined yet: arxi role define %s --tools read\n", rd.name)
+		} else {
+			fmt.Printf("          defined: %s\n", strings.Join(rd.defined, ", "))
+		}
+		return
+	}
+
+	switch {
+	case rd.tools && rd.advisory:
+		fmt.Printf("  role:   %s supplied the tool grant and advisory (%s).\n", rd.name, rd.path)
+	case rd.tools:
+		fmt.Printf("  role:   %s supplied the tool grant (%s).\n", rd.name, rd.path)
+	case rd.advisory:
+		fmt.Printf("  role:   %s supplied advisory (%s).\n", rd.name, rd.path)
+	case !rd.hasDefaults:
+		fmt.Printf("  role:   %s is defined with no defaults, so nothing was applied --\n"+
+			"          the name alone is what makes a misspelling of it visible.\n", rd.name)
+		return
+	default:
+		fmt.Printf("  role:   %s is defined and supplied nothing: the command line already\n"+
+			"          named every field it sets, and an explicit flag wins.\n", rd.name)
+		return
+	}
+	fmt.Print("          copied as this agent was written, so redefining the role later\n" +
+		"          will not change this one.\n")
 }
 
 // printAgentCreated says what was written, where, and what to do next.
@@ -168,9 +316,15 @@ func cmdAgentCreate(args []string) {
 // read,write` looks like two equal grants, and `write` is mutating, so it comes
 // out `ask` and the run will stop for an approval the operator did not expect.
 // §20.2 prints it here for that reason.
-func printAgentCreated(r agentstore.Record, path string) {
+//
+// roleDefaults is threaded in rather than re-derived, because a field the role
+// supplied is indistinguishable from one the user typed by the time the record is
+// written -- and after `--role auditor` the grant on that first line may be one
+// nobody on this command line asked for.
+func printAgentCreated(r agentstore.Record, path string, rd roleDefaults) {
 	fmt.Printf("agent %s created (%s)\n", r.Name, grantSummary(r.Tools, overridesFor(r.Name)))
 	fmt.Printf("  file:   %s\n", path)
+	printRoleInherited(rd)
 
 	// The next step is printed with --model already in it when the agent has no
 	// model, rather than as advice next to a command that would fail. arxi
@@ -195,33 +349,52 @@ func printAgentCreated(r agentstore.Record, path string) {
 	// operator to a failed run to discover a property of --advisory that was known
 	// here, which is the same false promise as the missing stage: everything looks
 	// like it worked until the log says nothing happened.
+	//
+	// The role gets a second mention inside the caveat, having already had one
+	// above, for the case that earns it: an operator who typed no --advisory is
+	// reading a caveat about a flag they did not use, and the answer to "then turn
+	// it off" is that they cannot. There is no --no-advisory in the declaration, so
+	// the only way out is a different role or none.
 	if r.Advisory {
 		fmt.Printf("  caveat: advisory -- it answers when something wakes it and takes no "+
 			"turn on\n"+
 			"          its own, so `arxi run start %s` alone enters the stage,\n"+
-			"          activates nobody, and goes quiescent after zero turns.\n"+
-			"  use it: add this member to a blueprint that has one who works, plus a\n"+
-			"          watcher to wake it (see examples/feature-team.yaml).\n", r.Name)
+			"          activates nobody, and goes quiescent after zero turns.\n", r.Name)
+		if rd.advisory {
+			fmt.Printf("          the role is what made it advisory, and there is no " +
+				"--no-advisory:\n" +
+				"          an agent that must work names another role, or none.\n")
+		}
+		fmt.Print("  use it: add this member to a blueprint that has one who works, plus a\n" +
+			"          watcher to wake it (see examples/feature-team.yaml).\n")
 		return
 	}
 	fmt.Printf("  run it: %s\n", next)
 }
 
-// splitTools reads a `--tools a,b` value.
+// splitCSV reads a comma-separated flag value: `--tools a,b`, `--members a,b`,
+// `--stages build,review`.
 //
 // Empty entries are dropped instead of being passed through. `--tools read,` is a
 // trailing comma somebody typed, and grant validation would otherwise refuse it
 // with `unknown tool ""` -- an error naming a tool the user never wrote, about a
-// character they can barely see.
+// character they can barely see. `--members backend,` is the same typo with a
+// worse message: agentstore would report no agent named "".
 //
 // Whitespace is trimmed for the same reason: `--tools "read, grep"` is one shell
 // argument with a space in it, and refusing " grep" would be refusing a spelling
-// the shell handed over, not one the user chose.
+// the shell handed over, not one the user chose. It is also what makes `--members
+// "backend, frontend"` resolve, which is how a person types a list.
 //
-// Duplicates are kept. `--tools read,read` renders `tools: [read, read]`, which
-// the blueprint schema accepts and tool.Resolve answers identically for, so
-// there is nothing to protect against; ResolveAll de-duplicates for display.
-func splitTools(csv string) []string {
+// Duplicates are KEPT, and what happens to them is the caller's decision rather
+// than this function's. `--tools read,read` renders `tools: [read, read]`, which
+// the blueprint schema accepts and tool.Resolve answers identically for, so there
+// is nothing to protect against; ResolveAll de-duplicates for display. `--members
+// backend,backend` is a different matter -- two members with one name is a
+// blueprint the kernel cannot address -- and Team.Validate refuses it naming both
+// positions. Silently collapsing it here would turn a mistake into a team one
+// member smaller than the command line says.
+func splitCSV(csv string) []string {
 	var out []string
 	for _, t := range strings.Split(csv, ",") {
 		if t = strings.TrimSpace(t); t != "" {
@@ -264,12 +437,20 @@ func grantSummary(granted []string, overrides map[string]surface.Policy) string 
 // with today's default is still a file on disk that will keep applying if the
 // default changes, and it is still the thing `--reset` removes.
 //
-// `not a known tool` marks a name the runtime has no implementation for.
-// `agent create` refuses those, but a hand-edited `tools: [reed]` reaches here,
-// and every other layer stays silent about it: blueprint.Load takes any string
-// list, and ResolveAll answers `allow` for an unknown grant rather than failing.
-// So the operator's typo looks like a granted tool everywhere except at the
-// moment an agent calls it. This screen is where that is cheap to learn.
+// `not a known tool` marks a name the runtime has no implementation for. It was
+// the only warning once, and it is belt and braces now. `agent create` refused
+// such a name, but a hand-edited `tools: [reed]` reached this screen with nothing
+// else objecting: blueprint.Load took any string list, and ResolveAll answered
+// `allow` for a name outside the mutating set, so the typo read as a granted tool
+// everywhere except at the call -- after the turn that made the call was billed.
+//
+// Both of those are closed. The loader refuses the grant against
+// kernel.KnownTools, so no display path can be handed a name that is not in it,
+// and Resolve denies an unknown name rather than allowing it. Kept anyway because
+// tool.Known is a derived view of that same list, and this annotation is the
+// visible symptom if the derivation is ever replaced by a copy that drifts: the
+// line reads `reed (deny, not a known tool)`, which states what happened, rather
+// than a listing that silently disagrees with the loader that let it through.
 func grantList(granted []string, overrides map[string]surface.Policy) string {
 	if len(granted) == 0 {
 		return "none"

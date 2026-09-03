@@ -50,18 +50,24 @@ import (
 // rather than by running `arxi state lock`, per emit_cli_test.go -- a fixture built
 // with the code under test cannot distinguish a bug in the fixture from a bug in
 // the thing being measured.
-const ownLiveLock = `{"id":"e3","seq":3,"type":"lock.acquired","source":"human","payload":{"key":"migrations/","expires_at":"2099-01-01T00:00:00Z"}}
-`
-
-// The paused pairs put the halt AFTER the lock, at seq 4.
 //
-// pausedAt3 cannot be composed with the lock fixtures: it is seq 3 and so is every
-// one of them, and a log with two seq 3 rows is not one this binary would write --
-// logstore would refuse the second. Built by hand so the sequence stays honest.
-const ownLiveLockThenPaused = ownLiveLock + `{"id":"e4","seq":4,"type":"run.paused","payload":{}}
+// The turn_done at seq 5 is the same one the three locks in statelock_cli_test.go
+// carry, and for the reason given there: the acquire matches a lock.* watcher, so
+// it commissions security's turn, and a fixture that leaves it open answers every
+// release with "queued: security is mid-turn".
+const ownLiveLock = `{"id":"e4","seq":4,"type":"lock.acquired","source":"human","payload":{"key":"migrations/","expires_at":"2099-01-01T00:00:00Z"}}
+{"id":"e5","seq":5,"type":"agent.turn_done","actor":"security"}
 `
 
-const liveBackendLockThenPaused = liveBackendLock + `{"id":"e4","seq":4,"type":"run.paused","payload":{}}
+// The paused pairs put the halt AFTER the lock, at seq 6.
+//
+// pausedAt4 cannot be composed with the lock fixtures: it is seq 4 and so is every
+// acquire, and a log with two seq 4 rows is not one this binary would write --
+// logstore would refuse the second. Built by hand so the sequence stays honest.
+const ownLiveLockThenPaused = ownLiveLock + `{"id":"e6","seq":6,"type":"run.paused","payload":{}}
+`
+
+const liveBackendLockThenPaused = liveBackendLock + `{"id":"e6","seq":6,"type":"run.paused","payload":{}}
 `
 
 // blockedOnMigrations is the member this command must not claim to have freed.
@@ -72,7 +78,7 @@ const liveBackendLockThenPaused = liveBackendLock + `{"id":"e4","seq":4,"type":"
 // blueprint at run.started -- and agent.blocked does not halt the run, which is
 // budget.exceeded's job, so the run below is running and the outlook this drives is
 // the ordinary one.
-const blockedOnMigrations = `{"id":"e4","seq":4,"type":"agent.blocked","actor":"security","payload":{"blocked_on":"lock","blocked_ref":{"key":"migrations/"}}}
+const blockedOnMigrations = `{"id":"e6","seq":6,"type":"agent.blocked","actor":"security","payload":{"blocked_on":"lock","blocked_ref":{"key":"migrations/"}}}
 `
 
 // TestStateUnlockRefusesAKeyThatCouldNotMatchTheLockItNames.
@@ -148,7 +154,10 @@ func TestReleasingOurOwnLockIsRecordedWithoutCeremony(t *testing.T) {
 			"cannot perform, so a key claimed by hand is held until the run ends.",
 			got.code, got.out)
 	}
-	for _, want := range []string{"released migrations/ (seq 4)", "it was held by human"} {
+	// seq 6: the fixture runs to seq 5, so the release this command appends is the
+	// sixth event. Spelled out rather than computed, because a seq the test derives
+	// from the log it is checking would agree with any number the binary printed.
+	for _, want := range []string{"released migrations/ (seq 6)", "it was held by human"} {
 		if !strings.Contains(got.out, want) {
 			t.Errorf("the release does not print %q:\n%s\n"+
 				"  consequence: the seq is what `event show` is given to check this against "+
@@ -370,8 +379,10 @@ func TestALiveForeignLeaseIsRefusedAndPricesTheWait(t *testing.T) {
 // backend" would send the caller away to poll something that will never change.
 //
 // It also names what --force writes, quoted, before the caller types it. The flag ends
-// somebody's claim; the case for typing it is that the release is accountable -- the log
-// says who ended it and whose it was -- and that case cannot be made after the fact.
+// somebody's claim, and the case for typing it has to be made before the fact: the log
+// records whose lease ended and that a decision rather than a clock ended it. It does
+// not record whose decision -- see the release arm of cmdStateUnlock -- so the refusal
+// promises previous_holder and nothing more.
 func TestALockThatCannotLapseIsTheStallForceExistsFor(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchLock, eternalBackendLock, true)
@@ -405,7 +416,7 @@ func TestALockThatCannotLapseIsTheStallForceExistsFor(t *testing.T) {
 	}
 }
 
-// TestForcingALiveLeaseRecordsWhoEndedItAndClaimsNoLapse is the assertion this whole
+// TestForcingALiveLeaseRecordsWhoLostItAndClaimsNoLapse is the assertion this whole
 // file is arranged around.
 //
 // A forced release and an expired one free the same key and print the same seq. The
@@ -414,12 +425,18 @@ func TestALockThatCannotLapseIsTheStallForceExistsFor(t *testing.T) {
 // the only place it is recorded. `event log --type 'lock.*'` is where the member that
 // lost the key finds out which happened.
 //
+// WhoLostIt, not who ended it, and the name is precise because the older one was not.
+// previous_holder is the only name in the payload; Actor is empty by lockEvent's design,
+// so nothing here identifies the caller and this test never asserted that it did. A
+// reader who takes the old name at face value goes looking for an accountability field,
+// finds source: human, and concludes it names somebody.
+//
 // So expired_at must be ABSENT. The instant is right there in held.ExpiresAt and writing
 // it would be one line -- and it would record a lapse at an instant that has not
 // arrived, which is exactly the judgement --force exists to say nobody made. That is the
 // only defect in this command that no message on screen could reveal: both releases
 // print correctly and only the log is wrong, permanently.
-func TestForcingALiveLeaseRecordsWhoEndedItAndClaimsNoLapse(t *testing.T) {
+func TestForcingALiveLeaseRecordsWhoLostItAndClaimsNoLapse(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchSomethingElse, liveBackendLock, true)
 
@@ -539,8 +556,8 @@ func TestAnUnheldKeyIsRefusedWithTheCodeNoPollerWaitsOn(t *testing.T) {
 func TestStateUnlockRefusesATerminalRunWhereTheReleaseWouldFreeNothing(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchLock, ownLiveLock+
-		`{"id":"e4","seq":4,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
-{"id":"e5","seq":5,"type":"run.result","payload":{"summary":"done"}}
+		`{"id":"e6","seq":6,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
+{"id":"e7","seq":7,"type":"run.result","payload":{"summary":"done"}}
 `, true)
 
 	got := arxi(t, dir, "state", "unlock", "r1", "migrations/")

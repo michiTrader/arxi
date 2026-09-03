@@ -458,9 +458,11 @@ func printEventLogFooter(v eventLogView, elided bool) {
 
 // isAre agrees the verb with a count.
 //
-// A sibling of inbox.go's plural, kept next to its only caller rather than added
-// there: the footer's sentence needs the verb and not the noun's suffix, and
-// "1 events are empty" and "1 event are empty" are wrong in different ways.
+// A sibling of inbox.go's plural, and not added there: the footer's sentence needs
+// the verb and not the noun's suffix, and "1 events are empty" and "1 event are
+// empty" are wrong in different ways. `blueprint create`'s advisory note is the
+// second caller, which is why this stays package-level rather than moving into the
+// footer that first needed it.
 func isAre(n int) string {
 	if n == 1 {
 		return "is"

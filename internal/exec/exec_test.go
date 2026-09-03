@@ -645,6 +645,14 @@ func TestASimulatedToolCallWritesTheCatalogueSPayload(t *testing.T) {
 // TestPanicInAnEffectDoesNotLoseSiblings: a panicking provider client must not
 // take down the run, and above all must not take down the events its siblings
 // already produced.
+//
+// The panicking effect is a SpawnTurn, so the log gets an event of its own for
+// it too: a panic strands a commissioned turn exactly as a 503 does (see
+// turnFailure), and the member the reducer believes owes a turn has to be told
+// otherwise by the log or it stays Busy() forever. Asserting the two events by
+// type and actor rather than by count is what keeps that distinguishable: a
+// count of 2 would also be satisfied by the sibling's event appended twice,
+// which is the failure a naive fix for this very case would produce.
 func TestPanicInAnEffectDoesNotLoseSiblings(t *testing.T) {
 	r, _, _, _ := newRunner()
 	r.Executor = &panicExecutor{}
@@ -663,9 +671,30 @@ func TestPanicInAnEffectDoesNotLoseSiblings(t *testing.T) {
 			"appended. Remedy: keep the recover() in runIndependent's goroutine.",
 			len(res.Errs))
 	}
-	if len(res.Events) != 1 {
-		t.Fatalf("got %d events, want 1: the sibling that succeeded must still have "+
-			"its event appended after another effect panicked.", len(res.Events))
+	got := map[kernel.EventType]string{}
+	for _, e := range res.Events {
+		if prev, dup := got[e.Type]; dup {
+			t.Fatalf("%s was appended twice (%q then %q): each effect owes the log "+
+				"at most one event of each kind, and a duplicate is a double "+
+				"attribution the caused_by graph cannot represent.", e.Type, prev, e.Actor)
+		}
+		got[e.Type] = e.Actor
+	}
+	if len(res.Events) != 2 {
+		t.Fatalf("got %d events (%v), want 2: the sibling that succeeded must still "+
+			"have its event appended after another effect panicked, AND the "+
+			"panicking spawn must close the turn the reducer already recorded on "+
+			"its member.", len(res.Events), got)
+	}
+	if a := got[kernel.ToolCallCompleted]; a != "a" {
+		t.Fatalf("tool.call_completed is attributed to %q, want %q: the sibling's "+
+			"event must survive the panic unchanged, not merely survive.", a, "a")
+	}
+	if a := got[kernel.AgentFailed]; a != "panics" {
+		t.Fatalf("agent.failed is attributed to %q, want %q: a panic leaves the "+
+			"member owing a turn that will never arrive, and only an event naming "+
+			"that member clears it. Without it, Busy() stays true and quiescence "+
+			"can never fire again for the rest of the run.", a, "panics")
 	}
 }
 
@@ -747,6 +776,29 @@ func TestSnapshotFailureDoesNotFailTheRun(t *testing.T) {
 
 // TestCancelledContextStopsSpending: a cancelled run must stop paying, not
 // finish paying for turns whose results will be thrown away.
+//
+// STOPS PAYING, NOT STOPS WRITING, and the difference is the whole assertion
+// below. This test used to demand an empty log ("a turn refused for cancellation
+// never happened, so it must leave nothing in the log"), which reads as
+// obviously right and is wrong for the one case where a cancellation is not the
+// end of the run. Ctrl-C and a wall-clock deadline cancel the context WITHOUT
+// making the run terminal, and such a run is meant to be resumed.
+//
+// What resume does with it is the problem. The loop advances its cursor past an
+// event whose effects failed (internal/exec/loop.go: `out.Cursor = cursor` after
+// a non-fatal res.Errs), on the deliberate ground that re-executing a spawn
+// costs money twice. So the commissioning event is never decided again -- but the
+// resumed state is folded FROM the log up to that cursor, which runs spawnFor
+// again and sets TurnOpen again. The member would come back owing a turn that
+// nothing in the log can ever close: Busy() true forever, checkQuiescence
+// silenced forever, and the run hangs with no diagnosis. ADR-0004 rates that
+// false negative as the expensive direction, and it is exactly the shape of
+// failure the quiescent event exists to report.
+//
+// Writing agent.failed costs nothing, because the cost is in the provider call
+// that did not happen. The two assertions therefore separate: no llm.response
+// and no turn cost (nothing was paid for), and one agent.failed (the
+// commissioned turn was closed).
 func TestCancelledContextStopsSpending(t *testing.T) {
 	r, _, fake, _ := newRunner()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -760,13 +812,37 @@ func TestCancelledContextStopsSpending(t *testing.T) {
 		t.Fatalf("got %d errors, want 1: a spawn on a cancelled context must fail "+
 			"instead of silently succeeding.", len(res.Errs))
 	}
-	if len(res.Events) != 0 {
-		t.Fatalf("got %d events, want 0: a turn refused for cancellation never "+
-			"happened, so it must leave nothing in the log.", len(res.Events))
+	if len(res.Events) != 1 {
+		var got []kernel.EventType
+		for _, e := range res.Events {
+			got = append(got, e.Type)
+		}
+		t.Fatalf("got %d events (%v), want exactly 1: the refused turn still owes "+
+			"the log the agent.failed that closes it, because the reducer marked "+
+			"the member as owing a turn the moment the spawn was commissioned.",
+			len(res.Events), got)
 	}
-	// The call is still RECORDED: the fake records before checking, so a test
-	// can tell "was refused" from "was never attempted".
-	_ = fake
+	if got := res.Events[0].Type; got != kernel.AgentFailed {
+		t.Fatalf("the event written is %q, want %q: a cancelled turn produced no "+
+			"llm.response and no cost, so the only thing there is to record is "+
+			"that the turn will not happen. Spend enters the state only through "+
+			"llm.response (kernel.applyCost), so a log without one is a run that "+
+			"paid nothing -- which is this test's other half.", got, kernel.AgentFailed)
+	}
+	if got := res.Events[0].Actor; got != "a" {
+		t.Fatalf("agent.failed is attributed to %q, want %q: the reducer clears "+
+			"TurnOpen on the member named by the actor, so a misattributed failure "+
+			"leaves the real one busy forever.", got, "a")
+	}
+	// Nothing was even dispatched: Fake.SpawnTurn checks ctx.Err() BEFORE it
+	// records the call, which is what "stops spending" means at the provider
+	// boundary. So the log's one event is not a record of an attempt -- it is the
+	// runner discharging a debt the reducer took on when it commissioned the turn.
+	if len(fake.Calls) != 0 {
+		t.Fatalf("the fake recorded %v, want nothing: a cancelled context must be "+
+			"refused before the provider is touched, or the run keeps paying for "+
+			"turns whose results it will throw away.", fake.Calls)
+	}
 }
 
 // TestEmptyListIsANoOp. The reducer legitimately returns no effects for events

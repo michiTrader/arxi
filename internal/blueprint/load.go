@@ -224,9 +224,54 @@ func (v *validator) members(raw any) []kernel.MemberConfig {
 		} else {
 			seen[mc.Name] = true
 		}
+		v.tools(where, mc.Tools)
 		out = append(out, mc)
 	}
 	return out
+}
+
+// tools rejects a grant naming a tool that does not exist.
+//
+// Unlike the model above, this IS checked for existence here, and the difference
+// is not inconsistency. The set of tools is compiled in -- kernel.KnownTools is a
+// closed list in the binary, not a directory someone has to have populated -- so
+// the answer is the same in CI and on a laptop, and getting it requires no I/O.
+// The argument for deferring the model check does not reach this one.
+//
+// It is checked HERE rather than only where the tool is called because this
+// function is the gate both `blueprint validate` and `run start` pass through,
+// and it is the last point at which refusing is free. Every other writer of a
+// grant already validates -- agentstore, rolestore, toolstore.Set, `agent
+// create`, `role define` -- so a file was the one way in that did not. Left
+// unchecked, `tools: [bahs]` passed validation, got frozen into
+// blueprint.snapshot.yaml as though it had been reviewed, and then surfaced as
+// ErrUnknownTool from the runner mid-run: the turn that produced the call is
+// billed, the run stops, and the thing that was wrong was a typo visible in the
+// file before anything started.
+//
+// The names come from the kernel and not from internal/tool, which is where the
+// policy resolver keeps the same set. That package would be the obvious import
+// and it is the wrong one: internal/arch_test.go holds this loader to
+// kernel-only dependencies, and internal/tool pulls in internal/surface behind
+// it. Reaching for it also broke internal/eval and internal/evalstore, which
+// import this package and have their own rules against depending on either.
+// kernel.KnownTools is the shared declaration precisely so this does not need to
+// know that internal/tool exists.
+//
+// Duplicates are not an error. A member granted `[read, read]` is saying
+// something redundant, not something wrong, and ResolveAll already collapses it.
+func (v *validator) tools(where string, granted []string) {
+	for i, g := range granted {
+		if kernel.ToolIsKnown(g) {
+			continue
+		}
+		if near := nearest(g, kernel.KnownTools); near != "" {
+			v.errf("%s: tools[%d] = %q, did you mean %q?", where, i, g, near)
+		} else {
+			v.errf("%s: tools[%d] = %q is not a tool; granted tools are %s",
+				where, i, g, strings.Join(kernel.KnownTools, ", "))
+		}
+	}
 }
 
 func (v *validator) stages(raw any, members []kernel.MemberConfig) []kernel.StageConfig {

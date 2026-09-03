@@ -385,7 +385,7 @@ command**. The CLI is honest about it: for a command that is declared and not
 implemented it tells you so, with its tool name and its protocol type, instead
 of lying with "unknown command".
 
-**46 of 50 declared capabilities are wired — 92.0%.** That figure is measured,
+**48 of 50 declared capabilities are wired — 96.0%.** That figure is measured,
 not estimated, and as of this step it is measured *by the suite* rather than by
 hand: `TestTheReadmeCapabilityCountIsWhatTheBinaryActuallyDoes` walks
 `surface.Registry`, invokes every declared path against the built binary, and
@@ -397,19 +397,22 @@ moved it to 26, `run why` to 27, `run prompt` to 28, `run tree` to 29,
 `run result` to 30, `run pause` to 31, `run cancel` to 32, `event log` to 33 and
 `event emit` to 34, `run fork` to 35, `run replay` to 36, `run attach` to 37,
 `run steer` to 38, `event trace` to 39, `state set` to 40, `state get` to 41,
-`state lock` to 42 and `state unlock` to 43, and `agent create`, `agent list`
-and `agent show` took it to 46 in one step — and every time the number above was
+`state lock` to 42 and `state unlock` to 43, `agent create`, `agent list`
+and `agent show` took it to 46 in one step, `role define` to 47, and
+`blueprint create` to 48 — and every
+time the number above was
 corrected because **the suite failed**, not because anybody remembered to check.
-It is deliberately unflattering — the 4 that remain are `role define`,
-`blueprint create` / `install` and `design`, which want a designer or a
-generator rather than another way to read what a run already wrote. The two
-`blueprint` verbs no longer want a place to put their output: `internal/agentstore`
-writes `agents/`, a one-member blueprint is a blueprint, and a larger one lands in
-the same directory with no migration. The implemented
-forty-six are
+It is deliberately unflattering — the 2 that remain are
+`blueprint install` and `design`, which want a registry to install from or a
+generator rather than another way to read what a run already wrote. Neither
+wants a place to put its output any more: `internal/agentstore` writes `agents/`,
+a one-member blueprint is a blueprint, and `blueprint create` composes the
+agents already there into a larger one in the same directory, with no migration
+and no conversion. The implemented
+forty-eight are
 `provider add`, `model list` /
-`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent create` / `list` / `show`, `agent tool policy`,
-`blueprint validate`, `state set`, `state get`, `state lock`, `state unlock`, `event emit`, `event log`, `event trace`, `trigger create` /
+`enable` / `disable`, `run start`, `run list`, `run show`, `run why`, `run tree`, `run prompt`, `run steer`, `run result`, `run pause`, `run unpause`, `run cancel`, `run fork`, `run replay`, `run attach`, `agent create` / `list` / `show`, `agent tool policy`, `role define`,
+`blueprint validate`, `blueprint create`, `state set`, `state get`, `state lock`, `state unlock`, `event emit`, `event log`, `event trace`, `trigger create` /
 `list` / `show` / `pause` / `run`, `inbox` / `approve` / `reject` / `reply`,
 `eval run` / `list` / `compare`, `schema`, `serve`, `surface` and `version`.
 
@@ -441,7 +444,7 @@ binary, the suite says so instead of quietly certifying that everything works.
 
 ### One number is not enough
 
-92.0% is the CLI surface, and quoting it alone would be misleading in **both**
+96.0% is the CLI surface, and quoting it alone would be misleading in **both**
 directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
@@ -449,7 +452,7 @@ directions. Four things are being built, and they are at very different stages:
 | the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
-| the CLI surface | **46 / 50 — 92.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
+| the CLI surface | **48 / 50 — 96.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
 
 Read together they say something a single percentage cannot: **the core is
 finished and the edges are not.** The reducer, the log, the fold, the budget
@@ -479,17 +482,95 @@ does *not* mean a run drives itself to completion after an approval — but a
 blocked run can now be picked back up from the CLI, which is what `run unpause`
 does and what this paragraph used to name as the next thing worth building.
 
-That shape is also why 92.0% understates and 100% overstates. The `run` group is
-now **14 / 14**, the `event` group **3 / 3**, the `state` group **4 / 4** and the
-`agent` group **4 / 4**: every verb a person needs to inspect, redirect,
-coordinate or end a run in flight is wired, and so is naming the thing it runs,
-and none of the 4 that remain
-is one of them. The list here has been rewritten five times and each rewrite was
+That shape is also why 96.0% understates and 100% overstates. The `run` group is
+now **14 / 14**, the `event` group **3 / 3**, the `state` group **4 / 4**, the
+`agent` group **4 / 4**, the `role` group **1 / 1** and the `blueprint` group
+**2 / 3**: every verb a person needs
+to inspect, redirect, coordinate or end a run in flight is wired, and so is
+naming the thing it runs, the defaults it is named with, and composing several of
+those names into one team,
+and neither of the 2 that remain
+is one of them. The list here has been rewritten seven times and each rewrite was
 the same admission — it named `replay`, then `attach`, then `steer` as the next
-thing worth building, and each one got built; this rewrite deletes the *store*
-the remainder was said to want, because it is now on disk.
+thing worth building, and each one got built; a previous rewrite deleted the
+*store* the remainder was said to want, the one after it deleted the last verb
+that wanted it, and this one deletes the claim that the `blueprint` generators
+write a file this tree only ever reads. `blueprint create` writes one. What is
+left is not a variation on anything here: `design` holds a screen and a cursor,
+and `blueprint install` needs somewhere to install *from*, which is a registry
+and not a verb.
 
-Naming the actor is the increment just finished, and it is the whole `agent`
+Composing those names is the increment just finished, and it is the second of the
+three `blueprint` verbs. `arxi blueprint create platform --members
+backend,frontend,security --stages build,review` writes `agents/platform.yaml`:
+the same kind of file in the same directory, so `agent list` shows it and `run
+start platform` runs it with no new noun and no migration
+(docs/design/20-use-cases.md §20.4). It composes agents that **already exist**
+rather than taking them on the command line, and that is the whole design — a
+member is a name, a model, a role, a tool grant, an activation mode and an
+advisory flag, and a flag syntax able to carry six fields for each of three
+members is a file format with dashes in it. `agent create` already writes those
+files one at a time.
+
+**Members are copied, not referenced**, for the reason roles are: `run start`
+freezes `blueprint.snapshot.yaml` and hashes it (ADR-0001, ADR-0002), so a
+`members: [ref: backend]` would leave part of a run's rules outside the snapshot
+and outside the SHA — editing `agents/backend.yaml` would change what a team
+composed months earlier does, and the frozen file would not show it. The copy is
+also what makes the refusals necessary, because nothing revisits the source
+afterwards: a member that is itself a team is refused rather than spliced in
+(three names on the command line becoming four members, minus the stages that
+made that file a team), two members that would carry one name are refused naming
+both source files, and a member whose own `stages:` list names no stage of the
+team it is joining is refused *before* the file is written — it would otherwise
+take part in nothing, and `advance_when: all` would wait for a member no stage
+activates. The output prints where each member was copied from, which is the one
+thing the new file does not record.
+
+Defaults for that name came just before, and they are the whole
+`role` group. `arxi role define auditor --tools read,write --advisory` writes
+`roles/auditor.json`, and `arxi agent create skeptic --model gpt-x --role auditor`
+fills in the flags the command line left out (docs/design/20-use-cases.md §20.4).
+A role is a **fragment of a member** — a tool grant and the advisory trait,
+nothing else — because those are the two fields of an agent that are a house style
+rather than a property of the individual, and a role that also carried the model
+would make `--role` the wrong place to change one.
+
+**The defaults are copied as the agent is written, and never read again.** That is
+the decision worth recording, and it is forced by ADR-0001: `run start` freezes
+`blueprint.snapshot.yaml`, so a `role:` resolved at run time would put part of a
+run's rules outside the snapshot, and redefining a role would silently change an
+agent somebody had already reviewed. Copying makes redefinition inert, which is
+the property the tests assert by deleting `roles/` outright and starting the agent
+anyway — the snapshot still carries `tools: [read, grep]`, and the run still
+succeeds. `agent create` says so in the output rather than leaving it to be
+discovered: *copied as this agent was written, so redefining the role later will
+not change this one.*
+
+An undefined `--role` is a **note and not a refusal**, and that asymmetry is not
+leniency. `role:` is a free-form string that the reducer reads twice — it picks the
+steer target by `Role == "coordinator"` and builds each member's identity from it —
+and every blueprint in `examples/` names roles nothing defines. Refusing an
+unknown one would break files that are already correct. So the name is stored
+either way and the command prints what it could not find, with the roles that do
+exist beside it: `defined: auditor, reviewer` is what turns `--role reviewr` from
+an accepted string into a visible typo. Reading is also why `roles/` is opened
+through `rolestore.At` rather than `Open` — an `agent create` in a tree where
+nobody has ever defined a role must not leave an empty directory behind, and in a
+checkout the user cannot write to it must not fail with `create roles: permission
+denied` in place of the note.
+
+A definition is never overwritten, and there is no `--force` to suggest, because
+nothing on disk records which definition an agent came from: the agents created
+from the old one copied it as they were written, so an overwrite could not be
+reviewed against the agents that inherited it. The refusal names the file instead.
+That file is also the only way to read a role back — the surface declares no `role
+list` and no `role show` — which is why the `file:` line is tested by following it
+and parsing what is there, and why it is mode 0644 where `providers/` is 0600: a
+role is a default a team commits and reads, and a credential-grade mode would stop
+the reviewer without protecting a secret.
+
+Naming the actor came before that, and it is the whole `agent`
 group. `arxi agent create reviewer --model claude-sonnet-4-6 --tools read,grep`
 stores an agent, `agent list` and `agent show` read it back, and `run start
 reviewer` runs it without a path (docs/design/20-use-cases.md §20.1). What an
@@ -760,13 +841,23 @@ the reducer does not implement. Each of those three is right on its own. Togethe
 the verb would have refused **every** plain invocation with exit 2, quoting a
 flag back at a caller who typed none.
 
-The honest reason the remaining 7 will not fall as fast is that none of them is
-a variation on something already here. `agent *` and `role define` want an agent
-store; `blueprint create` / `install` want generation rather than validation;
-`design` wants a terminal UI that holds a screen and a cursor and answers
-keystrokes, where every command here reads argv, writes lines and exits — `serve`
-is its nearest neighbour and is not close, since an NDJSON loop over stdio has a
-request and a reply and nothing to redraw.
+This paragraph used to say that the remaining 7 would not fall as fast, because
+none of them was a variation on something already here: `agent *` and
+`role define` wanted an agent store, `blueprint create` / `install` wanted
+generation rather than validation, and `design` wants a terminal UI that holds a
+screen and a cursor and answers keystrokes, where every command here reads argv,
+writes lines and exits — `serve` is its nearest neighbour and is not close, since
+an NDJSON loop over stdio has a request and a reply and nothing to redraw.
+
+Five of those seven fell in three increments, and the prediction was right about
+*why* rather than about the pace: the store was the whole cost, and once
+`internal/agentstore` and `internal/rolestore` existed, four verbs were readers
+and writers of a directory — and the fifth, `blueprint create`, turned out to
+want no generation at all. It composes agents the store already holds, so the
+"generation rather than validation" it was said to need was really a second
+writer for the same directory. `design` and `blueprint install` are the part of
+that sentence that still stands, and they are the part that named something other
+than a missing store: a screen and a cursor, and somewhere to install *from*.
 
 `run attach` was built two verbs earlier, and it is the only verb here that reads
 a log while somebody else is writing to it. It joins at the head — the events that

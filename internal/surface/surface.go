@@ -322,9 +322,23 @@ var Registry = []Cmd{
 	{Path: []string{"blueprint", "validate"}, Desc: "validate a blueprint without executing it",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1,
 		Params: []Param{pos(p("path", "string", "blueprint file"))}},
+	// `members` and `stages` were ADDED when this verb was wired, the same way the
+	// `run` positional was added to the four `state` verbs below. The entry was
+	// written when a blueprint was only ever a file a human typed, so `name` was
+	// the whole of it; composing one from agents already in the store is what gave
+	// the command something to be told.
+	//
+	// `members` is required, and `parseInvocation` enforces requiredness from this
+	// declaration, so the refusal names the flag and quotes this description
+	// without cmd/arxi holding a list of its own. A blueprint with no members is
+	// accepted by internal/blueprint on purpose -- a run with no members is caught
+	// when the run starts -- which would make `blueprint create t` write a file
+	// that validates and can never take a turn. Required here, not there.
 	{Path: []string{"blueprint", "create"}, Desc: "create a blueprint",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("name", "string", "name"))}},
+		Params: []Param{pos(p("name", "string", "name")),
+			req(p("members", "string", "agents to compose, comma-separated")),
+			p("stages", "string", "stage names in order, comma-separated (default: one stage, work)")}},
 	{Path: []string{"blueprint", "install"}, Desc: "install a published blueprint",
 		Kind: CLIOnly, Mutates: true, Since: 1,
 		Params: []Param{pos(p("ref", "string", "blueprint reference"))}},
@@ -369,8 +383,23 @@ var Registry = []Cmd{
 	// declare a flag the CLI has and an agent does not, and an allow-policy tool with
 	// this param lets one agent end another's LIVE lease. Kept anyway, because the
 	// alternative -- a lease only a human can end -- means every agent lock runs to
-	// expiry, which is the stall §20.8 names. The release is accountable instead: it
-	// records previous_holder and reason: "forced", and the log says who did it.
+	// expiry, which is the stall §20.8 names.
+	//
+	// What the release records is the VICTIM, and this comment used to claim it
+	// recorded the forcer. previous_holder names who lost the key and reason: "forced"
+	// says a decision ended a live lease rather than a clock -- both of which the
+	// member that lost it needs. No field names who decided. lockEvent leaves Actor
+	// empty deliberately, because wakeWatchers skips a watcher whose agent equals the
+	// actor and stamping the caller there would silently disable that caller's own
+	// lock.* watcher, and with Actor empty lockHolder falls back to the source, so
+	// every forced release folds to holder "human" no matter who typed it.
+	//
+	// The correction matters because that sentence was the half of the argument that
+	// answered "why is this safe enough to ship allow", and it was not true. The
+	// victim's half stands on its own -- the loss is visible and attributed to a
+	// decision -- and the missing half is a known gap. Written down as a gap it can be
+	// closed by a field that is not Actor; written down as a property it never gets
+	// looked at again.
 	{Path: []string{"state", "unlock"}, Desc: "release a cooperative lock",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Mutates: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id")),

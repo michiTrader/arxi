@@ -135,11 +135,18 @@ func TestMutatingToolsAreNotAllowByDefault(t *testing.T) {
 	// nothing else on this list has. It is allow for the same reason `state_lock` is:
 	// a release only a human can perform means every agent lock runs to its expiry,
 	// so the crashed-holder stall of docs/design/20-use-cases.md §20.8 comes back for
-	// every early finish. What makes it safe enough is that it is not deniable: the
-	// event records previous_holder and reason: "forced", so `arxi event log <run>
-	// --type lock.*` names who broke whose lease. PolicyAsk was the alternative and
-	// was rejected because the common case -- releasing a lock you hold yourself, the
-	// entire point of the verb -- would then need a human for every turn.
+	// every early finish. PolicyAsk was the alternative and was rejected because the
+	// common case -- releasing a lock you hold yourself, the entire point of the verb
+	// -- would then need a human for every turn.
+	//
+	// What `arxi event log <run> --type 'lock.*'` shows is WHOSE lease ended and that
+	// a decision ended it rather than a clock: previous_holder and reason: "forced".
+	// It does not show whose decision, and this comment claimed it did. Actor is left
+	// empty by lockEvent so that naming a member does not disable that member's own
+	// lock.* watcher, and an empty actor folds to holder "human" for every forced
+	// release. So read this exception list as three coordination tools plus one
+	// accepted gap, and do not let the missing half of the argument be re-derived from
+	// here as though it were a property the code has.
 	expected := map[string]bool{
 		"arxi_state_set":    true,
 		"arxi_event_emit":   true,

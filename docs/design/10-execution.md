@@ -228,12 +228,15 @@ same time**. The two are different facts:
 |---|---|---|
 | Tool ran, exited non-zero | `tool.call_completed`, the exit status in `result` | no |
 | Provider refused the prompt | `llm.response` with `ok: false`, then `agent.turn_done` | no |
-| Connection reset before the call landed | none | yes |
-| Context cancelled | none | yes |
+| Connection reset before the turn landed | `agent.failed`, the provider's message in `error` | yes |
+| Context cancelled mid-turn | `agent.failed`, the cancellation in `error` | yes |
+| A tool call could not be delivered | none | yes |
 
-A domain failure **happened**, so it belongs in the log. A transport failure
-means nothing can be said about what happened, and the log is the one place that
-may not contain guesses.
+A domain failure **happened**, so it belongs in the log. A transport failure means
+nothing can be said about what the agent did, and the log is the one place that may
+not contain guesses — so none of the last three rows says anything about that. Two
+of them write an event anyway, because a second fact is in play that is not a
+guess: this run commissioned a turn, and that turn is not going to arrive.
 
 The first row carries no `ok` flag, and that is deliberate rather than an
 omission: `tool.call_completed`'s payload is `{tool, result?}` and a non-zero exit
@@ -253,13 +256,33 @@ of by a blueprint. The status travels separately from the message because `run
 why` has to tell a rate limit from a bad key, and only one of those is worth
 retrying.
 
-`agent.failed` is declared (`internal/kernel/event.go:38`), reduced to
+The last two rows write `agent.failed` (`turnFailure`,
+`internal/exec/exec.go:434`), and the reason is in the state rather than in the
+diagnosis. Entering a stage **commissions** a turn per member — `spawnFor` sets
+`Member.TurnOpen` (`internal/kernel/decide.go:1260`) and `Busy()` is true for as
+long as that flag is set — and `agent.turn_done` is the only event that clears it
+(`internal/kernel/decide.go:753`). A `SpawnTurn` that returns an error without one
+therefore leaves behind a member the reducer believes is working, for the rest of
+the run: quiescence can never fire again, and the genuine stall three stages later
+is reported as nothing at all. `Result.Errs` cannot close it — `Errs` belongs to one
+step and dies with the process, while the state is rebuilt by folding the log, so
+anything the state has to survive on has to *be* in the log.
+
+The condition is "no `agent.turn_done` among the events the effect did produce",
+not "no events at all": a turn that wrote `agent.activated` and then died has the
+same disease, and the refusal in the second row has already closed its own turn and
+must **not** be marked failed, since `MemberFailed` takes the member out of every
+later stage. And only `SpawnTurn`. A `CallTool` or `AskHuman` that fails strands
+nothing — the member is left where it was, and the reducer's own timers and blocks
+still apply — so inventing an event for those would be exactly the guess this rule
+forbids. What gets recorded is not a claim about what the agent did. It is that a
+turn this run commissioned did not happen.
+
+This is the emitter an earlier draft of this section recorded as missing.
+`agent.failed` was declared (`internal/kernel/event.go:38`), reduced to
 `MemberFailed` (`internal/kernel/decide.go:87`) and catalogued
-(`spec/events.md:76`) — and nothing in the tree emits it. The arm stays: a member
-permanently out of a run is a real state, and an executor that can distinguish
-"this agent is finished" from "this turn failed" will need it. But the gap is
-recorded here because it is invisible in the worst direction — a watcher on
-`agent.failed` loads, validates, and never fires.
+(`spec/events.md:76`) with nothing in the tree writing it — a watcher on
+`agent.failed` loaded, validated, and never fired. It fires now.
 
 **A control failure aborts the step before anything is spent.** If an `Emit`
 cannot be written, the independent tail never runs. The tail was decided under

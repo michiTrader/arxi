@@ -1,16 +1,16 @@
 // Command arxi is the binary.
 //
-// Today it implements schema, surface, why, blueprint validate, run start
-// (live, calling real models, or --sim), run list, run show, run why, run tree,
-// run prompt, run steer, run result, run pause, run unpause, run cancel,
+// Today it implements schema, surface, why, blueprint validate, blueprint create,
+// run start (live, calling real models, or --sim), run list, run show, run why,
+// run tree, run prompt, run steer, run result, run pause, run unpause, run cancel,
 // run fork, run replay, run attach, event emit, event log, event trace,
 // state set, state get, state lock, state unlock, serve, the trigger group, the
-// inbox group, the agent group, the eval group (--sim only), provider add and
-// the model group; for everything else it answers "declared but not implemented"
-// with the exact name of the capability. That is on purpose: the surface is
-// frozen and verified by tests BEFORE the executor exists, so adding a new
-// command is implementing something that was already promised, not inventing a
-// new promise.
+// inbox group, the agent group, role define, the eval group (--sim only),
+// provider add and the model group; for everything else it answers "declared but
+// not implemented" with the exact name of the capability. That is on purpose: the
+// surface is frozen and verified by tests BEFORE the executor exists, so adding a
+// new command is implementing something that was already promised, not inventing
+// a new promise.
 //
 // The measured figure, rather than this list, is the one to trust. See the
 // README, where a probe that walks the registry against the built binary
@@ -83,6 +83,10 @@ func main() {
 	case "blueprint":
 		if len(args) > 1 && args[1] == "validate" {
 			cmdBlueprintValidate(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "create" {
+			cmdBlueprintCreate(args[2:])
 			return
 		}
 	case "run":
@@ -162,6 +166,9 @@ func main() {
 		return
 	case "agent":
 		cmdAgent(args[1:])
+		return
+	case "role":
+		cmdRole(args[1:])
 		return
 	case "state":
 		cmdState(args[1:])
@@ -283,6 +290,7 @@ IMPLEMENTED TODAY
   surface                    see the whole surface, human readable
   why <file>                 explain why a run is not advancing
   blueprint validate <file>  check a blueprint and print the resolved config
+  blueprint create <name>    compose stored agents into a team: --members a,b
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
   run start <bp> <prompt>    run a blueprint file or a stored agent (or --sim)
@@ -304,6 +312,7 @@ IMPLEMENTED TODAY
   agent list                 the agents in agents/, with model and tools
   agent show <name>          what 'run start <name>' will actually execute
   agent tool policy          stop being asked about a tool every turn
+  role define <name>         defaults for 'agent create --role', copied once
   trigger list               schedules, and the loop that fires them
   eval run <suite>           suites, pass rates, and two runs side by side
   serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen

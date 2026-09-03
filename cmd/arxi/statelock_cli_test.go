@@ -48,13 +48,30 @@ const watchLockRunsATool = "  - {agent: security, pattern: lock.*, action: run_t
 // arbitrates: two shells are one holder, so a lock held by "human" is this
 // command's own. The holder is named with `actor`, which is what lockHolder reads
 // first -- these are the locks an agent's tool call takes, not a shell's.
-const liveBackendLock = `{"id":"e3","seq":3,"type":"lock.acquired","actor":"backend","payload":{"key":"migrations/","expires_at":"2099-01-01T00:00:00Z"}}
+//
+// They start at seq 4 because emitRunAt's log now runs to seq 3: entering a stage
+// commissions a turn for every non-advisory member, and the shared fixture closes
+// security's so that these runs have a member free to be handed a cause.
+//
+// Each one then CLOSES a turn again at seq 5, and that second line is load-bearing
+// wherever the run watches lock.*: the fixture's own lock.acquired matches that
+// pattern, so folding it commissions a turn for security exactly as the release
+// under test would. A log that stopped at the acquire would leave security
+// permanently mid-turn, and emitWatcherOutcomes checks Busy() before almost
+// anything -- every command into such a run answers "queued: security is mid-turn"
+// whatever else is true of it, including the paused refusals, which then pass for
+// the wrong reason. Under a watcher that does not match lock.* nothing is
+// commissioned and the line closes nothing, which is inert.
+const liveBackendLock = `{"id":"e4","seq":4,"type":"lock.acquired","actor":"backend","payload":{"key":"migrations/","expires_at":"2099-01-01T00:00:00Z"}}
+{"id":"e5","seq":5,"type":"agent.turn_done","actor":"security"}
 `
 
-const lapsedBackendLock = `{"id":"e3","seq":3,"type":"lock.acquired","actor":"backend","payload":{"key":"migrations/","expires_at":"2020-01-01T00:00:00Z"}}
+const lapsedBackendLock = `{"id":"e4","seq":4,"type":"lock.acquired","actor":"backend","payload":{"key":"migrations/","expires_at":"2020-01-01T00:00:00Z"}}
+{"id":"e5","seq":5,"type":"agent.turn_done","actor":"security"}
 `
 
-const eternalBackendLock = `{"id":"e3","seq":3,"type":"lock.acquired","actor":"backend","payload":{"key":"migrations/"}}
+const eternalBackendLock = `{"id":"e4","seq":4,"type":"lock.acquired","actor":"backend","payload":{"key":"migrations/"}}
+{"id":"e5","seq":5,"type":"agent.turn_done","actor":"security"}
 `
 
 // TestStateLockRefusesAKeyNoClaimantWouldTypeTheSameWay.
@@ -504,7 +521,7 @@ func TestStateLockDrivesTheWatcherItWakes(t *testing.T) {
 // and this line is the only thing that can say so.
 func TestALockIsStillTakenInAPausedRunAndSaysTheTurnIsParked(t *testing.T) {
 	dir := t.TempDir()
-	emitRunAt(t, dir, "r1", watchLock, pausedAt3, true)
+	emitRunAt(t, dir, "r1", watchLock, pausedAt4, true)
 
 	got := arxi(t, dir, "state", "lock", "r1", "migrations/")
 	if got.code != 0 {
@@ -554,7 +571,7 @@ func TestALockIsStillTakenInAPausedRunAndSaysTheTurnIsParked(t *testing.T) {
 // and clearing the halt and repeating the command is a whole recovery.
 func TestALockIsRefusedWhenAHaltedRunWouldRunAToolForIt(t *testing.T) {
 	dir := t.TempDir()
-	emitRunAt(t, dir, "r1", watchLockRunsATool, pausedAt3, true)
+	emitRunAt(t, dir, "r1", watchLockRunsATool, pausedAt4, true)
 
 	got := arxi(t, dir, "state", "lock", "r1", "migrations/", "--ttl", "1h")
 	if got.code != 1 {
@@ -598,8 +615,8 @@ func TestALockIsRefusedWhenAHaltedRunWouldRunAToolForIt(t *testing.T) {
 func TestALockIsRefusedInATerminalRunWhereItWouldHoldNothing(t *testing.T) {
 	dir := t.TempDir()
 	emitRunAt(t, dir, "r1", watchLock,
-		`{"id":"e3","seq":3,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
-{"id":"e4","seq":4,"type":"run.result","payload":{"summary":"done"}}
+		`{"id":"e4","seq":4,"type":"stage.submitted","actor":"backend","payload":{"agent":"backend","stage":"execute"}}
+{"id":"e5","seq":5,"type":"run.result","payload":{"summary":"done"}}
 `, true)
 
 	got := arxi(t, dir, "state", "lock", "r1", "migrations/")

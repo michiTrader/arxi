@@ -567,33 +567,54 @@ func TestAHandEditedAgentIsAuthoritativeOverTheRecordThatMadeIt(t *testing.T) {
 // TestAToolAddedByHandLoadsEvenThoughCreateWouldRefuseIt pins a deliberate
 // asymmetry, which is the kind of thing a later reader deletes as a bug.
 //
-// Create validates the grant list; Load does not. The blueprint schema accepts
-// any string list for `tools`, so a stored agent with a hand-added tool loads for
-// `run start` -- and a reader stricter than the thing that runs the file is the
-// wrong way round for the two to disagree. The refusal belongs where the name is
-// typed, not where it is read back.
-func TestAToolAddedByHandLoadsEvenThoughCreateWouldRefuseIt(t *testing.T) {
+// Create and Load now agree, and this pins the agreement in the direction that
+// costs something to get wrong.
+//
+// This test used to assert the opposite: that Load accepted a hand-added tool
+// Create would refuse, because the blueprint schema took any string list for
+// `tools` and a reader stricter than the thing that runs the file is the wrong
+// way round. The premise was correct and the conclusion followed from it. What
+// changed is the premise -- blueprint.Load validates grant names now, so
+// `run start ./backend.yaml` refuses this file too, and reading by name is no
+// stricter than running by path. They still agree; the answer they agree on
+// moved from accept to refuse.
+//
+// Accepting was never the harmless option it looked like. `telepathy` is not in
+// tool.Mutating, so it resolved to ALLOW, `agent show` printed a policy for it,
+// and the run died on ErrUnknownTool at the first call -- after the turn that
+// produced the call was billed. Refusing at the read costs nothing, because
+// nothing has been spent yet.
+func TestAToolAddedByHandIsRefusedByBothRoutesNotJustCreate(t *testing.T) {
 	s := open(t)
 
 	if err := (Record{Name: "backend", Tools: []string{"telepathy"}}).Validate(); err == nil {
 		t.Fatal("the premise is wrong: Validate accepts an unknown tool, so this " +
-			"test proves nothing about the asymmetry it is here to pin")
+			"test proves nothing about the agreement it is here to pin")
 	}
 
 	raw := "name: backend\n\nmembers:\n  - name: backend\n    tools: [read, telepathy]\n"
 	if err := os.WriteFile(s.Path("backend"), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	bp, err := s.Load("backend")
-	if err != nil {
-		t.Fatalf("Load of an agent with a hand-added tool: %v\n"+
-			"  consequence: this store would refuse a file that `run start "+
-			"./backend.yaml` accepts, so the same bytes would be valid by path and "+
-			"invalid by name -- and the name is the shorter route the user reaches "+
-			"for first.", err)
+
+	_, err := s.Load("backend")
+	if err == nil {
+		t.Fatal("Load accepted an agent granting an unknown tool\n" +
+			"  consequence: the name resolves to allow rather than to nothing, so " +
+			"`agent show` reports a policy for a tool with no implementation and the " +
+			"run stops on ErrUnknownTool mid-turn, after that turn is paid for.\n" +
+			"  remedy: validator.tools in internal/blueprint/load.go.")
 	}
-	if got := strings.Join(bp.Config.Members[0].Tools, ","); got != "read,telepathy" {
-		t.Errorf("tools loaded as %q, want %q", got, "read,telepathy")
+	if !strings.Contains(err.Error(), s.Path("backend")) {
+		t.Errorf("the refusal does not name the file: %v\n"+
+			"  consequence: the operator is told a tool is wrong without being told "+
+			"which of their agent files says so, and `agent list` gives them no way "+
+			"to narrow it down.", err)
+	}
+	if !strings.Contains(err.Error(), "telepathy") {
+		t.Errorf("the refusal does not name the bad tool: %v\n"+
+			"  consequence: the operator has to diff the grant list against the "+
+			"known tools by hand.", err)
 	}
 }
 
