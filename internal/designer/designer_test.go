@@ -119,12 +119,14 @@ func TestANameTheStoreHoldsIsTakenEvenWhenTheFileCannotBeAMember(t *testing.T) {
 		broken("bad", errors.New("nope")),
 	}))
 	for _, name := range []string{"platform", "bad"} {
-		if !m.taken(name) {
-			t.Errorf("%q is reported free, and CreateTeam will refuse it as existing.\n"+
-				"  a team occupies its name however unpickable it is as a member.", name)
+		if m.taken(name) != "agents/"+name+".yaml" {
+			t.Errorf("%q is reported free (%q), and CreateTeam will refuse it as existing.\n"+
+				"  a team occupies its name however unpickable it is as a member, and the\n"+
+				"  refusal has to name the file the operator should go and look at.",
+				name, m.taken(name))
 		}
 	}
-	if m.taken("release") {
-		t.Error("a name no file uses is reported taken")
+	if m.taken("release") != "" {
+		t.Errorf("a name no file uses is reported taken, held by %q", m.taken("release"))
 	}
 }

@@ -210,16 +210,21 @@ func (m Model) isPicked(i int) bool {
 	return false
 }
 
-// taken reports whether the store already holds a file under this name.
+// taken reports where the store already holds a file under this name, or "" if
+// the name is free.
+//
+// The path and not a bool, because the refusal it feeds has to name the file: an
+// operator told `platform already exists` looks for it, and one told
+// `agents/platform.yaml already exists` has already found it.
 //
 // Derived from the listing rather than carried as its own set, so it cannot go
 // stale against it -- and it counts the unusable entries too: a team called
 // `platform` occupies the name `platform` however unpickable it is as a member.
-func (m Model) taken(name string) bool {
+func (m Model) taken(name string) string {
 	for _, c := range m.Cands {
 		if c.Name == name {
-			return true
+			return c.Path
 		}
 	}
-	return false
+	return ""
 }
