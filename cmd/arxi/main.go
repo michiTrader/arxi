@@ -1,16 +1,16 @@
 // Command arxi is the binary.
 //
 // Today it implements schema, surface, why, blueprint validate, blueprint create,
-// run start (live, calling real models, or --sim), run list, run show, run why,
-// run tree, run prompt, run steer, run result, run pause, run unpause, run cancel,
-// run fork, run replay, run attach, event emit, event log, event trace,
-// state set, state get, state lock, state unlock, serve, the trigger group, the
-// inbox group, the agent group, role define, the eval group (--sim only),
-// provider add and the model group; for everything else it answers "declared but
-// not implemented" with the exact name of the capability. That is on purpose: the
-// surface is frozen and verified by tests BEFORE the executor exists, so adding a
-// new command is implementing something that was already promised, not inventing
-// a new promise.
+// blueprint install, run start (live, calling real models, or --sim), run list,
+// run show, run why, run tree, run prompt, run steer, run result, run pause,
+// run unpause, run cancel, run fork, run replay, run attach, event emit,
+// event log, event trace, state set, state get, state lock, state unlock, serve,
+// the trigger group, the inbox group, the agent group, role define, the eval
+// group (--sim only), provider add and the model group; for everything else it
+// answers "declared but not implemented" with the exact name of the capability.
+// That is on purpose: the surface is frozen and verified by tests BEFORE the
+// executor exists, so adding a new command is implementing something that was
+// already promised, not inventing a new promise.
 //
 // The measured figure, rather than this list, is the one to trust. See the
 // README, where a probe that walks the registry against the built binary
@@ -87,6 +87,10 @@ func main() {
 		}
 		if len(args) > 1 && args[1] == "create" {
 			cmdBlueprintCreate(args[2:])
+			return
+		}
+		if len(args) > 1 && args[1] == "install" {
+			cmdBlueprintInstall(args[2:])
 			return
 		}
 	case "run":
@@ -291,6 +295,7 @@ IMPLEMENTED TODAY
   why <file>                 explain why a run is not advancing
   blueprint validate <file>  check a blueprint and print the resolved config
   blueprint create <name>    compose stored agents into a team: --members a,b
+  blueprint install <ref>    install a blueprint from a path or https URL: --as
   provider add <name>        register a provider (--base-url, --api-key-env)
   model list                 see which models may be called, and their status
   run start <bp> <prompt>    run a blueprint file or a stored agent (or --sim)

@@ -192,6 +192,21 @@ func validName(noun, name string) error {
 	return nil
 }
 
+// ValidateName is validName for a caller that has a name and nothing else yet.
+//
+// Record and Team carry their own name to Validate, so nothing needed this until
+// `blueprint install`: `--as` is a name typed on the command line with no record
+// behind it, and the bytes it will name have not been fetched. Checking it early
+// is the ordering `blueprint create` already uses when it validates a Team before
+// opening the store -- an invocation that cannot succeed should not first make a
+// request to somebody else's server, and when both the name and the URL are wrong
+// the refusal should be about the one the user typed.
+//
+// Exported rather than copied into cmd/arxi, because the rules are about what may
+// become a file in THIS store, and a second copy of them would be free to drift
+// from the one the writers enforce.
+func ValidateName(noun, name string) error { return validName(noun, name) }
+
 // Render turns a Record into the bytes that will be written, and proves they
 // load before returning them.
 //
@@ -663,6 +678,38 @@ func (s *Store) CreateTeam(t Team) (string, error) {
 		return "", err
 	}
 	return s.createRaw(t.Name, raw)
+}
+
+// Install writes a blueprint this machine did not author, under Create's rules.
+//
+// It takes bytes rather than a Record or a Team because with `blueprint install`
+// the bytes ARE the artifact. The five fields a Record holds cannot carry a stage
+// list, a watcher, a timeout, an advance rule or a context spec, so rendering the
+// fetched file through Render would install something quietly smaller than what
+// was fetched -- and the digest the caller records as provenance would then
+// describe bytes that are not the ones on disk.
+//
+// The load is done here even though `blueprint install` loads too, to report on
+// what it got. The first promise in this package's doc is that the store cannot
+// write a file `arxi blueprint validate agents/<name>.yaml` would reject, and
+// Create and CreateTeam keep it through Render's load-before-return. Install is
+// handed bytes nothing in this process composed -- the least trustworthy input the
+// store has, from a URL in the general case -- so a writer that skipped the check
+// would be the single path able to break that promise, reached by the single input
+// most likely to break it.
+//
+// The name is validated here and not only in the caller, for validName's own
+// reason: it becomes agents/<name>.yaml. `--as ../../../etc/cron.d/x` has to be
+// refused by the thing that does the writing, because the next caller -- the
+// agent-facing projection of some other verb -- will not remember to check.
+func (s *Store) Install(name string, raw []byte) (string, error) {
+	if err := validName("blueprint", name); err != nil {
+		return "", err
+	}
+	if _, err := blueprint.Load(raw); err != nil {
+		return "", err
+	}
+	return s.createRaw(name, raw)
 }
 
 // createRaw is the publish half of Create: refuse if taken, then write atomically.
