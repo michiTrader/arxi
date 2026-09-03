@@ -339,9 +339,24 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("name", "string", "name")),
 			req(p("members", "string", "agents to compose, comma-separated")),
 			p("stages", "string", "stage names in order, comma-separated (default: one stage, work)")}},
+	// `as` was ADDED when this verb was wired, for `blueprint create`'s reason one
+	// entry up: the entry was written when a ref was assumed to name the thing it
+	// installs, and a ref does not. The default is the blueprint's own `name:`
+	// field, which is what keeps `agents/<name>.yaml` and the name inside the file
+	// the same string everywhere in the store; `as` exists because the name a
+	// stranger chose can already be taken here, and renaming on install is the only
+	// way to have both.
+	//
+	// Not required, and deliberately not defaulted to anything derived from the ref.
+	// A URL tail is a URL artifact -- `/download?id=7` installs an agent called
+	// `download` -- and every other writer in the store guarantees that the filename
+	// matches the declared name, a divergence `agent show` reports as a hand edit.
+	// When the file declares no usable name and `as` is absent, the command refuses
+	// rather than inventing one.
 	{Path: []string{"blueprint", "install"}, Desc: "install a published blueprint",
 		Kind: CLIOnly, Mutates: true, Since: 1,
-		Params: []Param{pos(p("ref", "string", "blueprint reference"))}},
+		Params: []Param{pos(p("ref", "string", "path or https URL to a blueprint YAML")),
+			p("as", "string", "install under this name instead of the blueprint's own")}},
 
 	// ---- shared state ------------------------------------------------------
 	// The `run` positional on all four was ADDED when these verbs were wired, for
