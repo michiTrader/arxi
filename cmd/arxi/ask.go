@@ -400,9 +400,16 @@ func cmdAsk(args []string) {
 	// One shared check, not a second copy: two model checks would eventually
 	// disagree about what a runnable team is. Its 0-member branch names `run start`,
 	// so the command the reader actually typed is added underneath.
-	if err := checkEveryMemberHasAModel(bp.Config, f.model); err != nil {
-		fmt.Fprintf(os.Stderr, "arxi: %v\n  here: arxi -p %q --model <id>\n", err, f.prompt)
-		os.Exit(2)
+	//
+	// Skipped under --sim, on the same condition cmdRunStart uses, because a run
+	// that calls no model resolves no model either: refusing here would make --sim
+	// stricter than the live path it stands in for, which is the one direction a
+	// dry run must never be wrong in.
+	if !f.sim {
+		if err := checkEveryMemberHasAModel(bp.Config, f.model); err != nil {
+			fmt.Fprintf(os.Stderr, "arxi: %v\n  here: arxi -p %q --model <id>\n", err, f.prompt)
+			os.Exit(2)
+		}
 	}
 
 	simNote := ""
@@ -435,8 +442,11 @@ func cmdAsk(args []string) {
 	if rep.model != "" {
 		tail = ", " + rep.model
 	}
-	fmt.Fprintf(os.Stderr, "arxi: spent %s of %s USD, %d turn(s)%s\n",
-		usd(out.State.TreeSpentUSD), usd(out.State.BudgetUSD), out.State.Turns, tail)
+	// simNote again, because exec.Fake reports a cost and the reducer adds it up
+	// like any other: on a simulated run this line carries a number that was never
+	// billed, and a number that says nothing about itself is read as money.
+	fmt.Fprintf(os.Stderr, "arxi: %sspent %s of %s USD, %d turn(s)%s\n",
+		simNote, usd(out.State.TreeSpentUSD), usd(out.State.BudgetUSD), out.State.Turns, tail)
 
 	// Everything below is why an answer is missing or shorter than expected, in the
 	// order a reader needs it: what happened to the reply, then what failed, then
@@ -469,7 +479,8 @@ func cmdAsk(args []string) {
 		fmt.Fprintf(os.Stderr, "arxi: the run stopped early: %v\n", loopErr)
 	}
 	if rep.sim {
-		fmt.Fprintf(os.Stderr, "arxi: --sim, so no model was called and nothing was spent\n")
+		fmt.Fprintf(os.Stderr, "arxi: --sim, so no model was called and nothing above "+
+			"was billed\n")
 	}
 
 	code := askExitCode(rep, loopErr)
