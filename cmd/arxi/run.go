@@ -66,10 +66,18 @@ func cmdRunStart(args []string) {
 
 	f, err := parseStartFlags(args)
 	if err != nil {
+		// --model is in this usage because it was missing from it, and the cost of
+		// that was measured on a reader rather than guessed: the flag is parsed
+		// here, declared in the surface and consumed by the executor, and the one
+		// place a user meets it -- the message printed when they get the
+		// invocation wrong -- did not mention it. A flag absent from the usage of
+		// the command that requires it reads as a flag the command does not have,
+		// and the next thing that reader does is edit a blueprint by hand.
 		fmt.Fprintf(os.Stderr, "arxi run start: %v\n\n"+
-			"usage: arxi run start <actor> <prompt> --budget <usd> [--max-turns N]\n"+
-			"                      [--workspace shared|worktree|copy|none] [--sim]\n"+
-			"short: -a actor  -p prompt  -b budget  -w workspace  -S sim\n", err)
+			"usage: arxi run start <actor> <prompt> --budget <usd> [--model <id>]\n"+
+			"                      [--max-turns N] [--sim]\n"+
+			"                      [--workspace shared|worktree|copy|none]\n"+
+			"short: -a actor  -p prompt  -b budget  -m model  -w workspace  -S sim\n", err)
 		os.Exit(2)
 	}
 
@@ -452,8 +460,29 @@ func checkEveryMemberHasAModel(cfg kernel.Config, def string) error {
 	return nil
 }
 
+// parseStartFlags parses `run start`'s command line: the actor is the first
+// positional word, the prompt is the rest, and --budget is required.
 func parseStartFlags(args []string) (startFlags, error) {
-	f := startFlags{workspace: "auto"}
+	return parseStartArgs(args, startFlags{workspace: "auto"})
+}
+
+// parseStartArgs is that parser with its starting point supplied by the caller.
+//
+// Two entry points now reach a live run, and they differ only in what they
+// arrive already knowing. `run start` is told everything on the command line.
+// The quick path -- `arxi -p "ping"`, in ask.go -- arrives with the actor and the
+// spend ceiling already chosen, and must otherwise accept exactly the same
+// flags. That is the reason this is one parser with a seed rather than two
+// parsers: a second switch would drift, and the way it drifts is silent. Someone
+// adds --max-turns to one of them, and the same flag keeps working on one path
+// and stops working on the other with no test able to notice, because each
+// parser passes its own tests.
+//
+// The seed carries the whole difference. A non-empty actor in it also selects the
+// grammar for the positional words: a caller that already knows who runs has no
+// leading word to skip, so every word is prompt. Without that, `arxi -m X "hola
+// mundo"` would go looking for an agent named hola.
+func parseStartArgs(args []string, f startFlags) (startFlags, error) {
 	var positional []string
 
 	for i := 0; i < len(args); i++ {
@@ -499,7 +528,12 @@ func parseStartFlags(args []string) (startFlags, error) {
 			if err != nil {
 				return f, err
 			}
-			positional = append([]string{v}, positional...)
+			// Assigned, not pushed onto the front of the positionals. Both put the
+			// same word in the same field for every invocation `run start` accepts
+			// -- the difference is that a seeded actor stays seeded. The quick path
+			// arrives already knowing who runs, and a parser that could only learn
+			// the actor from a positional word would have to be handed a fake one.
+			f.actor = v
 		case "--prompt":
 			v, err := next()
 			if err != nil {
@@ -575,29 +609,33 @@ func parseStartFlags(args []string) (startFlags, error) {
 		}
 	}
 
+	// The actor may already be known: --actor named it above, or the caller seeded
+	// it. Only when it is not known does the leading word become the actor, and
+	// then the prompt is whatever follows.
+	if f.actor == "" {
+		if len(positional) < 1 {
+			return f, fmt.Errorf("missing the actor to run")
+		}
+		f.actor, positional = positional[0], positional[1:]
+	}
+
 	// A prompt given as --prompt is taken whole; a positional prompt is joined
 	// from the remaining words, because a shell that was not quoted splits it and
 	// silently truncating to the first word would run a different objective.
 	if f.promptFlag != "" {
-		if len(positional) < 1 {
-			return f, fmt.Errorf("missing the actor to run")
-		}
-		if len(positional) > 1 {
+		if len(positional) > 0 {
 			return f, fmt.Errorf("the prompt was given twice: once as --prompt %q "+
 				"and once positionally (%q). Guessing which one is meant would run "+
 				"an objective the user did not choose",
-				f.promptFlag, strings.Join(positional[1:], " "))
+				f.promptFlag, strings.Join(positional, " "))
 		}
-		f.actor, f.prompt = positional[0], f.promptFlag
+		f.prompt = f.promptFlag
 	} else {
-		if len(positional) < 1 {
-			return f, fmt.Errorf("missing the actor to run")
-		}
-		if len(positional) < 2 {
+		if len(positional) == 0 {
 			return f, fmt.Errorf("missing the prompt: a run with no objective has " +
 				"nothing to put in the agents' context")
 		}
-		f.actor, f.prompt = positional[0], strings.Join(positional[1:], " ")
+		f.prompt = strings.Join(positional, " ")
 	}
 
 	// --budget is checked here and has NO default, which is the one piece of
