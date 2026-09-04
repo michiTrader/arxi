@@ -9,6 +9,61 @@ The thesis of the project fits in one line:
 
 Everything else is a consequence of that.
 
+## Quick start
+
+```bash
+go build -o arxi ./cmd/arxi
+
+arxi provider add anthropic --api-key-env ANTHROPIC_API_KEY
+arxi -p "ping" -m anthropic/claude-sonnet-4-6
+```
+
+Three commands, and the third one is the product. `provider add` fills in the
+endpoint and the model list from a shipped table, with the **first** model
+enabled and the rest disabled — enabling all of them would leave the most
+expensive one in the tree a single `--model` typo away:
+
+```
+$ arxi model list
+NAME                     PROVIDER    STATUS
+claude-sonnet-4-6        anthropic   enabled
+claude-haiku-4-5         anthropic   disabled
+claude-opus-4-1          anthropic   disabled
+```
+
+`-m` stores nothing: the team behind that question lives for the length of the
+question and is gone afterwards. To stop repeating the flag, store the one agent
+this path looks for when nobody names one:
+
+```bash
+arxi agent create default --model anthropic/claude-sonnet-4-6 --tools read,grep
+arxi -p "ping"
+```
+
+`arxi -p` is not a new verb. It is `run start` with the actor and the spend
+ceiling filled in — the same parser, the same loop, the same log — so the
+question you just asked is a run like any other: `arxi run why <id>` explains it
+if it goes quiet, and `arxi event log <id>` holds every event behind the answer.
+
+Two things hold on every invocation. **stdout carries the reply and nothing
+else**, which is what makes `arxi -p "..." > answer.txt` leave an answer in the
+file rather than a transcript; the ceiling, the spend and any trouble go to
+stderr. And **the ceiling is printed with where it came from**, before the first
+model call is made:
+
+```
+$ arxi -p "ping" --sim
+arxi: simulated, ceiling 0.05 USD (built in; ARXI_BUDGET or --budget changes it), --sim, no model calls, run rmtmnbr2s-ba22b5e3
+arxi: simulated, spent 0.01 of 0.05 USD, 1 turn(s)
+arxi: --sim, so no model was called and nothing above was billed
+```
+
+`--sim` is the free version of the same run: same reducer, same log, no model
+calls. The default ceiling is small and no flag can silence the line that states
+it — `--budget` or `ARXI_BUDGET` moves it, and an `ARXI_BUDGET` that is not a
+number of dollars is refused before the run directory exists, rather than falling
+back to the default it was written to replace.
+
 ## The core
 
 ```go
@@ -117,6 +172,7 @@ surface` shows all of them; `arxi schema` emits the manifest an agent consumes.
 What runs today:
 
 ```
+arxi -p "<prompt>" [-m <id>]                    one question, one answer
 arxi run start <bp> <prompt> --budget N         run a blueprint, calling real models
 arxi run start ... --sim                        the same run with no model calls
 arxi provider add <name> --base-url URL         register a provider
