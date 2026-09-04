@@ -234,7 +234,7 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1522 tests, no dependencies**.
+Underneath, every package is done and tested — **1542 tests, no dependencies**.
 The count is of **cases reported by `go test -v`, subtests included**, which is
 what `go test -run` can address individually:
 
@@ -269,7 +269,7 @@ reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 | `internal/agentstore` | stored agents and teams: one file each, and which names a team may compose | 31 |
 | `internal/rolestore` | roles on disk: the defaults `agent create --role` copies once | 14 |
 | `internal/designer` | the designer as a pure function: a model in, a key in, a frame out | 38 |
-| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 582 |
+| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 602 |
 | `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 20 |
 
 Those cells add up to the total, and that is the only reason to print them: an
@@ -531,7 +531,7 @@ directions. Four things are being built, and they are at very different stages:
 Read together they say something a single percentage cannot: **what is declared
 is finished, and what is declared is not everything a person could want.** The
 reducer, the log, the fold, the budget arithmetic and the trigger/eval/model
-layers are complete and heavily tested — that is where most of the 1522 tests
+layers are complete and heavily tested — that is where most of the 1542 tests
 live. What used to be missing was the last mile, CLI verbs that would read state
 the runners already produced, and the last mile is walked: the four rows above are
 the four things this project set out to build, and each is now at its declared
