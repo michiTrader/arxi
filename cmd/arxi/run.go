@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -66,10 +67,18 @@ func cmdRunStart(args []string) {
 
 	f, err := parseStartFlags(args)
 	if err != nil {
+		// --model is in this usage because it was missing from it, and the cost of
+		// that was measured on a reader rather than guessed: the flag is parsed
+		// here, declared in the surface and consumed by the executor, and the one
+		// place a user meets it -- the message printed when they get the
+		// invocation wrong -- did not mention it. A flag absent from the usage of
+		// the command that requires it reads as a flag the command does not have,
+		// and the next thing that reader does is edit a blueprint by hand.
 		fmt.Fprintf(os.Stderr, "arxi run start: %v\n\n"+
-			"usage: arxi run start <actor> <prompt> --budget <usd> [--max-turns N]\n"+
-			"                      [--workspace shared|worktree|copy|none] [--sim]\n"+
-			"short: -a actor  -p prompt  -b budget  -w workspace  -S sim\n", err)
+			"usage: arxi run start <actor> <prompt> --budget <usd> [--model <id>]\n"+
+			"                      [--max-turns N] [--sim]\n"+
+			"                      [--workspace shared|worktree|copy|none]\n"+
+			"short: -a actor  -p prompt  -b budget  -m model  -w workspace  -S sim\n", err)
 		os.Exit(2)
 	}
 
@@ -97,11 +106,6 @@ func cmdRunStart(args []string) {
 		os.Exit(1)
 	}
 
-	cfg := bp.Config
-	if f.workspace != "" && f.workspace != "auto" {
-		cfg.Workspace = f.workspace
-	}
-
 	// A live run needs a model for every member BEFORE the run directory exists,
 	// and the check happens here for that reason. Discovering halfway through
 	// that one member has no model leaves a half-written run whose log records a
@@ -111,10 +115,56 @@ func cmdRunStart(args []string) {
 	// executor's job, and doing it twice would let the two answers differ. This
 	// only refuses the case no resolution could fix.
 	if !f.sim {
-		if err := checkEveryMemberHasAModel(cfg, f.model); err != nil {
+		if err := checkEveryMemberHasAModel(bp.Config, f.model); err != nil {
 			fmt.Fprintf(os.Stderr, "arxi run start: %v\n", err)
 			os.Exit(2)
 		}
+	}
+
+	dir, out, err := executeRun(f, bp, func(dir string, cfg kernel.Config) {
+		// usd and not %.2f. This line printed `--budget 0.005` as `budget 0.01
+		// USD`: a ceiling ROUNDED UP, so the banner promised twice the headroom
+		// the run actually had, and the summary four lines later contradicted it
+		// with `of 0.0050`. One command, one field, two numbers.
+		//
+		// Rounding a ceiling up is the worse of the two directions, because the
+		// reader is shown more room than the run has and the block that follows
+		// looks premature. eval run was already held to this rule by
+		// TestABudgetTooSmallToRoundIsNotPrintedAsZero; the run that actually
+		// spends the money was not.
+		fmt.Printf("run %s started (budget %s USD, workspace %s)\n",
+			f.runID, usd(f.budget), workspaceNote(f.workspace, cfg.Workspace))
+	})
+
+	// The summary is printed even when the loop failed. A run that died halfway
+	// still spent money and still moved through stages, and hiding that behind
+	// the error would leave the user with a bill and no account of it.
+	printRunSummary(f.runID, dir, out)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// executeRun starts the run and hands back where it got to.
+//
+// It is everything `run start` does after the invocation has been checked, split
+// out because the quick path (`arxi -p "ping"`, ask.go) has to do the same thing
+// and print a different thing. What differs between the two is only output: which
+// stream the accounting goes to, and whether the model's reply is printed at all.
+// None of that belongs in here, so the only thing this takes from its caller is
+// announce -- called once, after run.started is in the log and before the first
+// turn opens, which is the last moment a line can be printed that is still true
+// if the very first model call hangs.
+//
+// The error is RETURNED rather than exited on, because both callers have
+// something to print after a failed loop: a run that stopped early still spent
+// money, and the account of it is the caller's to render.
+func executeRun(f startFlags, bp *blueprint.Blueprint, announce func(dir string, cfg kernel.Config)) (string, exec.Outcome, error) {
+	cfg := bp.Config
+	if f.workspace != "" && f.workspace != "auto" {
+		cfg.Workspace = f.workspace
 	}
 
 	dir := f.dir
@@ -271,18 +321,7 @@ func cmdRunStart(args []string) {
 		fatal(fmt.Errorf("record run.started: %w", err))
 	}
 
-	// usd and not %.2f. This line printed `--budget 0.005` as `budget 0.01
-	// USD`: a ceiling ROUNDED UP, so the banner promised twice the headroom the
-	// run actually had, and the summary four lines later contradicted it with
-	// `of 0.0050`. One command, one field, two numbers.
-	//
-	// Rounding a ceiling up is the worse of the two directions, because the
-	// reader is shown more room than the run has and the block that follows
-	// looks premature. eval run was already held to this rule by
-	// TestABudgetTooSmallToRoundIsNotPrintedAsZero; the run that actually
-	// spends the money was not.
-	fmt.Printf("run %s started (budget %s USD, workspace %s)\n",
-		f.runID, usd(f.budget), workspaceNote(f.workspace, cfg.Workspace))
+	announce(dir, cfg)
 
 	loop := &exec.Loop{
 		Runner: runner,
@@ -293,29 +332,19 @@ func cmdRunStart(args []string) {
 
 	out, err := loop.Run(context.Background())
 
-	// The summary is printed even when the loop failed. A run that died halfway
-	// still spent money and still moved through stages, and hiding that behind
-	// the error would leave the user with a bill and no account of it.
-	printRunSummary(f.runID, dir, out)
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
-		// The store is CLOSED before exiting, and the deferred Close above is
-		// not enough: os.Exit does not run defers, so this path left the writer
-		// lock on disk holding a pid that no longer exists. The next command
-		// touching that run then refused with "already open for writing by pid
-		// N" and told the operator to delete a lock file by hand -- for a run
-		// that had merely failed, which is exactly when somebody wants to
-		// retry it.
-		//
-		// The failure is doubly unhelpful because the advice is dangerous to
-		// generalise: an operator who learns to delete writer.lock after a
-		// crash will eventually delete a live one. Releasing it on the way out
-		// is the fix; the manual remedy is for a hard kill, which nothing here
-		// can help with.
-		store.Close()
-		os.Exit(1)
-	}
+	// The store is CLOSED on the way out, and the deferred Close is what does it
+	// now: this used to be a bare os.Exit(1) on a failed loop, which does not run
+	// defers, so a run that had merely failed left writer.lock on disk holding a
+	// pid that no longer exists. The next command touching that run then refused
+	// with "already open for writing by pid N" and told the operator to delete a
+	// lock file by hand -- for a run that had failed, which is exactly when
+	// somebody wants to retry it.
+	//
+	// The advice is also dangerous to generalise: an operator who learns to delete
+	// writer.lock after a crash will eventually delete a live one. Returning
+	// instead of exiting is what makes the release automatic; the manual remedy is
+	// for a hard kill, which nothing here can help with.
+	return dir, out, err
 }
 
 // printRunSummary reports where the run got to, in the terms the user paid in.
@@ -452,8 +481,29 @@ func checkEveryMemberHasAModel(cfg kernel.Config, def string) error {
 	return nil
 }
 
+// parseStartFlags parses `run start`'s command line: the actor is the first
+// positional word, the prompt is the rest, and --budget is required.
 func parseStartFlags(args []string) (startFlags, error) {
-	f := startFlags{workspace: "auto"}
+	return parseStartArgs(args, startFlags{workspace: "auto"})
+}
+
+// parseStartArgs is that parser with its starting point supplied by the caller.
+//
+// Two entry points now reach a live run, and they differ only in what they
+// arrive already knowing. `run start` is told everything on the command line.
+// The quick path -- `arxi -p "ping"`, in ask.go -- arrives with the actor and the
+// spend ceiling already chosen, and must otherwise accept exactly the same
+// flags. That is the reason this is one parser with a seed rather than two
+// parsers: a second switch would drift, and the way it drifts is silent. Someone
+// adds --max-turns to one of them, and the same flag keeps working on one path
+// and stops working on the other with no test able to notice, because each
+// parser passes its own tests.
+//
+// The seed carries the whole difference. A non-empty actor in it also selects the
+// grammar for the positional words: a caller that already knows who runs has no
+// leading word to skip, so every word is prompt. Without that, `arxi -m X "hola
+// mundo"` would go looking for an agent named hola.
+func parseStartArgs(args []string, f startFlags) (startFlags, error) {
 	var positional []string
 
 	for i := 0; i < len(args); i++ {
@@ -499,7 +549,12 @@ func parseStartFlags(args []string) (startFlags, error) {
 			if err != nil {
 				return f, err
 			}
-			positional = append([]string{v}, positional...)
+			// Assigned, not pushed onto the front of the positionals. Both put the
+			// same word in the same field for every invocation `run start` accepts
+			// -- the difference is that a seeded actor stays seeded. The quick path
+			// arrives already knowing who runs, and a parser that could only learn
+			// the actor from a positional word would have to be handed a fake one.
+			f.actor = v
 		case "--prompt":
 			v, err := next()
 			if err != nil {
@@ -575,29 +630,33 @@ func parseStartFlags(args []string) (startFlags, error) {
 		}
 	}
 
+	// The actor may already be known: --actor named it above, or the caller seeded
+	// it. Only when it is not known does the leading word become the actor, and
+	// then the prompt is whatever follows.
+	if f.actor == "" {
+		if len(positional) < 1 {
+			return f, fmt.Errorf("missing the actor to run")
+		}
+		f.actor, positional = positional[0], positional[1:]
+	}
+
 	// A prompt given as --prompt is taken whole; a positional prompt is joined
 	// from the remaining words, because a shell that was not quoted splits it and
 	// silently truncating to the first word would run a different objective.
 	if f.promptFlag != "" {
-		if len(positional) < 1 {
-			return f, fmt.Errorf("missing the actor to run")
-		}
-		if len(positional) > 1 {
+		if len(positional) > 0 {
 			return f, fmt.Errorf("the prompt was given twice: once as --prompt %q "+
 				"and once positionally (%q). Guessing which one is meant would run "+
 				"an objective the user did not choose",
-				f.promptFlag, strings.Join(positional[1:], " "))
+				f.promptFlag, strings.Join(positional, " "))
 		}
-		f.actor, f.prompt = positional[0], f.promptFlag
+		f.prompt = f.promptFlag
 	} else {
-		if len(positional) < 1 {
-			return f, fmt.Errorf("missing the actor to run")
-		}
-		if len(positional) < 2 {
+		if len(positional) == 0 {
 			return f, fmt.Errorf("missing the prompt: a run with no objective has " +
 				"nothing to put in the agents' context")
 		}
-		f.actor, f.prompt = positional[0], strings.Join(positional[1:], " ")
+		f.prompt = strings.Join(positional, " ")
 	}
 
 	// --budget is checked here and has NO default, which is the one piece of

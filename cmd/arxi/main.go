@@ -1,13 +1,16 @@
 // Command arxi is the binary.
 //
-// Today it implements schema, surface, why, blueprint validate, blueprint create,
-// blueprint install, run start (live, calling real models, or --sim), run list,
-// run show, run why, run tree, run prompt, run steer, run result, run pause,
-// run unpause, run cancel, run fork, run replay, run attach, event emit,
-// event log, event trace, state set, state get, state lock, state unlock, serve,
-// the trigger group, the inbox group, the agent group, role define, the eval
-// group (--sim only), provider add and the model group; for everything else it
-// answers "declared but not implemented" with the exact name of the capability.
+// Today it implements schema, surface, why, design, blueprint validate,
+// blueprint create, blueprint install, run start (live, calling real models, or
+// --sim), run list, run show, run why, run tree, run prompt, run steer,
+// run result, run pause, run unpause, run cancel, run fork, run replay,
+// run attach, event emit, event log, event trace, state set, state get,
+// state lock, state unlock, serve, the trigger group, the inbox group, the agent
+// group, role define, the eval group (--sim only), provider add and the model
+// group; for everything else it answers "declared but not implemented" with the
+// exact name of the capability. It also answers `arxi -p "<prompt>"`, which is
+// not a capability and is not counted as one: it is an alias over `run start`
+// with the actor and the ceiling filled in, argued for at the top of ask.go.
 // That is on purpose: the surface is frozen and verified by tests BEFORE the
 // executor exists, so adding a new command is implementing something that was
 // already promised, not inventing a new promise.
@@ -18,7 +21,7 @@
 // with the binary. No count is repeated here on purpose: this comment has no
 // such test, so a figure in it can only rot.
 //
-// This paragraph has already been wrong six times. It claimed three commands
+// This paragraph has already been wrong seven times. It claimed three commands
 // after six existed, it said `run start` was --sim only after the live executor
 // had landed, it carried "16 of 47" through six wirings and two registry
 // corrections, it omitted `run prompt` for that verb's entire life -- found
@@ -27,9 +30,11 @@
 // `run replay` landed and the coverage guard's own list of wired paths was read
 // against it, and it went stale again one increment later: `state set` shipped
 // wired, tested and counted in the README while this list did not mention it,
-// found when `state get` was added to the same sentence. That is the second
-// omission caught by the act of editing the line for the NEXT verb, which is
-// the only mechanism that has ever caught one here.
+// found when `state get` was added to the same sentence. `design` then shipped
+// the same way and was missing here for its whole life, found when the `-p`
+// short form was added to the same sentence. That is the third omission caught
+// by the act of editing the line for the NEXT verb, which is still the only
+// mechanism that has ever caught one here.
 //
 // A doc comment that overstates what is missing is the kind of stale
 // documentation that costs a reader nothing and a contributor everything: they
@@ -182,6 +187,21 @@ func main() {
 		return
 	}
 
+	// The short form, `arxi -p "..."`. The first word of every command above is a
+	// noun, so a leading flag cannot be any of them -- and the three flags that
+	// mean something else (-h, --help, --version) were answered at the top of the
+	// switch and are refused by looksLikeAsk as well, so reordering this file
+	// cannot turn `arxi --version` into a prompt with no prompt in it.
+	//
+	// It is tested after the switch rather than given a case of its own because
+	// there is no case to write: the surface declares no capability here. cmdAsk
+	// is an alias over `run start`, in the manner of `why` above, and the whole
+	// argument for that lives at the top of ask.go.
+	if looksLikeAsk(args[0]) {
+		cmdAsk(args)
+		return
+	}
+
 	// Everything else: if it is declared, say so precisely. An "unknown command"
 	// when the command DOES exist in the surface is the worst possible answer:
 	// it sends the user hunting for a typo they never made.
@@ -313,6 +333,7 @@ func usage() {
 
 USAGE
   arxi <command> [args]
+  arxi -p "<prompt>"         one question, one answer; see THE SHORT FORM below
 
 IMPLEMENTED TODAY
   schema                     emit the surface manifest (JSON)
@@ -348,6 +369,18 @@ IMPLEMENTED TODAY
   eval run <suite>           suites, pass rates, and two runs side by side
   serve [--listen ADDR]      speak the NDJSON protocol; stdio without --listen
   version                    version of the binary and of the surface
+
+THE SHORT FORM
+  arxi -p "ping"             ask the stored agent named default
+  arxi -p "ping" -m <id>     ask with no stored agent at all; nothing is stored
+
+  It is 'run start' with the actor and the spend ceiling filled in -- the same
+  parser, the same loop, the same log -- so a flag that works there works here.
+  stdout carries the reply and nothing else, which is what makes
+  'arxi -p "..." > answer.txt' leave an answer in the file rather than a
+  transcript; the ceiling, the spend and any trouble go to stderr. The ceiling
+  is small, and it is printed with where it came from before the first model
+  call is made: ARXI_BUDGET or --budget changes it, and nothing silences it.
 
 SHORT FLAGS
   One letter means the same thing on every command that has that parameter:
