@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -105,11 +106,6 @@ func cmdRunStart(args []string) {
 		os.Exit(1)
 	}
 
-	cfg := bp.Config
-	if f.workspace != "" && f.workspace != "auto" {
-		cfg.Workspace = f.workspace
-	}
-
 	// A live run needs a model for every member BEFORE the run directory exists,
 	// and the check happens here for that reason. Discovering halfway through
 	// that one member has no model leaves a half-written run whose log records a
@@ -119,10 +115,56 @@ func cmdRunStart(args []string) {
 	// executor's job, and doing it twice would let the two answers differ. This
 	// only refuses the case no resolution could fix.
 	if !f.sim {
-		if err := checkEveryMemberHasAModel(cfg, f.model); err != nil {
+		if err := checkEveryMemberHasAModel(bp.Config, f.model); err != nil {
 			fmt.Fprintf(os.Stderr, "arxi run start: %v\n", err)
 			os.Exit(2)
 		}
+	}
+
+	dir, out, err := executeRun(f, bp, func(dir string, cfg kernel.Config) {
+		// usd and not %.2f. This line printed `--budget 0.005` as `budget 0.01
+		// USD`: a ceiling ROUNDED UP, so the banner promised twice the headroom
+		// the run actually had, and the summary four lines later contradicted it
+		// with `of 0.0050`. One command, one field, two numbers.
+		//
+		// Rounding a ceiling up is the worse of the two directions, because the
+		// reader is shown more room than the run has and the block that follows
+		// looks premature. eval run was already held to this rule by
+		// TestABudgetTooSmallToRoundIsNotPrintedAsZero; the run that actually
+		// spends the money was not.
+		fmt.Printf("run %s started (budget %s USD, workspace %s)\n",
+			f.runID, usd(f.budget), workspaceNote(f.workspace, cfg.Workspace))
+	})
+
+	// The summary is printed even when the loop failed. A run that died halfway
+	// still spent money and still moved through stages, and hiding that behind
+	// the error would leave the user with a bill and no account of it.
+	printRunSummary(f.runID, dir, out)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// executeRun starts the run and hands back where it got to.
+//
+// It is everything `run start` does after the invocation has been checked, split
+// out because the quick path (`arxi -p "ping"`, ask.go) has to do the same thing
+// and print a different thing. What differs between the two is only output: which
+// stream the accounting goes to, and whether the model's reply is printed at all.
+// None of that belongs in here, so the only thing this takes from its caller is
+// announce -- called once, after run.started is in the log and before the first
+// turn opens, which is the last moment a line can be printed that is still true
+// if the very first model call hangs.
+//
+// The error is RETURNED rather than exited on, because both callers have
+// something to print after a failed loop: a run that stopped early still spent
+// money, and the account of it is the caller's to render.
+func executeRun(f startFlags, bp *blueprint.Blueprint, announce func(dir string, cfg kernel.Config)) (string, exec.Outcome, error) {
+	cfg := bp.Config
+	if f.workspace != "" && f.workspace != "auto" {
+		cfg.Workspace = f.workspace
 	}
 
 	dir := f.dir
@@ -279,18 +321,7 @@ func cmdRunStart(args []string) {
 		fatal(fmt.Errorf("record run.started: %w", err))
 	}
 
-	// usd and not %.2f. This line printed `--budget 0.005` as `budget 0.01
-	// USD`: a ceiling ROUNDED UP, so the banner promised twice the headroom the
-	// run actually had, and the summary four lines later contradicted it with
-	// `of 0.0050`. One command, one field, two numbers.
-	//
-	// Rounding a ceiling up is the worse of the two directions, because the
-	// reader is shown more room than the run has and the block that follows
-	// looks premature. eval run was already held to this rule by
-	// TestABudgetTooSmallToRoundIsNotPrintedAsZero; the run that actually
-	// spends the money was not.
-	fmt.Printf("run %s started (budget %s USD, workspace %s)\n",
-		f.runID, usd(f.budget), workspaceNote(f.workspace, cfg.Workspace))
+	announce(dir, cfg)
 
 	loop := &exec.Loop{
 		Runner: runner,
@@ -301,29 +332,19 @@ func cmdRunStart(args []string) {
 
 	out, err := loop.Run(context.Background())
 
-	// The summary is printed even when the loop failed. A run that died halfway
-	// still spent money and still moved through stages, and hiding that behind
-	// the error would leave the user with a bill and no account of it.
-	printRunSummary(f.runID, dir, out)
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
-		// The store is CLOSED before exiting, and the deferred Close above is
-		// not enough: os.Exit does not run defers, so this path left the writer
-		// lock on disk holding a pid that no longer exists. The next command
-		// touching that run then refused with "already open for writing by pid
-		// N" and told the operator to delete a lock file by hand -- for a run
-		// that had merely failed, which is exactly when somebody wants to
-		// retry it.
-		//
-		// The failure is doubly unhelpful because the advice is dangerous to
-		// generalise: an operator who learns to delete writer.lock after a
-		// crash will eventually delete a live one. Releasing it on the way out
-		// is the fix; the manual remedy is for a hard kill, which nothing here
-		// can help with.
-		store.Close()
-		os.Exit(1)
-	}
+	// The store is CLOSED on the way out, and the deferred Close is what does it
+	// now: this used to be a bare os.Exit(1) on a failed loop, which does not run
+	// defers, so a run that had merely failed left writer.lock on disk holding a
+	// pid that no longer exists. The next command touching that run then refused
+	// with "already open for writing by pid N" and told the operator to delete a
+	// lock file by hand -- for a run that had failed, which is exactly when
+	// somebody wants to retry it.
+	//
+	// The advice is also dangerous to generalise: an operator who learns to delete
+	// writer.lock after a crash will eventually delete a live one. Returning
+	// instead of exiting is what makes the release automatic; the manual remedy is
+	// for a hard kill, which nothing here can help with.
+	return dir, out, err
 }
 
 // printRunSummary reports where the run got to, in the terms the user paid in.
