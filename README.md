@@ -2216,18 +2216,23 @@ UPDATE_GOLDEN=1 go test ./internal/kernel
 
 | path | what is there |
 |---|---|
+| [`docs/design/30-vision.md`](docs/design/30-vision.md) | the intended product direction, its boundaries and the decisions deliberately left open |
 | [`docs/design/20-use-cases.md`](docs/design/20-use-cases.md) | every command, reached by walking eleven realistic scenarios |
 | [`docs/design/10-execution.md`](docs/design/10-execution.md) | the full execution model |
-| [`docs/adr/`](docs/adr/) | why each decision, and what breaks if it is reverted |
-| [`spec/events.md`](spec/events.md) | the event catalogue and the `blocked_ref` contract |
+| [`docs/adr/`](docs/adr/) | why each accepted decision exists, and what breaks if it is reverted |
+| [`spec/events.md`](spec/events.md) | the current event catalogue and the `blocked_ref` contract |
 
-Start with the use cases if you want to know what the tool *does*, and with the
-ADRs if you want to know why it is built this way. The use-case document is
-enforced by tests: a capability no scenario reaches, or an example using a verb
+Start with the vision to understand where the product is intended to go and the
+boundaries it must preserve. Start with the use cases to learn what works today,
+with the ADRs to learn why accepted decisions were made, and with the specs when
+you need the contracts current implementations must obey. The use-case document
+is enforced by tests: a capability no scenario reaches, or an example using a verb
 that does not exist, fails the build.
 
-The ADRs are the best entry point: each one says what was decided, which
-alternative was discarded and **which test enforces the decision**.
+The ADRs are the best entry point for an accepted architectural choice: each one
+says what was decided, which alternative was discarded and **which test enforces
+the decision**. Proposed directions belong in the vision until implementation and
+evidence justify a focused ADR or specification.
 
 ## Code layout
 
@@ -2237,7 +2242,7 @@ internal/surface/   the surface declared once, and its three projections
 internal/arch_test  the architectural boundaries, verified with go list
 cmd/arxi/           the CLI
 spec/               event contracts
-docs/design/        the execution model and the use cases
+docs/design/        product vision, execution model and current use cases
 docs/adr/           one file per decision that cannot change quietly
 ```
 
