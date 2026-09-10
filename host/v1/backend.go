@@ -53,6 +53,7 @@ func newBackend(options Options) backend {
 				}
 			}
 		}
+	}
 	resolver, err := newCapabilityResolver(installed, options.Authorizer)
 	if err != nil {
 		panic(err)
@@ -85,6 +86,22 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	if actor == "" {
 		actor = bp.Name
 	}
+	requestDigest, err := canonicalSubmitDigest(req, actor, bp.SHA)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "canonicalize submission: "+err.Error())
+	}
+	if key := strings.TrimSpace(req.IdempotencyKey); key != "" {
+		if b.coordination == nil {
+			return SubmitResult{}, invalidArgument(CapabilitySubmit, "idempotency key requires durable coordination")
+		}
+		bound, bindErr := b.coordination.BindSubmission(ctx, SubmissionBinding{
+			Key: key, RequestDigest: requestDigest, JobID: id,
+		})
+		if bindErr != nil {
+			return SubmitResult{}, adaptCoordinationError(CapabilitySubmit, id, bindErr)
+		}
+		id = bound.JobID
+	}
 	mode := "live"
 	if req.Simulated {
 		mode = "sim"
@@ -112,6 +129,12 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 		Records:   []StoredRecord{{Data: encoded}},
 	})
 	out := SubmitResult{JobID: id, AcceptedSeq: 1, Status: JobRunning}
+	if err != nil && strings.TrimSpace(req.IdempotencyKey) != "" && errors.Is(err, ErrStorageConflict) {
+		job, loadErr := b.inspect(ctx, CapabilitySubmit, id)
+		if loadErr == nil {
+			return SubmitResult{JobID: id, AcceptedSeq: 1, Status: job.Status}, nil
+		}
+	}
 	if err != nil {
 		return out, adaptStorageError(CapabilitySubmit, id, 0, err)
 	}
@@ -477,6 +500,33 @@ func decodeStoredEvent(record StoredRecord) (kernel.Event, error) {
 	}
 	event.Seq = record.Sequence
 	return event, nil
+}
+
+func canonicalSubmitDigest(req SubmitRequest, actor, blueprintSHA string) (string, error) {
+	body, err := json.Marshal(struct {
+		Schema       string  `json:"schema"`
+		PrincipalID  string  `json:"principal_id"`
+		Actor        string  `json:"actor"`
+		BlueprintSHA string  `json:"blueprint_sha"`
+		Prompt       string  `json:"prompt"`
+		BudgetUSD    float64 `json:"budget_usd"`
+		MaxTurns     int     `json:"max_turns"`
+		Simulated    bool    `json:"simulated"`
+	}{"arxi.host.submit/v1", req.Principal.ID, actor, blueprintSHA, req.Prompt, req.BudgetUSD, req.MaxTurns, req.Simulated})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func adaptCoordinationError(op Capability, id JobID, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	out := newError(CodeConflict, string(op), err.Error(), err)
+	out.JobID = id
+	return out
 }
 
 func newStorageJobID(now time.Time) string {
