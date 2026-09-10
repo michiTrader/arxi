@@ -149,6 +149,7 @@ func cmdTriggerCreate(args []string) {
 		fmt.Fprintf(os.Stderr, "arxi trigger create: %v\n", err)
 		os.Exit(2)
 	}
+	r.ID = r.Identity()
 
 	if err := openStore().Create(r); err != nil {
 		fmt.Fprintf(os.Stderr, "arxi trigger create: %v\n", err)

@@ -267,6 +267,93 @@ func TestRunAllOwesOneRunPerMissedFiring(t *testing.T) {
 	}
 }
 
+func TestRunAllReturnsEveryNominalSlotInAscendingOrder(t *testing.T) {
+	r := active()
+	r.OnMissed = MissedRunAll
+	r.LastFiredAt = "2026-08-25T03:00:00Z"
+
+	d, err := Due(r, rfc("2026-08-29T10:00:00Z"))
+	if err != nil {
+		t.Fatalf("due: %v", err)
+	}
+	want := []string{
+		"2026-08-26T03:00:00Z",
+		"2026-08-27T03:00:00Z",
+		"2026-08-28T03:00:00Z",
+		"2026-08-29T03:00:00Z",
+	}
+	if len(d.Slots) != len(want) {
+		t.Fatalf("run-all returned %d nominal slots for four owed firings: durable admission cannot create one occurrence per run; return every selected slot, want %d", len(d.Slots), len(want))
+	}
+	for i, slot := range d.Slots {
+		if got := slot.Format(time.RFC3339); got != want[i] {
+			t.Fatalf("run-all slot %d = %s, want %s: occurrence order or identity would depend on scheduler wake time; return owed nominal slots in ascending order", i, got, want[i])
+		}
+	}
+}
+
+func TestRunOnceSelectsTheMostRecentOwedSlotAndNamesSkippedBacklog(t *testing.T) {
+	r := active()
+	r.OnMissed = MissedRunOnce
+	r.LastFiredAt = "2026-08-25T03:00:00Z"
+
+	d, err := Due(r, rfc("2026-08-29T10:00:00Z"))
+	if err != nil {
+		t.Fatalf("due: %v", err)
+	}
+	if len(d.Slots) != 1 || d.Slots[0].Format(time.RFC3339) != "2026-08-29T03:00:00Z" {
+		t.Fatalf("run-once selected slots %v: a delayed tick would bind the job to an arbitrary old occurrence; select only the most recent owed nominal slot", d.Slots)
+	}
+	if len(d.SkippedSlots) != 3 || d.SkippedSlots[0].Format(time.RFC3339) != "2026-08-26T03:00:00Z" || d.SkippedSlots[2].Format(time.RFC3339) != "2026-08-28T03:00:00Z" {
+		t.Fatalf("run-once returned skipped slots %v: collapsed backlog could silently reappear after restart; expose every consciously skipped nominal slot for durable recording", d.SkippedSlots)
+	}
+}
+
+func TestSkipReturnsEveryConsciouslySkippedNominalSlot(t *testing.T) {
+	r := active()
+	r.LastFiredAt = "2026-08-25T03:00:00Z"
+
+	d, err := Due(r, rfc("2026-08-29T10:00:00Z"))
+	if err != nil {
+		t.Fatalf("due: %v", err)
+	}
+	if len(d.Slots) != 0 || len(d.SkippedSlots) != 4 {
+		t.Fatalf("skip returned %d runnable and %d skipped slots, want 0 and 4: durable coordination cannot prove the backlog was discarded; expose exact skipped slots without admitting them", len(d.Slots), len(d.SkippedSlots))
+	}
+	for i := 1; i < len(d.SkippedSlots); i++ {
+		if !d.SkippedSlots[i].After(d.SkippedSlots[i-1]) {
+			t.Fatalf("skipped slots are not ascending at %d: deterministic occurrence recording requires canonical order; sort by nominal instant", i)
+		}
+	}
+}
+
+func TestFirstFiringReturnsTheMostRecentSlotWithinTheExistingBound(t *testing.T) {
+	r := active()
+
+	d, err := Due(r, rfc("2026-08-02T10:00:00Z"))
+	if err != nil {
+		t.Fatalf("due: %v", err)
+	}
+	if len(d.Slots) != 1 || d.Slots[0].Format(time.RFC3339) != "2026-08-02T03:00:00Z" {
+		t.Fatalf("first firing returned slots %v: durable occurrence identity would use a stale or wake-time instant; return the most recent due slot reached by the bounded first-firing walk", d.Slots)
+	}
+}
+
+func TestACappedRunAllReturnsExactlyTheBoundedSlotsItCanClaim(t *testing.T) {
+	r := active()
+	r.On = "every:1m"
+	r.OnMissed = MissedRunAll
+	r.LastFiredAt = "2026-08-01T00:00:00Z"
+
+	d, err := Due(r, rfc("2026-08-29T10:00:00Z"))
+	if err != nil {
+		t.Fatalf("due: %v", err)
+	}
+	if !d.MissedCapped || len(d.Slots) != missedCap || d.Runs != len(d.Slots) {
+		t.Fatalf("capped run-all returned capped=%v runs=%d slots=%d: count-only work cannot receive stable occurrence identities; return one exact slot per bounded run", d.MissedCapped, d.Runs, len(d.Slots))
+	}
+}
+
 func TestACappedBacklogIsReportedAsAtLeast(t *testing.T) {
 	r := active()
 	r.On = "every:1m" // 1440 slots a day, so a week is well past the cap

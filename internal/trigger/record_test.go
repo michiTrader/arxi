@@ -176,6 +176,69 @@ func TestStoredTextIsRevalidatedOnLoad(t *testing.T) {
 	}
 }
 
+func TestLegacyIdentityIsStableAcrossStatusAndHistoryChanges(t *testing.T) {
+	legacy := nightly()
+	first := legacy.Identity()
+	if len(first) != 64 {
+		t.Fatalf("legacy trigger identity has %d hexadecimal characters, want 64: occurrence keys cannot rely on the promised SHA-256 identity; return the complete digest", len(first))
+	}
+
+	changed := legacy
+	changed.Status = StatusPaused
+	changed.LastFiredAt = "2026-08-27T03:04:00Z"
+	changed.LastScheduledAt = "2026-08-27T03:00:00Z"
+	changed.LastStatus = "skipped"
+	if got := changed.Identity(); got != first {
+		t.Fatalf("status or history changed legacy identity from %q to %q: one trigger slot would gain a second occurrence identity after every scheduler write; derive identity only from immutable definition fields", first, got)
+	}
+	if string(legacy.CanonicalIdentitySource()) != string(changed.CanonicalIdentitySource()) {
+		t.Fatal("canonical identity source changed with runtime state: adapters would derive incompatible trigger IDs; exclude status and history from canonical source material")
+	}
+}
+
+func TestLegacyIdentityChangesWithImmutableDefinition(t *testing.T) {
+	base := nightly()
+	want := base.Identity()
+	cases := []struct {
+		name   string
+		mutate func(*Record)
+	}{
+		{"name", func(r *Record) { r.Name = "weekly-audit" }},
+		{"schedule", func(r *Record) { r.On = "cron:0 4 * * *" }},
+		{"action", func(r *Record) { r.Then = "run start security-team 'different audit'" }},
+		{"budget", func(r *Record) { r.Budget = 6 }},
+		{"created instant", func(r *Record) { r.CreatedAt = "2026-08-26T12:01:00Z" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := base
+			tc.mutate(&r)
+			if got := r.Identity(); got == want {
+				t.Fatalf("changing immutable %s preserved trigger identity %q: distinct definitions could collide on one durable occurrence stream; include the field in canonical identity material", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestExplicitIdentityOverridesLegacyDerivation(t *testing.T) {
+	r := nightly()
+	r.ID = "stored-immutable-id"
+	if got := r.Identity(); got != r.ID {
+		t.Fatalf("Identity returned %q, want stored ID %q: migrated records would revert to a derived identity and duplicate existing occurrences; prefer the explicit immutable ID", got, r.ID)
+	}
+}
+
+func TestLastScheduledAtIsOptionalAndValidated(t *testing.T) {
+	legacy := nightly()
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy record without last_scheduled_at was rejected: existing trigger files must remain readable; fall back to last_fired_at: %v", err)
+	}
+	legacy.LastScheduledAt = "not-an-instant"
+	if err := legacy.Validate(); err == nil {
+		t.Fatal("malformed last_scheduled_at was accepted: the scheduling cursor could replay or skip durable occurrences; require RFC3339Nano UTC-compatible input")
+	}
+}
+
 // TestNeverFiredIsNotTheZeroInstant. `trigger list` has a LAST column, and "has
 // not fired yet" is normal for a new trigger while "fired at the zero instant"
 // means something is badly wrong. Collapsing them into a zero time.Time makes

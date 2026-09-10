@@ -154,6 +154,35 @@ func TestSaveReplacesButWillNotInventATrigger(t *testing.T) {
 	}
 }
 
+func TestSaveMigratesLegacyIdentityAndRejectsDefinitionChanges(t *testing.T) {
+	s := open(t)
+	legacy := nightly()
+	if err := s.Create(legacy); err != nil {
+		t.Fatalf("create legacy trigger: %v", err)
+	}
+
+	paused := legacy
+	paused.Status = trigger.StatusPaused
+	paused.LastFiredAt = "2026-08-27T03:04:00Z"
+	paused.LastScheduledAt = "2026-08-27T03:00:00Z"
+	if err := s.Save(paused); err != nil {
+		t.Fatalf("save compatible legacy migration: %v", err)
+	}
+	migrated, err := s.Load(legacy.Name)
+	if err != nil {
+		t.Fatalf("load migrated trigger: %v", err)
+	}
+	if migrated.ID == "" || migrated.ID != legacy.Identity() {
+		t.Fatalf("legacy save persisted identity %q, want derived %q: the next restart could derive a different occurrence namespace; write the deterministic identity during a normal update", migrated.ID, legacy.Identity())
+	}
+
+	changed := migrated
+	changed.Then = "run start security-team 'different immutable action'"
+	if err := s.Save(changed); err == nil {
+		t.Fatal("Save accepted an immutable definition change under the existing trigger ID: future slots would share occurrence identity with a different action; require a new trigger instead")
+	}
+}
+
 func TestAMissingTriggerSaysSoAndSaysWhereToLook(t *testing.T) {
 	s := open(t)
 	_, err := s.Load("nope")

@@ -793,6 +793,54 @@ func TestTheRecordedInstantIsWhenItActuallyRan(t *testing.T) {
 	}
 }
 
+func TestLateIntervalTicksAdvanceFromTheNominalSlotWithoutDrift(t *testing.T) {
+	r := nightly()
+	r.On = "every:1h"
+	r.CreatedAt = "2026-08-02T00:00:00Z"
+	s, st, rn, _ := harness(t, r)
+
+	if err := s.Tick(rfc("2026-08-02T01:47:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.saved[0].LastScheduledAt; got != "2026-08-02T01:00:00Z" {
+		t.Fatalf("late first interval firing stored nominal cursor %q, want 01:00Z: using wake time would move every future slot 47 minutes late; persist the selected schedule instant", got)
+	}
+	rn.execs[0].finish()
+	if err := s.Tick(rfc("2026-08-02T02:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	if len(rn.started) != 2 {
+		t.Fatalf("02:00 nominal interval slot did not fire after a 01:47 wake: scheduler drifted the cadence to wake time; count from LastScheduledAt, started=%d", len(rn.started))
+	}
+}
+
+func TestSkippedBacklogAdvancesToItsLatestNominalSlot(t *testing.T) {
+	r := nightly()
+	r.LastFiredAt = "2026-08-02T03:00:00Z"
+	s, st, _, _ := harness(t, r)
+
+	if err := s.Tick(rfc("2026-08-06T10:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.saved[0].LastScheduledAt; got != "2026-08-06T03:00:00Z" {
+		t.Fatalf("skipped backlog stored nominal cursor %q, want latest skipped slot: restart would rediscover consciously discarded occurrences; advance through every skipped slot", got)
+	}
+}
+
+func TestRunOnceAdvancesThroughCollapsedSlots(t *testing.T) {
+	r := nightly()
+	r.OnMissed = trigger.MissedRunOnce
+	r.LastFiredAt = "2026-08-02T03:00:00Z"
+	s, st, _, _ := harness(t, r)
+
+	if err := s.Tick(rfc("2026-08-06T10:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.saved[0].LastScheduledAt; got != "2026-08-06T03:00:00Z" {
+		t.Fatalf("run-once stored nominal cursor %q, want selected latest slot: collapsed backlog could reappear after restart; persist the newest selected or skipped nominal instant", got)
+	}
+}
+
 func TestTheRecordedFiringIsStillAValidTrigger(t *testing.T) {
 	// Save validates, so a scheduler writing a malformed LastFiredAt would
 	// fail on every tick. Asserted directly because the fake store does not

@@ -232,7 +232,7 @@ func (s *Scheduler) tickOne(r trigger.Record, now time.Time) {
 	// consciously consumed. If neither happened -- the first Start failed --
 	// the slot stays due, which is correct: nothing ran.
 	if report.Started > 0 || a.Consume {
-		if err := s.recordFiring(r, now, report.Started, a); err != nil {
+		if err := s.recordFiring(r, now, report.Started, a, d); err != nil {
 			// Reported and not retried. The consequence is knowable and worth
 			// stating: the slot stays due, so the next tick fires it again.
 			// That is a duplicate run, which is the failure mode chosen above.
@@ -268,15 +268,21 @@ func (s *Scheduler) start(r trigger.Record) error {
 }
 
 // recordFiring writes back what happened, so the next tick does not repeat it.
-func (s *Scheduler) recordFiring(r trigger.Record, now time.Time, started int, a trigger.Admission) error {
-	// The WALL CLOCK instant, not the slot the firing belongs to.
-	//
-	// Both work for scheduling -- Missed counts slots strictly after this
-	// value, and `now` is at or after the slot by definition of being due -- so
-	// the tie is broken by what the LAST column should mean to a human. "When
-	// did this actually run" is a fact; "which slot did it nominally belong
-	// to" is a derivation the operator cannot check against anything.
+func (s *Scheduler) recordFiring(r trigger.Record, now time.Time, started int, a trigger.Admission, d trigger.Decision) error {
+	// LastFiredAt remains the wall-clock observation shown to operators. The
+	// separate schedule cursor advances by nominal slot so a late tick cannot make
+	// an interval schedule drift and durable occurrence identity remains exact.
 	r.LastFiredAt = now.Format(time.RFC3339)
+	consumed := append(append([]time.Time(nil), d.Slots...), d.SkippedSlots...)
+	if len(consumed) > 0 {
+		latest := consumed[0]
+		for _, slot := range consumed[1:] {
+			if slot.After(latest) {
+				latest = slot
+			}
+		}
+		r.LastScheduledAt = latest.UTC().Format(time.RFC3339Nano)
+	}
 	r.LastStatus = firingStatus(started, a)
 
 	if err := s.store.Save(r); err != nil {

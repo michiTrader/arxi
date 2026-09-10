@@ -53,6 +53,17 @@ type Decision struct {
 	// MissedCapped says the real number is at least Missed, not exactly Missed.
 	MissedCapped bool
 
+	// Slots are the exact nominal UTC instants selected for execution. Their order
+	// is execution order, which is ascending for run-all. A scheduler wake time
+	// must never substitute for one of these values: occurrence identity depends
+	// on the slot remaining stable across late and duplicate ticks.
+	Slots []time.Time
+
+	// SkippedSlots are exact nominal UTC instants the on-missed policy consciously
+	// discarded. They remain separate from Slots because durable coordination must
+	// record the skip without accidentally admitting work for it.
+	SkippedSlots []time.Time
+
 	// Why is a short reason, always set, in the operator's vocabulary rather
 	// than the code's.
 	//
@@ -129,7 +140,7 @@ func Due(r Record, now time.Time) (Decision, error) {
 	// firing, the only other candidate is "the beginning of the schedule",
 	// which for `cron:0 3 * * *` is unbounded in the past. A trigger created at
 	// 10:00 is due at the next 03:00, not at every 03:00 since the epoch.
-	if r.LastFiredAt == "" {
+	if r.schedulingCursor() == "" {
 		created, err := time.Parse(time.RFC3339, r.CreatedAt)
 		if err != nil {
 			return Decision{}, fmt.Errorf(
@@ -185,15 +196,17 @@ func Due(r Record, now time.Time) (Decision, error) {
 			}
 			latest = next
 		}
-		return Decision{ShouldFire: true, Runs: 1,
+		return Decision{ShouldFire: true, Runs: 1, Slots: []time.Time{latest},
 			Why: "first firing, due at " + latest.Format(time.RFC3339)}, nil
 	}
 
-	missed, capped, err := r.Missed(now)
+	owed, capped, err := owedSlots(r, s, now)
 	if err != nil {
 		return Decision{}, err
 	}
+	missed := len(owed)
 	if missed == 0 {
+
 		next, ok, err := r.Next(now)
 		switch {
 		case err != nil:
@@ -221,6 +234,7 @@ func Due(r Record, now time.Time) (Decision, error) {
 		// discovering it one invocation at a time.
 		d.ShouldFire = true
 		d.Runs = missed
+		d.Slots = owed
 		d.Why = fmt.Sprintf("%s owed firings, running all of them", countOf(missed, capped))
 
 	case MissedRunOnce:
@@ -228,6 +242,8 @@ func Due(r Record, now time.Time) (Decision, error) {
 		// was missed for four days should audit TODAY, not four times.
 		d.ShouldFire = true
 		d.Runs = 1
+		d.Slots = []time.Time{owed[len(owed)-1]}
+		d.SkippedSlots = cloneSlots(owed[:len(owed)-1])
 		if missed == 1 {
 			d.Why = "due"
 		} else {
@@ -247,11 +263,13 @@ func Due(r Record, now time.Time) (Decision, error) {
 		if missed == 1 {
 			d.ShouldFire = true
 			d.Runs = 1
+			d.Slots = owed
 			d.Why = "due"
 			return d, nil
 		}
 		d.ShouldFire = false
 		d.Runs = 0
+		d.SkippedSlots = owed
 		d.Why = fmt.Sprintf("%s firings were missed and --on-missed=skip, "+
 			"so none of them will be run", countOf(missed, capped))
 
@@ -265,6 +283,34 @@ func Due(r Record, now time.Time) (Decision, error) {
 	}
 
 	return d, nil
+}
+
+// owedSlots walks the same bounded interval Missed reports, but retains the
+// nominal instants because counts cannot identify durable occurrences. Keeping
+// the cap shared prevents Due and Missed from disagreeing about how much backlog
+// exists while preserving the existing bounded behavior for ancient records.
+func owedSlots(r Record, s Spec, now time.Time) ([]time.Time, bool, error) {
+	last, err := time.Parse(time.RFC3339Nano, r.schedulingCursor())
+	if err != nil {
+		return nil, false, fmt.Errorf("trigger %q: scheduling cursor %q is not RFC3339: %w",
+			r.Name, r.schedulingCursor(), err)
+	}
+
+	slots := make([]time.Time, 0)
+	cursor := last.UTC()
+	for len(slots) < missedCap {
+		next, err := s.Next(cursor)
+		if err != nil || next.After(now) {
+			return slots, false, nil
+		}
+		slots = append(slots, next)
+		cursor = next
+	}
+	return slots, true, nil
+}
+
+func cloneSlots(slots []time.Time) []time.Time {
+	return append([]time.Time(nil), slots...)
 }
 
 // countOf renders a possibly-capped count honestly.
