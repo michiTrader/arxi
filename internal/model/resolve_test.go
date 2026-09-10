@@ -36,14 +36,18 @@ func TestABareIDResolvesToTheProviderThatOffersIt(t *testing.T) {
 	}
 }
 
-func TestTheAnthropicNativePresetCannotResolve(t *testing.T) {
+func TestTheAnthropicNativePresetResolves(t *testing.T) {
 	p := Provider{
-		Name: "anthropic", BaseURL: "https://api.anthropic.com/v1", APIKeyEnv: "ANTHROPIC_API_KEY",
+		Name: "anthropic", Protocol: ProtocolAnthropicMessages,
+		BaseURL: "https://api.anthropic.com/v1", APIKeyEnv: "ANTHROPIC_API_KEY",
 		Models: []Model{{ID: "claude-sonnet-4-6", Enabled: true}},
 	}
-	_, err := Resolve([]Provider{p}, "claude-sonnet-4-6")
-	if err == nil || !strings.Contains(err.Error(), ProtocolAnthropicMessages) {
-		t.Fatalf("native Anthropic record resolved through an OpenAI executor: %v", err)
+	got, err := Resolve([]Provider{p}, "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("resolve native Anthropic model: %v", err)
+	}
+	if got.Provider != "anthropic" || got.Protocol != ProtocolAnthropicMessages || got.Model != "claude-sonnet-4-6" {
+		t.Fatalf("resolution = %+v", got)
 	}
 }
 

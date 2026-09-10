@@ -27,6 +27,7 @@ import (
 // "fixed" there by dropping back to the Fake.
 func TestTheLiveExecutorSatisfiesTheInterfaceTheRunnerWants(t *testing.T) {
 	var _ exec.Executor = (*Executor)(nil)
+	var _ exec.TurnExecutor = (*Executor)(nil)
 }
 
 // fixedResolver answers with one resolution, whatever it is asked.

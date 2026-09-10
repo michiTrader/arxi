@@ -80,11 +80,9 @@ type Model struct {
 }
 
 const (
-	// ProtocolOpenAIChatCompletions is the only provider wire implemented today.
+	// ProtocolOpenAIChatCompletions names the OpenAI-compatible chat wire.
 	ProtocolOpenAIChatCompletions = "openai-chat-completions/v1"
-	// ProtocolAnthropicMessages names Anthropic's native Messages API. It is
-	// recorded so unsupported native records fail explicitly rather than being
-	// sent an OpenAI request shape.
+	// ProtocolAnthropicMessages names Anthropic's native Messages API.
 	ProtocolAnthropicMessages = "anthropic-messages/v1"
 )
 
@@ -235,15 +233,9 @@ func New(name, baseURL, keyEnv, addedAt string) (Provider, error) {
 		APIKeyEnv: strings.TrimSpace(keyEnv),
 		AddedAt:   addedAt,
 	}
-	if p.Protocol == ProtocolAnthropicMessages && p.BaseURL == tableURL {
-		return Provider{}, fmt.Errorf("provider %q uses the native Anthropic Messages protocol, which this build does not implement.\n"+
-			"  no provider file was written and no request was sent.\n"+
-			"  use an OpenAI-compatible gateway under a different provider name, or wait for the native adapter", name)
-	}
-	if p.Protocol == ProtocolAnthropicMessages {
-		// The native preset was rejected above. A custom endpoint is explicitly
-		// documented as OpenAI-compatible and must not inherit a protocol merely
-		// because its chosen local label happens to be "anthropic".
+	if p.Protocol == ProtocolAnthropicMessages && p.BaseURL != tableURL {
+		// An explicit endpoint is documented as OpenAI-compatible and must not
+		// inherit a protocol merely because its local label is "anthropic".
 		p.Protocol = ProtocolOpenAIChatCompletions
 		models = nil
 	}
