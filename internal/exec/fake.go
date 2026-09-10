@@ -2,11 +2,13 @@ package exec
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/turn"
 )
 
 // Fake is the executor that `--sim` and every test use instead of calling a
@@ -24,6 +26,13 @@ import (
 // coincidence.
 type Fake struct {
 	mu sync.Mutex
+
+	activeTurnTools map[string]string
+
+	// NativeReadTool makes simulated turns exercise the canonical model-tool-model
+	// loop with this read-only tool. Empty preserves the ordinary text-only
+	// simulation; Phase 2 acceptance scenarios set it to "read" explicitly.
+	NativeReadTool string
 
 	// Calls records every effect received, in arrival order. Assertions read
 	// this instead of counting log events, because an effect that produced no
@@ -122,26 +131,29 @@ type Fake struct {
 
 // Call is one effect the Fake received.
 type Call struct {
-	Kind   string // "spawn_turn", "call_tool" or "ask_human"
+	Kind   string // "spawn_turn", "complete_turn", "call_tool", "turn_tool" or "ask_human"
 	Agent  string
 	Tool   string
 	Detail string
 }
 
+var _ TurnExecutor = (*Fake)(nil)
+
 // NewFake returns a Fake with defaults chosen so that a simulation exercises
 // the interesting paths rather than the empty ones.
 func NewFake() *Fake {
 	return &Fake{
-		TurnCostUSD:  0.01,
-		ToolResults:  map[string]string{},
-		FailTools:    map[string]string{},
-		BreakTools:   map[string]error{},
-		HumanReplies: map[string]string{},
-		Submits:      true,
-		SubmitAgents: map[string]bool{},
-		AskTools:     map[string]string{},
-		DenyTurnTool: map[string]string{},
-		BreakTurns:   map[string]error{},
+		TurnCostUSD:     0.01,
+		ToolResults:     map[string]string{},
+		FailTools:       map[string]string{},
+		BreakTools:      map[string]error{},
+		HumanReplies:    map[string]string{},
+		Submits:         true,
+		SubmitAgents:    map[string]bool{},
+		AskTools:        map[string]string{},
+		DenyTurnTool:    map[string]string{},
+		BreakTurns:      map[string]error{},
+		activeTurnTools: map[string]string{},
 	}
 }
 
@@ -181,6 +193,135 @@ func (f *Fake) id(scope, kind string) string {
 // entries.
 func (f *Fake) record(c Call) {
 	f.Calls = append(f.Calls, c)
+}
+
+// NativeTurnEnabled opts only configured acceptance scenarios into the durable
+// canonical loop, preserving the existing deterministic simulation otherwise.
+func (f *Fake) NativeTurnEnabled(e kernel.SpawnTurn) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.NativeReadTool != "" || f.DenyTurnTool[e.Agent] != ""
+}
+
+func (f *Fake) PrepareTurn(ctx context.Context, e kernel.SpawnTurn) (turn.Request, error) {
+	if err := ctx.Err(); err != nil {
+		return turn.Request{}, err
+	}
+	f.mu.Lock()
+	if f.activeTurnTools == nil {
+		f.activeTurnTools = map[string]string{}
+	}
+	tool := f.NativeReadTool
+	if configured := f.DenyTurnTool[e.Agent]; configured != "" {
+		tool = configured
+	}
+	f.activeTurnTools[e.Agent] = tool
+	f.mu.Unlock()
+	prompt := "simulate"
+	if len(e.Context.Cause) > 0 {
+		prompt = e.Context.Cause[len(e.Context.Cause)-1]
+	}
+	return turn.Request{Schema: turn.Schema, Provider: "fake", Protocol: "fake-turn/v1",
+		BaseURL: "https://fake.invalid/v1", Model: "arxi-sim-v2", MaxTokens: 256,
+		Messages: []turn.Message{{Role: turn.RoleUser, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: prompt}}}},
+	}, nil
+}
+
+func (f *Fake) CompleteTurn(ctx context.Context, req turn.Request) (turn.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return turn.Response{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(Call{Kind: "complete_turn", Detail: fmt.Sprintf("messages=%d", len(req.Messages))})
+	if len(req.Messages) == 1 {
+		tool := f.NativeReadTool
+		for _, active := range f.activeTurnTools {
+			if active != "" {
+				tool = active
+				break
+			}
+		}
+		call, err := turn.NewToolCall("sim-provider-call-1", tool, []byte(`{"path":"README.md"}`))
+		if err != nil {
+			return turn.Response{}, err
+		}
+		return turn.Response{Schema: turn.Schema, ID: "sim-response-1", Model: req.Model,
+			Content:      []turn.ContentBlock{{Type: turn.BlockToolCall, ToolCall: &call}},
+			FinishReason: turn.FinishToolCalls, Usage: turn.Usage{InputTokens: 8, OutputTokens: 2}}, nil
+	}
+	return turn.Response{Schema: turn.Schema, ID: "sim-response-2", Model: req.Model,
+		Content:      []turn.ContentBlock{{Type: turn.BlockText, Text: "simulated turn complete"}},
+		FinishReason: turn.FinishStop, Usage: turn.Usage{InputTokens: 10, OutputTokens: 2}}, nil
+}
+
+func (f *Fake) ExecuteTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (TurnToolOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return TurnToolOutcome{}, err
+	}
+	if err := turn.ValidateToolCall(call); err != nil {
+		return TurnToolOutcome{}, NotDispatched(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if policy, stopped := f.AskTools[call.Name]; stopped {
+		return TurnToolOutcome{Policy: policy, Continue: false, Result: turn.ToolResult{CallID: call.ID, IsError: true,
+			Content: []turn.ContentBlock{{Type: turn.BlockText, Text: "tool was not executed: policy=" + policy}}}}, nil
+	}
+	f.record(Call{Kind: "turn_tool", Agent: e.Agent, Tool: call.Name, Detail: string(call.Arguments)})
+	if err, broken := f.BreakTools[call.Name]; broken {
+		return TurnToolOutcome{}, err
+	}
+	result := f.ToolResults[call.Name]
+	if reason, failed := f.FailTools[call.Name]; failed {
+		result = "failed: " + reason
+	}
+	return TurnToolOutcome{Policy: "allow", Continue: true, Result: turn.ToolResult{CallID: call.ID,
+		Content: []turn.ContentBlock{{Type: turn.BlockText, Text: result}}}}, nil
+}
+
+func (f *Fake) FinishTurn(e kernel.SpawnTurn, trace []TurnEntry) ([]kernel.Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(Call{Kind: "spawn_turn", Agent: e.Agent, Detail: fmt.Sprintf("coalesced=%d", e.Coalesced)})
+	if err, broken := f.BreakTurns[e.Agent]; broken {
+		return nil, NotDispatched(fmt.Errorf("spawn turn for %s: %w", e.Agent, err))
+	}
+	var tools []kernel.Event
+	for _, entry := range trace {
+		if entry.Tool == nil {
+			continue
+		}
+		call, outcome := entry.Tool.Call, entry.Tool.Outcome
+		tools = append(tools, kernel.Event{ID: f.id(e.Agent, "tool-call"), Type: kernel.ToolCall,
+			Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"agent": e.Agent, "tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments), "simulated": true}})
+		kind := kernel.ToolCallCompleted
+		payload := map[string]any{"agent": e.Agent, "tool": call.Name, "call_id": call.ID, "result": toolResultText(outcome.Result), "simulated": true}
+		if outcome.Policy != "allow" {
+			kind, payload = kernel.ToolCallDenied, map[string]any{"agent": e.Agent, "tool": call.Name, "call_id": call.ID, "policy": outcome.Policy, "simulated": true}
+		}
+		tools = append(tools, kernel.Event{ID: f.id(e.Agent, "tool-"+call.Name), Type: kind, Source: kernel.SourceRuntime, Actor: e.Agent, Payload: payload})
+	}
+	events := []kernel.Event{{ID: f.id(e.Agent, "act"), Type: kernel.AgentActivated, Source: kernel.SourceRuntime, Actor: e.Agent, Payload: map[string]any{"agent": e.Agent, "simulated": true}}}
+	events = append(events, tools...)
+	events = append(events, kernel.Event{ID: f.id(e.Agent, "llm"), Type: kernel.LLMResponse, Source: kernel.SourceAgent, Actor: e.Agent,
+		Payload: map[string]any{"agent": e.Agent, "cost_usd": f.TurnCostUSD, "coalesced": e.Coalesced, "simulated": true}})
+	if f.submits(e.Agent) {
+		events = append(events, kernel.Event{ID: f.id(e.Agent, "submit"), Type: kernel.StageSubmitted, Source: kernel.SourceAgent, Actor: e.Agent,
+			Payload: map[string]any{"agent": e.Agent, "stage": stageOf(e.Context), "simulated": true}})
+	}
+	return append(events, kernel.Event{ID: f.id(e.Agent, "turn"), Type: kernel.AgentTurnDone, Source: kernel.SourceAgent, Actor: e.Agent,
+		Payload: map[string]any{"agent": e.Agent, "simulated": true}}), nil
+}
+
+func toolResultText(result turn.ToolResult) string {
+	var out string
+	for _, block := range result.Content {
+		if block.Type == turn.BlockText {
+			out += block.Text
+		}
+	}
+	return out
 }
 
 // SpawnTurn simulates an agent turn.

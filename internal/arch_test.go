@@ -151,26 +151,24 @@ func TestSurfaceDoesNotImportTheExecutor(t *testing.T) {
 // fsync policy, torn-write recovery) would start leaking into the run loop,
 // where nobody would think to look for them.
 //
-// The kernel is the one exception: exec must import it, because effects and
-// events are the vocabulary the two speak.
-func TestExecutorDependsOnlyOnTheKernel(t *testing.T) {
+// The kernel and the provider-neutral turn contract are the two exceptions:
+// exec needs kernel effects/events and durably coordinates canonical model/tool
+// calls without importing any provider adapter or wire format.
+func TestExecutorDependsOnlyOnTheKernelAndTurnContract(t *testing.T) {
 	p := list(t, mod+"internal/exec")
 	for _, d := range p.Deps {
 		if !strings.HasPrefix(d, mod) {
 			continue
 		}
-		if d == mod+"internal/kernel" {
+		if d == mod+"internal/kernel" || d == mod+"internal/turn" {
 			continue
 		}
 		t.Errorf("internal/exec depends on %s.\n"+
-			"  why this is wrong: the executor may only depend on the kernel, whose "+
-			"effects and events are the vocabulary they share. Everything else it "+
-			"needs is DECLARED as an interface here (see exec.Log) so the runner "+
-			"stays testable without a filesystem and storage details cannot leak "+
-			"into the run loop.\n"+
+			"  why this is wrong: the executor may depend only on kernel vocabulary and "+
+			"the provider-neutral turn leaf contract. Provider adapters, storage, and "+
+			"wire formats must remain behind interfaces declared by exec.\n"+
 			"  what to do: add the methods you need to an interface inside "+
-			"internal/exec and let the concrete type satisfy it at the wiring "+
-			"site in cmd/arxi.", d)
+			"internal/exec and let the concrete type satisfy it at the wiring site in cmd/arxi.", d)
 	}
 }
 
