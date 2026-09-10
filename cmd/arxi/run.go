@@ -12,15 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
-	"github.com/michiTrader/arxi/internal/logstore"
-	"github.com/michiTrader/arxi/internal/model"
-	"github.com/michiTrader/arxi/internal/modelstore"
-	"github.com/michiTrader/arxi/internal/provider"
 	"github.com/michiTrader/arxi/internal/surface"
-	"github.com/michiTrader/arxi/internal/toolrun"
 )
 
 // startFlags is what `run start` was invoked with, after parsing but before any
@@ -121,20 +115,17 @@ func cmdRunStart(args []string) {
 		}
 	}
 
-	dir, out, err := executeRun(f, bp, func(dir string, cfg kernel.Config) {
+	runtime, err := prepareCLISubmission(f, bp, func(dir string, cfg kernel.Config) {
 		// usd and not %.2f. This line printed `--budget 0.005` as `budget 0.01
 		// USD`: a ceiling ROUNDED UP, so the banner promised twice the headroom
-		// the run actually had, and the summary four lines later contradicted it
-		// with `of 0.0050`. One command, one field, two numbers.
-		//
-		// Rounding a ceiling up is the worse of the two directions, because the
-		// reader is shown more room than the run has and the block that follows
-		// looks premature. eval run was already held to this rule by
-		// TestABudgetTooSmallToRoundIsNotPrintedAsZero; the run that actually
-		// spends the money was not.
+		// the run actually had, and the summary four lines later contradicted it.
 		fmt.Printf("run %s started (budget %s USD, workspace %s)\n",
 			f.runID, usd(f.budget), workspaceNote(f.workspace, cfg.Workspace))
 	})
+	if err != nil {
+		fatal(err)
+	}
+	dir, out, err := submitAndWaitCLI(context.Background(), runtime)
 
 	// The summary is printed even when the loop failed. A run that died halfway
 	// still spent money and still moved through stages, and hiding that behind
@@ -145,206 +136,6 @@ func cmdRunStart(args []string) {
 		fmt.Fprintf(os.Stderr, "\narxi: the run stopped early: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// executeRun starts the run and hands back where it got to.
-//
-// It is everything `run start` does after the invocation has been checked, split
-// out because the quick path (`arxi -p "ping"`, ask.go) has to do the same thing
-// and print a different thing. What differs between the two is only output: which
-// stream the accounting goes to, and whether the model's reply is printed at all.
-// None of that belongs in here, so the only thing this takes from its caller is
-// announce -- called once, after run.started is in the log and before the first
-// turn opens, which is the last moment a line can be printed that is still true
-// if the very first model call hangs.
-//
-// The error is RETURNED rather than exited on, because both callers have
-// something to print after a failed loop: a run that stopped early still spent
-// money, and the account of it is the caller's to render.
-func executeRun(f startFlags, bp *blueprint.Blueprint, announce func(dir string, cfg kernel.Config)) (string, exec.Outcome, error) {
-	cfg := bp.Config
-	if f.workspace != "" && f.workspace != "auto" {
-		cfg.Workspace = f.workspace
-	}
-
-	dir := f.dir
-	if dir == "" {
-		dir = filepath.Join("runs", f.runID)
-	}
-
-	// The blueprint is FROZEN into the run directory before the first event is
-	// written, and the run records its sha.
-	//
-	// Without this, editing the blueprint after a run has started makes the log
-	// unreplayable: kernel.Fold needs the Config the events were decided
-	// against, and a mutated file yields a different one. The run would then
-	// explain itself with rules that were never applied, which is worse than
-	// refusing to explain itself at all.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fatal(fmt.Errorf("create the run directory: %w", err))
-	}
-	snapPath := filepath.Join(dir, "blueprint.snapshot.yaml")
-	if err := os.WriteFile(snapPath, bp.Raw, 0o644); err != nil {
-		fatal(fmt.Errorf("freeze the blueprint: %w", err))
-	}
-
-	store, err := logstore.Open(dir)
-	if err != nil {
-		fatal(err)
-	}
-	// The defer is for ordinary returns; atExit is for os.Exit, which skips
-	// defers. `run start` has the same exposure `run unpause` was measured to
-	// have: openPolicies and openProviders both fatal, and they are called after
-	// this lock is taken, so a bad policy or provider file used to leave
-	// writer.lock behind holding a dead pid.
-	defer store.Close()
-	atExit(func() { store.Close() })
-
-	// The clock and the executor are the ONLY two things that differ between a
-	// simulation and a real run. Everything downstream -- the reducer, the log,
-	// the loop, the effect ordering -- is the same code, which is what makes
-	// --sim worth trusting.
-	//
-	// The virtual clock is what makes --sim finish in milliseconds instead of
-	// waiting out a 30-minute stage timeout. It is also why Now is derived from
-	// it rather than from the wall: two simulations of identical input must
-	// produce identical logs, or `run diff` has nothing to compare. A real run
-	// takes the opposite trade deliberately: its timestamps are wall time,
-	// because a log that says a turn happened at t=0 is useless for explaining
-	// an incident that happened at 3am.
-	// Timekeeper and not the raw Clock, because the LOOP needs the difference:
-	// VirtualTime jumps to the next deadline, RealTime waits for it. Both already
-	// exist in internal/exec, which is the design anticipating this exact moment.
-	var (
-		clock    exec.Clock
-		timekeep exec.Timekeeper
-		executor exec.Executor
-		now      func() string
-	)
-	if f.sim {
-		vc := exec.NewVirtualClock()
-		clock, timekeep, executor = vc, exec.VirtualTime{C: vc}, exec.NewFake()
-		now = func() string {
-			return time.UnixMilli(vc.NowMs()).UTC().Format(time.RFC3339Nano)
-		}
-	} else {
-		rc := exec.NewRealClock()
-		clock, timekeep = rc, exec.RealTime{C: rc}
-		// The workspace lives inside the run directory, beside the log and the
-		// frozen blueprint, and is NOT deleted when the run ends. That is the
-		// same argument as freezing the blueprint: what the agents actually
-		// produced is evidence, and `run why` sends the user to look at it. A
-		// runner that tidied up after itself would answer "why did this fail?"
-		// with an empty directory.
-		//
-		// Shared follows the blueprint rather than a flag of its own.
-		// cfg.Workspace has already resolved to "worktree" if any member holds
-		// write/bash/edit, so this is the decision the config recorded and
-		// `blueprint validate` printed -- not a second, invisible one taken here.
-		// Tool policy overrides are read HERE, at the start, and copied into the
-		// executor. They are deliberately not re-read per turn: the rules a run
-		// is judged by must not move underneath it, which is the same argument
-		// that freezes blueprint.snapshot.yaml.
-		//
-		// The visible consequence, which `agent tool policy` prints in its own
-		// output rather than leaving to be discovered: a run already waiting on
-		// an approval is not unblocked by a policy change. This is the next run.
-		//
-		// Overrides sit outside the frozen snapshot on purpose. They are an
-		// operator's standing answer to "stop asking me about this", declared
-		// with --agent and no --run, so baking them into one run's snapshot
-		// would mean the next run could not see them.
-		overrides, err := openPolicies().LoadAll()
-		if err != nil {
-			fatal(err)
-		}
-
-		executor = &provider.Executor{
-			Resolver:     providerResolver{openProviders()},
-			DefaultModel: f.model,
-			Members:      cfg.Members,
-			Prompt:       f.prompt,
-			ToolPolicy:   overrides,
-			Tools: &toolrun.Runner{
-				Root:   filepath.Join(dir, "workspace"),
-				Shared: cfg.Workspace == "shared",
-			},
-		}
-		now = func() string { return nowFunc().UTC().Format(time.RFC3339Nano) }
-	}
-
-	runner := &exec.Runner{
-		Log:      store,
-		Clock:    clock,
-		Executor: executor,
-		Config:   cfg,
-		Now:      now,
-	}
-
-	// run.started is APPENDED, not handed to the loop. The loop reads it back out
-	// of the log and decides it like any other event, which is what makes a fresh
-	// run and a resumed run the same code path: neither is given a starting
-	// state, both fold one out of the events.
-	started := kernel.Event{
-		ID:     "ev-start",
-		Type:   kernel.RunStarted,
-		Scope:  "run:" + f.runID,
-		Source: kernel.SourceHuman,
-		Payload: map[string]any{
-			"run_id":        f.runID,
-			"actor":         bp.Name,
-			"blueprint_sha": bp.SHA,
-			"budget_usd":    f.budget,
-			"max_turns":     float64(f.maxTurns),
-			"prompt":        f.prompt,
-			"workspace":     cfg.Workspace,
-
-			// simulated records WHICH executor produced this log, and it is
-			// f.sim rather than a constant. It was a hardcoded true, correct
-			// while --sim was the only mode and false the moment the live
-			// executor landed -- found by reading the log of a real run that
-			// had really cost money and really called a real server, and that
-			// described itself as a simulation.
-			//
-			// This field is the one thing in the log that a reader cannot
-			// recover from anything else in it. Everything else -- the costs,
-			// the turns, the replies -- looks identical either way, by design:
-			// --sim drives the same reducer through the same loop, and that is
-			// what makes it worth trusting. So the log is the only place the
-			// distinction can live, and a log that mislabels a real run as a
-			// simulation is worse than one that omits the field, because it
-			// invites exactly the conclusion a reader would otherwise check.
-			"simulated": f.sim,
-		},
-	}
-	if _, err := store.Append([]kernel.Event{started}); err != nil {
-		fatal(fmt.Errorf("record run.started: %w", err))
-	}
-
-	announce(dir, cfg)
-
-	loop := &exec.Loop{
-		Runner: runner,
-		Log:    store,
-		Time:   timekeep,
-		Config: cfg,
-	}
-
-	out, err := loop.Run(context.Background())
-
-	// The store is CLOSED on the way out, and the deferred Close is what does it
-	// now: this used to be a bare os.Exit(1) on a failed loop, which does not run
-	// defers, so a run that had merely failed left writer.lock on disk holding a
-	// pid that no longer exists. The next command touching that run then refused
-	// with "already open for writing by pid N" and told the operator to delete a
-	// lock file by hand -- for a run that had failed, which is exactly when
-	// somebody wants to retry it.
-	//
-	// The advice is also dangerous to generalise: an operator who learns to delete
-	// writer.lock after a crash will eventually delete a live one. Returning
-	// instead of exiting is what makes the release automatic; the manual remedy is
-	// for a hard kill, which nothing here can help with.
-	return dir, out, err
 }
 
 // printRunSummary reports where the run got to, in the terms the user paid in.
@@ -413,28 +204,6 @@ func workspaceNote(requested, resolved string) string {
 		return "auto→" + resolved
 	}
 	return resolved
-}
-
-// providerResolver adapts the provider store to what the live executor needs.
-//
-// It calls model.Resolve and NOT store.Owner, and the difference is the whole
-// reason this type exists. Owner deliberately finds a DISABLED model, because
-// `model enable` has to act on one. A run must do the opposite: a disabled model
-// is an operator's cost decision (§20.11 lists `model disable` as exactly that),
-// and honouring it is the difference between the command meaning something and
-// being decorative.
-//
-// Resolve is also what refuses an AMBIGUOUS ref rather than picking by sort
-// order -- which matters here more than anywhere, because the wrong pick is a
-// different bill.
-type providerResolver struct{ store *modelstore.Store }
-
-func (r providerResolver) Resolve(ref string) (model.Resolution, error) {
-	ps, err := r.store.List()
-	if err != nil {
-		return model.Resolution{}, err
-	}
-	return model.Resolve(ps, ref)
 }
 
 // checkEveryMemberHasAModel refuses a live run that could not name a model for

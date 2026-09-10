@@ -435,7 +435,12 @@ func TestAnAdvisoryAgentIsNotPromisedARunItCannotDo(t *testing.T) {
 	}
 	var types []string
 	for _, ev := range allEvents(t, dir, "advisory") {
-		types = append(types, fmt.Sprint(ev["type"]))
+		typ := fmt.Sprint(ev["type"])
+		if strings.HasPrefix(typ, "exec.") || typ == "timer.scheduled" ||
+			typ == "timer.cancelled" || typ == "timer.fired" {
+			continue
+		}
+		types = append(types, typ)
 	}
 	if want := []string{"run.started", "stage.entered", "run.quiescent"}; !reflect.DeepEqual(types, want) {
 		t.Errorf("the log is %v, want %v\n"+

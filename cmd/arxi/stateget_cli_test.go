@@ -77,6 +77,7 @@ func kvRunAt(t *testing.T, dir, id string, kv ...[2]string) {
 		log.WriteString(stateSetLine(t, int64(3+i), "human", "", pair[0], pair[1]))
 	}
 	runAt(t, dir, id, "feature-team", 1.0, log.String())
+	upgradeFixtureRun(t, dir, id)
 }
 
 // TestStateGetPutsTheValueOnStdoutAndNothingElse is the pipe contract.
@@ -469,8 +470,8 @@ func TestStateGetSeqGuardsTheNextWrite(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0: %v", code, got)
 	}
-	if got["seq"] != 3.0 {
-		t.Fatalf("seq is %v, want the run's head of 3: %v", got["seq"], got)
+	if got["seq"] != 6.0 {
+		t.Fatalf("seq is %v, want the modern run's physical head of 6: %v", got["seq"], got)
 	}
 
 	seq := fmt.Sprint(int64(got["seq"].(float64)))
@@ -484,8 +485,8 @@ func TestStateGetSeqGuardsTheNextWrite(t *testing.T) {
 	// And the write that followed is now the provenance -- with no set_by, because
 	// `state set` leaves Actor empty so a member's own state.* watcher still fires.
 	after, _ := stateGetJSON(t, dir, "r1", "phase", "-J")
-	if after["value"] != "build" || after["set_at_seq"] != 4.0 {
-		t.Errorf("after the guarded write the store reads %v, want build at seq 4", after)
+	if after["value"] != "build" || after["set_at_seq"] != 7.0 {
+		t.Errorf("after the guarded write the store reads %v, want build at seq 7", after)
 	}
 	if _, ok := after["set_by"]; ok {
 		t.Errorf("set_by is %v for a write a shell made\n"+

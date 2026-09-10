@@ -499,13 +499,13 @@ func cmdWhy(args []string) {
 	// which describes somebody's stuck run as a missing file and sends them
 	// looking for one. whySubject tries the run first and reports both
 	// readings when neither works.
-	st, cfg, err := whySubject(path)
+	st, cfg, unknown, err := whySubject(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi why: %v\n", err)
 		os.Exit(1)
 	}
 
-	emitWhy(kernel.Explain(st, cfg), asJSON)
+	emitWhy(whyView{Why: kernel.Explain(st, cfg), UnknownWork: unknown}, asJSON)
 }
 
 // onExit holds work that must happen before the process dies.

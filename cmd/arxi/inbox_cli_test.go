@@ -42,6 +42,20 @@ func blockedRun(t *testing.T, dir, id string) {
 	}
 }
 
+func questionRun(t *testing.T, dir, id string) {
+	t.Helper()
+	run := filepath.Join(dir, "runs", id)
+	if err := os.MkdirAll(run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"team","run_id":"` + id + `"}}
+{"id":"e2","seq":2,"type":"inbox.created","payload":{"inbox_id":"inbox-1","kind":"question","question":"which flags?","agent":"backend"}}
+`
+	if err := os.WriteFile(filepath.Join(run, "events.ndjson"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInboxListsAPendingApprovalWithItsRunAndAgent(t *testing.T) {
 	dir := t.TempDir()
 	blockedRun(t, dir, "r1")
@@ -259,7 +273,7 @@ func TestRejectingCarriesTheReasonIntoTheLog(t *testing.T) {
 
 func TestReplyIsADifferentActFromReject(t *testing.T) {
 	dir := t.TempDir()
-	blockedRun(t, dir, "r1")
+	questionRun(t, dir, "r1")
 
 	if got := arxi(t, dir, "inbox", "reply", "inbox-1", "use the -short flag"); got.code != 0 {
 		t.Fatalf("exit %d: %s", got.code, got.out)
@@ -275,6 +289,92 @@ func TestReplyIsADifferentActFromReject(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"decision":"reject"`) {
 		t.Error("a reply was recorded as a rejection")
+	}
+}
+
+func customQuestionRun(t *testing.T, dir, id, kind string) {
+	t.Helper()
+	run := filepath.Join(dir, "runs", id)
+	if err := os.MkdirAll(run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"team","run_id":"` + id + `"}}
+{"id":"e2","seq":2,"type":"inbox.created","payload":{"inbox_id":"inbox-1","kind":"` + kind + `","question":"what next?","agent":"backend"}}
+`
+	if err := os.WriteFile(filepath.Join(run, "events.ndjson"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInboxDecisionVerbsRefuseTheWrongKindAsUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(*testing.T, string, string)
+		args []string
+	}{
+		{"approve question", questionRun, []string{"approve", "inbox-1"}},
+		{"reject question", questionRun, []string{"reject", "inbox-1", "--reason", "no"}},
+		{"reply approval", blockedRun, []string{"reply", "inbox-1", "yes"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.seed(t, dir, "r1")
+			got := arxi(t, dir, append([]string{"inbox"}, tc.args...)...)
+			if got.code != 2 {
+				t.Fatalf("exit %d, want 2: %s", got.code, got.out)
+			}
+			if !strings.Contains(got.out, "decision verb does not match") {
+				t.Errorf("wrong-kind refusal is not actionable:\n%s", got.out)
+			}
+		})
+	}
+}
+
+func TestReplyKeepsHistoricalNonApprovalKindsAnswerable(t *testing.T) {
+	dir := t.TempDir()
+	customQuestionRun(t, dir, "r1", "budget")
+	got := arxi(t, dir, "inbox", "reply", "inbox-1", "raise it")
+	if got.code != 0 {
+		t.Fatalf("exit %d, want 0: %s", got.code, got.out)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "runs", "r1", "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"decision":"answer"`) {
+		t.Errorf("legacy budget reply was not recorded:\n%s", raw)
+	}
+}
+
+func TestInboxDecisionPreservesRenamedRunDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(*testing.T, string, string)
+		args []string
+	}{
+		{"approve", blockedRun, []string{"approve", "inbox-1"}},
+		{"answer", questionRun, []string{"reply", "inbox-1", "staging"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.seed(t, dir, "recorded-id")
+			original := filepath.Join(dir, "runs", "recorded-id")
+			alias := filepath.Join(dir, "runs", "renamed-directory")
+			if err := os.Rename(original, alias); err != nil {
+				t.Fatal(err)
+			}
+			got := arxi(t, dir, append([]string{"inbox"}, tc.args...)...)
+			if got.code != 0 {
+				t.Fatalf("exit %d, want 0: %s", got.code, got.out)
+			}
+			raw, err := os.ReadFile(filepath.Join(alias, "events.ndjson"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"type":"inbox.replied"`) {
+				t.Fatalf("decision was not appended to discovered directory:\n%s", raw)
+			}
+		})
 	}
 }
 

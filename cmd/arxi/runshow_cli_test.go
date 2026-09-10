@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -314,6 +316,90 @@ func TestRunShowJSONCarriesTheStructures(t *testing.T) {
 	}
 	if payload.Asks != 1 {
 		t.Errorf("pending_asks = %d, want 1", payload.Asks)
+	}
+}
+
+func TestRunShowReportsUnknownExternalWork(t *testing.T) {
+	dir := workdir(t)
+	showBlocked(t, dir, "unknown-show-0001")
+	addUnknownWork(t, dir, "unknown-show-0001", "work-ambiguous")
+
+	text := arxi(t, dir, "run", "show", "unknown-show-0001")
+	for _, want := range []string{"execution warning", "unknown outcomes", "work-ambiguous"} {
+		if !strings.Contains(text.out, want) {
+			t.Errorf("missing %q:\n%s", want, text.out)
+		}
+	}
+	jsonOut := arxi(t, dir, "run", "show", "unknown-show-0001", "--json")
+	var view struct {
+		Unknown []string `json:"unknown_work"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut.out), &view); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, jsonOut.out)
+	}
+	if len(view.Unknown) != 1 || view.Unknown[0] != "work-ambiguous" {
+		t.Fatalf("unknown_work = %v", view.Unknown)
+	}
+}
+
+func TestRunShowUsesInspectValidation(t *testing.T) {
+	dir := workdir(t)
+	runAt(t, dir, "inspect-gap-0001", "team", 1.0, "")
+	events := filepath.Join(dir, "runs", "inspect-gap-0001", "events.ndjson")
+	file, err := os.OpenFile(events, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(`{"id":"e4","seq":4,"type":"run.paused","payload":{}}` + "\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := arxi(t, dir, "run", "show", "inspect-gap-0001")
+	if got.code == 0 {
+		t.Fatalf("run show accepted a sequence gap:\n%s", got.out)
+	}
+	if !strings.Contains(got.out, "confirmed log sequence is 4, want 3") {
+		t.Fatalf("run show did not surface Inspect validation:\n%s", got.out)
+	}
+}
+
+func TestRunShowPreservesCustomPathAndRichDetails(t *testing.T) {
+	dir := workdir(t)
+	custom := filepath.Join(dir, "elsewhere", "custom-run")
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(custom, "blueprint.snapshot.yaml"), []byte(
+		"name: custom\nmembers:\n  - name: backend\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"custom","run_id":"custom-id","budget_usd":2,"max_turns":7}}
+{"id":"e2","seq":2,"type":"lock.acquired","actor":"backend","payload":{"key":"deploy","holder":"backend"}}
+`
+	if err := os.WriteFile(filepath.Join(custom, "events.ndjson"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := arxi(t, dir, "run", "show", custom, "--json")
+	if got.code != 0 {
+		t.Fatalf("custom-path run show failed:\n%s", got.out)
+	}
+	var view struct {
+		Run      string `json:"run"`
+		MaxTurns int    `json:"max_turns"`
+		Locks    []struct {
+			Key string `json:"key"`
+		} `json:"locks"`
+	}
+	if err := json.Unmarshal([]byte(got.out), &view); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, got.out)
+	}
+	if view.Run != "custom-id" || view.MaxTurns != 7 || len(view.Locks) != 1 || view.Locks[0].Key != "deploy" {
+		t.Fatalf("rich custom-path projection = %+v", view)
 	}
 }
 

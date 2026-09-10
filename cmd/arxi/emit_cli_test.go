@@ -68,22 +68,29 @@ func emitRunAt(t *testing.T, dir, id, watchers, extra string, simulated bool) {
 	if watchers != "" {
 		bp += "watchers:\n" + watchers
 	}
+	rawBP := []byte(bp)
 	if err := os.WriteFile(filepath.Join(run, "blueprint.snapshot.yaml"),
-		[]byte(bp), 0o644); err != nil {
+		rawBP, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	sim := "false"
+	contract := ""
 	if simulated {
 		sim = "true"
+		contract = installSimEffective(t, run, id, rawBP)
 	}
 	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"feature-team","run_id":"` +
-		id + `","budget_usd":1,"simulated":` + sim + `}}
+		id + `","budget_usd":1,"simulated":` + sim + contract + `}}
 {"id":"e2","seq":2,"type":"stage.entered","payload":{"stage":"execute","index":0}}
 {"id":"e3","seq":3,"type":"agent.turn_done","actor":"security"}
 ` + extra
-	if err := os.WriteFile(filepath.Join(run, "events.ndjson"), []byte(log), 0o644); err != nil {
+	path := filepath.Join(run, "events.ndjson")
+	if err := os.WriteFile(path, []byte(log), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if simulated {
+		installFixtureProgress(t, path)
 	}
 }
 

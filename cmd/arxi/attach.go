@@ -85,9 +85,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,27 +216,8 @@ func cmdRunAttach(args []string) {
 // same reason elsewhere in this binary, and a function boundary is the cheaper
 // version of it when there is exactly one handle.
 func followRunLog(v attachView, asJSON bool) int {
-	// Opened read-only, and NOT through logstore.Open: see the file header. On
-	// Windows this matters more than on Unix -- Go's os.Open passes FILE_SHARE_READ
-	// and FILE_SHARE_WRITE, so a live writer is not blocked by the follower and the
-	// follower is not blocked by it.
-	f, err := os.Open(logstore.EventsPath(v.dir))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "arxi run attach: open the log of %s to follow it: %v\n", v.dir, err)
-		return 1
-	}
-	defer f.Close()
-
-	if _, err := f.Seek(v.consumed, io.SeekStart); err != nil {
-		fmt.Fprintf(os.Stderr, "arxi run attach: seek to the join point (offset %d) in the log of %s: %v\n",
-			v.consumed, v.dir, err)
-		return 1
-	}
-
 	owner, held := writerLockOwner(v.dir)
 	if !held {
-		// Nothing is appending, so there is nothing to wait for. Said in one
-		// sentence with the remedy, rather than waited out in silence.
 		fmt.Fprintf(os.Stderr, "arxi run attach: nothing is writing to %s, so no events will arrive.\n%s",
 			v.id, attachStopReason(v))
 		return exitAttachNotEnded
@@ -247,48 +226,36 @@ func followRunLog(v attachView, asJSON bool) int {
 	fmt.Fprintf(os.Stderr, "attached to %s at seq %d · %s is writing · Ctrl-C to stop\n",
 		v.id, v.st.Seq, owner)
 	if v.simulated {
-		// Worth one line, because the rows are indistinguishable from a live run's
-		// and somebody reading over a shoulder would take them for model calls that
-		// were paid for.
 		fmt.Fprintf(os.Stderr, "  (this run is simulated: --sim, so no model was called)\n")
 	}
 
 	st := v.st
-	buf := make([]byte, 32*1024)
-	var pending []byte
-
+	consumed := v.consumed
+	var withheld int64
 	for {
-		// Sampled BEFORE the read. The file header's argument for this order is the
-		// reason the tail cannot be lost.
+		// Sample the lock before reading. If the writer disappears after this sample,
+		// this iteration still reads its final confirmed bytes before deciding that
+		// nothing else can arrive.
 		_, stillHeld := writerLockOwner(v.dir)
-
-		n, rerr := f.Read(buf)
-		if n > 0 {
-			pending = append(pending, buf[:n]...)
-		}
-		if rerr != nil && !errors.Is(rerr, io.EOF) {
-			fmt.Fprintf(os.Stderr, "\narxi run attach: reading the log of %s: %v\n", v.dir, rerr)
+		read, err := logstore.ReadConfirmed(v.dir, consumed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\narxi run attach: reading the confirmed log of %s: %v\n", v.dir, err)
 			return 1
 		}
+		withheld = read.WithheldBytes
 
-		// Whole lines are emitted only once the batch they belong to is committed.
-		// logstore.BatchInFlight is asked AFTER the read for the reason its own
-		// comment gives: "no marker now" proves the bytes just read are durable.
-		if !logstore.BatchInFlight(v.dir) {
-			var lines [][]byte
-			lines, pending = wholeLines(pending)
+		if len(read.Bytes) > 0 {
+			lines, remainder := wholeLines(read.Bytes)
+			if len(remainder) != 0 {
+				fmt.Fprintf(os.Stderr, "\narxi run attach: confirmed reader returned a partial line at offset %d\n", consumed)
+				return 1
+			}
 			for _, line := range lines {
 				e, ok := decodeAttachLine(v, line)
 				if !ok {
 					return 1
 				}
 				emitAttachEvent(v, e, asJSON)
-
-				// Decided, not just printed, so the loop knows when the run is over
-				// without folding the whole log again. The effects Decide returns are
-				// dropped on purpose: the process that owns this run is running them,
-				// and a viewer tallying effects would be reporting work it is not
-				// doing.
 				st, _ = kernel.Decide(st, e, v.cfg)
 				if st.Status.Terminal() {
 					fmt.Fprintf(os.Stderr, "\n%s %s at seq %d.\n  the result:  arxi run result %s\n",
@@ -296,24 +263,18 @@ func followRunLog(v attachView, asJSON bool) int {
 					return 0
 				}
 			}
-		}
-
-		// Bytes arrived, so there may be more waiting: read again before sleeping.
-		if n > 0 {
+			consumed = read.NextOffset
 			continue
 		}
+
 		if !stillHeld {
 			v.st = st
 			fmt.Fprintf(os.Stderr, "\narxi run attach: %s is no longer being written to.\n%s",
 				v.id, attachStopReason(v))
-			if len(pending) > 0 {
-				// The one case where held-back bytes are worth naming: a writer that
-				// died mid-batch left a tail that the next Open will roll back. Saying
-				// so beats printing lines that are about to stop existing, and beats
-				// silence, which would look like the log simply stopped.
+			if withheld > 0 {
 				fmt.Fprintf(os.Stderr, "  %d byte(s) at the end of the log are part of a batch that was never "+
 					"committed, so they are not shown: the next command to open this run rolls them back.\n",
-					len(pending))
+					withheld)
 			}
 			return exitAttachNotEnded
 		}

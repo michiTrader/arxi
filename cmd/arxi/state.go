@@ -147,11 +147,13 @@ func cmdStateSet(args []string) {
 
 	dir := resolveRunDir(runArg)
 
-	pre, cfg, simulated, err := foldRunDir(dir)
+	pre, effective, _, err := preflightEffectiveRun(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi state set: %v\n", err)
 		os.Exit(1)
 	}
+	cfg := effective.Config
+	simulated := effective.Mode == "sim"
 
 	// A terminal run is refused, and here it is the WRITE that would be lost, not
 	// merely the watcher. Decide's first line returns before the switch when the
@@ -277,7 +279,7 @@ func cmdStateSet(args []string) {
 		fmt.Printf("  this run was started with --sim, so the turn is taken by the " +
 			"same fake executor: no model is called and no money is spent.\n")
 	}
-	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
+	driveEffectiveRun(dir, effective, store, pre.RunID)
 }
 
 // checkStateKey refuses the keys that would be written and never read.

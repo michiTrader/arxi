@@ -3,14 +3,27 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/michiTrader/arxi/internal/app"
+	arxiexec "github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/inbox"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/logstore"
+	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/supervisor"
+	"github.com/michiTrader/arxi/internal/trigger"
 )
 
 // `arxi trigger run`, exercised as a process.
@@ -155,6 +168,261 @@ func eventually(t *testing.T, cond func() bool) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+func TestScheduledStartUsesRecordBudgetAndRejectsAConflictingActionBudget(t *testing.T) {
+	f, err := parseScheduledStartArgs([]string{"team.yaml", "audit", "--sim"}, 5)
+	if err != nil {
+		t.Fatalf("record budget was not supplied to an action that omitted it: %v", err)
+	}
+	if f.budget != 5 || !f.budgetSet {
+		t.Fatalf("scheduled flags budget = %v (set %v), want record ceiling 5", f.budget, f.budgetSet)
+	}
+	for _, args := range [][]string{
+		{"team.yaml", "audit", "--sim", "--budget", "4"},
+		{"team.yaml", "audit", "--sim", "--budget=6"},
+	} {
+		if _, err := parseScheduledStartArgs(args, 5); err == nil || !strings.Contains(err.Error(), "conflicts") {
+			t.Fatalf("conflicting action budget %v was not explicitly rejected: %v", args, err)
+		}
+	}
+	if _, err := parseScheduledStartArgs([]string{"team.yaml", "audit", "--sim", "--budget", "5"}, 5); err != nil {
+		t.Fatalf("equal explicit and record budgets should agree: %v", err)
+	}
+}
+
+type schedulerLifecycle struct {
+	mu       sync.Mutex
+	launches int
+	started  chan struct{}
+}
+
+func newSchedulerLifecycle() *schedulerLifecycle {
+	return &schedulerLifecycle{started: make(chan struct{})}
+}
+
+func (l *schedulerLifecycle) prepare(t *testing.T, f startFlags, accepted func(string)) (cliSubmission, error) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), f.runID)
+	blueprint := []byte("name: scheduled\nmembers:\n  - {name: agent}\nstages:\n  - {name: wait, advance_when: all}\n")
+	cfg := kernel.Config{
+		Workspace: "none",
+		Members:   []kernel.MemberConfig{{Name: "agent"}},
+		Stages:    []kernel.StageConfig{{Name: "wait", AdvanceWhen: "all"}},
+	}
+	digest := sha256.Sum256(blueprint)
+	artifact := runconfig.New(f.runID, "sim", hex.EncodeToString(digest[:]), f.prompt, f.model, cfg, nil, nil)
+	sup := supervisor.New(filepath.Dir(dir), supervisor.Options{Build: func(string, runconfig.Artifact) (arxiexec.Executor, error) {
+		return &schedulerBlockingExecutor{lifecycle: l}, nil
+	}})
+	prepared := app.PreparedSubmission{
+		JobID: f.runID, Actor: "scheduled", Blueprint: blueprint,
+		Artifact: artifact, BudgetUSD: f.budget, Location: dir,
+		OnAccepted: func(_ app.SubmitResult, dir string, _ kernel.Config) { accepted(dir) },
+	}
+	return cliSubmission{service: app.AcceptanceServices{RunsDir: filepath.Dir(dir), Lifecycle: sup}, supervisor: sup, prepared: prepared}, nil
+}
+
+type schedulerBlockingExecutor struct {
+	lifecycle *schedulerLifecycle
+}
+
+func (e *schedulerBlockingExecutor) SpawnTurn(context.Context, kernel.SpawnTurn) ([]kernel.Event, error) {
+	e.lifecycle.mu.Lock()
+	e.lifecycle.launches++
+	if e.lifecycle.launches == 1 {
+		close(e.lifecycle.started)
+	}
+	e.lifecycle.mu.Unlock()
+	return []kernel.Event{{Type: kernel.AgentTurnDone, Source: kernel.SourceRuntime}}, nil
+}
+
+func (*schedulerBlockingExecutor) CallTool(context.Context, kernel.CallTool) ([]kernel.Event, error) {
+	return nil, nil
+}
+
+func (*schedulerBlockingExecutor) AskHuman(context.Context, kernel.AskHuman) ([]kernel.Event, error) {
+	return nil, nil
+}
+
+func TestScheduledRunStartAcceptsNativelyAndOnceDoesNotAbandonIt(t *testing.T) {
+	life := newSchedulerLifecycle()
+	runner := selfRunner{prepare: func(f startFlags, accepted func(string)) (cliSubmission, error) {
+		return life.prepare(t, f, accepted)
+	}}
+	rec := trigger.Record{Name: "nightly", Budget: 3}
+	action := trigger.Action{Path: []string{"run", "start"}, Args: []string{"team.yaml", "audit", "--sim"}}
+	execution, err := runner.Start(rec, action)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := os.Stat(logstore.EventsPath(execution.(*runExec).dir)); err != nil {
+		t.Fatalf("Start returned before durable acceptance: %v", err)
+	}
+	select {
+	case <-execution.Done():
+		t.Fatal("accepted idle run was abandoned when its first drive pass stopped")
+	case <-time.After(50 * time.Millisecond):
+	}
+	execution.Cancel()
+	select {
+	case <-execution.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done did not close after terminal cancellation observation")
+	}
+}
+
+func TestScheduledRunCancelIsOneLifecycleRequestAndNotCompletion(t *testing.T) {
+	life := newSchedulerLifecycle()
+	runner := selfRunner{prepare: func(f startFlags, accepted func(string)) (cliSubmission, error) {
+		return life.prepare(t, f, accepted)
+	}}
+	execution, err := runner.Start(trigger.Record{Budget: 2}, trigger.Action{
+		Path: []string{"run", "start"}, Args: []string{"team.yaml", "audit", "--sim"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution.Cancel()
+	execution.Cancel()
+	select {
+	case <-execution.Done():
+		t.Fatal("Cancel closed Done before the lifecycle observed terminal state")
+	default:
+	}
+	if !eventually(t, func() bool {
+		return eventTypeCount(execution.(*runExec).dir, kernel.RunCancelled) == 1
+	}) {
+		t.Fatal("cancellation request did not reach the resident lifecycle")
+	}
+	select {
+	case <-execution.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal cancellation was not observed")
+	}
+	time.Sleep(25 * time.Millisecond)
+	if got := eventTypeCount(execution.(*runExec).dir, kernel.RunCancelled); got != 1 {
+		t.Fatalf("run.cancelled events = %d, want exactly one", got)
+	}
+}
+
+func TestResidentScheduledDecisionIsAcknowledgedAtActualSequence(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "r-scheduled")
+	store := scheduledApprovalStore(t, dir)
+	store.Close()
+
+	sup := supervisor.New(filepath.Dir(dir), supervisor.Options{Build: func(string, runconfig.Artifact) (arxiexec.Executor, error) {
+		return &schedulerBlockingExecutor{lifecycle: newSchedulerLifecycle()}, nil
+	}})
+	h, err := sup.Open(context.Background(), "r-scheduled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	go watchExternalDecisions(dir, h, stop)
+	defer close(stop)
+	defer sup.Close(context.Background())
+
+	sequence, err := appendExternalDecision(dir, externalInboxEvent("inbox-1", inbox.Reply{
+		Decision: inbox.DecisionApprove,
+	}), true)
+	if err != nil {
+		t.Fatalf("external decision: %v", err)
+	}
+	if sequence != 9 {
+		t.Fatalf("acknowledged sequence = %d, want actual appended sequence 9", sequence)
+	}
+	if got := eventTypeCount(dir, kernel.InboxReplied); got != 1 {
+		t.Fatalf("inbox replies = %d, want 1", got)
+	}
+}
+
+func TestResidentScheduledDecisionRefusesDuplicate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "r-scheduled")
+	store := scheduledApprovalStore(t, dir)
+	store.Close()
+
+	sup := supervisor.New(filepath.Dir(dir), supervisor.Options{Build: func(string, runconfig.Artifact) (arxiexec.Executor, error) {
+		return &schedulerBlockingExecutor{lifecycle: newSchedulerLifecycle()}, nil
+	}})
+	h, err := sup.Open(context.Background(), "r-scheduled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	go watchExternalDecisions(dir, h, stop)
+	defer close(stop)
+	defer sup.Close(context.Background())
+
+	reply := externalInboxEvent("inbox-1", inbox.Reply{Decision: inbox.DecisionApprove})
+	if _, err := appendExternalDecision(dir, reply, true); err != nil {
+		t.Fatalf("first decision: %v", err)
+	}
+	if _, err := appendExternalDecision(dir, reply, true); err == nil || residentErrorCode(err) != "already_answered" {
+		t.Fatalf("duplicate decision error = %v, code %q; want already_answered", err, residentErrorCode(err))
+	}
+	if got := eventTypeCount(dir, kernel.InboxReplied); got != 1 {
+		t.Fatalf("duplicate appended %d inbox replies, want 1", got)
+	}
+}
+
+func scheduledApprovalStore(t *testing.T, dir string) *logstore.Store {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := []byte("name: scheduled\nmembers:\n  - name: agent\n")
+	if err := os.WriteFile(filepath.Join(dir, "blueprint.snapshot.yaml"), snapshot, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blueprintSum := sha256.Sum256(snapshot)
+	blueprintSHA := hex.EncodeToString(blueprintSum[:])
+	cfg := kernel.Config{Blueprint: "scheduled", Members: []kernel.MemberConfig{{Name: "agent"}}}.ResolveDefaults()
+	digest, err := runconfig.Publish(dir, runconfig.New("r-scheduled", "sim", blueprintSHA, "prompt", "model", cfg, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := logstore.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Append([]kernel.Event{
+		{Type: kernel.RunStarted, Payload: map[string]any{
+			"run_id": "r-scheduled", "actor": "scheduled", "blueprint_sha": blueprintSHA,
+			"effective_config_schema": runconfig.Schema, "effective_config_path": runconfig.FileName,
+			"effective_config_sha": digest,
+		}},
+		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(1), "work_ids": []string{}}},
+		{Type: kernel.StageEntered, Payload: map[string]any{"stage": "work", "index": float64(0)}},
+		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(3), "work_ids": []string{}}},
+		{Type: kernel.AgentActivated, Actor: "agent", Payload: map[string]any{"agent": "agent"}},
+		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(5), "work_ids": []string{}}},
+		{Type: kernel.InboxCreated, Payload: map[string]any{"inbox_id": "inbox-1", "agent": "agent", "kind": "tool_approval", "question": "allow?"}},
+		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(7), "work_ids": []string{}}},
+	})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store
+}
+
+func eventTypeCount(dir string, typ kernel.EventType) int {
+	read, err := logstore.ReadConfirmed(dir, 0)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range bytes.Split(read.Bytes, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var event kernel.Event
+		if json.Unmarshal(line, &event) == nil && event.Type == typ {
+			n++
+		}
+	}
+	return n
 }
 
 // lastCell returns the LAST cell for a trigger, as `trigger list` prints it.

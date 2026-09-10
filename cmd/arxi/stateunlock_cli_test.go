@@ -154,10 +154,11 @@ func TestReleasingOurOwnLockIsRecordedWithoutCeremony(t *testing.T) {
 			"cannot perform, so a key claimed by hand is held until the run ends.",
 			got.code, got.out)
 	}
-	// seq 6: the fixture runs to seq 5, so the release this command appends is the
-	// sixth event. Spelled out rather than computed, because a seq the test derives
-	// from the log it is checking would agree with any number the binary printed.
-	for _, want := range []string{"released migrations/ (seq 6)", "it was held by human"} {
+	// The modern fixture carries an exec.step_completed record after each of its
+	// five domain events, so the release appended by this command is seq 11.
+	// Spelled out rather than computed, because a seq the test derives from the
+	// log it is checking would agree with any number the binary printed.
+	for _, want := range []string{"released migrations/ (seq 11)", "it was held by human"} {
 		if !strings.Contains(got.out, want) {
 			t.Errorf("the release does not print %q:\n%s\n"+
 				"  consequence: the seq is what `event show` is given to check this against "+

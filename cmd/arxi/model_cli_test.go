@@ -69,8 +69,8 @@ func statusOf(t *testing.T, dir, id string) (enabled, found bool) {
 func TestTheDocumentedFirstCommandsWork(t *testing.T) {
 	dir := workdir(t)
 
-	r := addProvider(t, dir, "anthropic")
-	if !strings.Contains(r.out, "key from $ANTHROPIC_API_KEY") {
+	r := addProvider(t, dir, "openai")
+	if !strings.Contains(r.out, "key from $OPENAI_API_KEY") {
 		t.Errorf("the output does not name the variable the key is read from:\n%s", r.out)
 	}
 
@@ -90,6 +90,22 @@ func TestTheDocumentedFirstCommandsWork(t *testing.T) {
 	}
 }
 
+func TestTheNativeAnthropicPresetIsRefusedWithoutCreatingAStore(t *testing.T) {
+	dir := workdir(t)
+
+	r := arxi(t, dir, "provider", "add", "anthropic")
+	if r.code != 2 {
+		t.Errorf("exit %d, want 2 (unsupported preset):\n%s", r.code, r.out)
+	}
+	if !strings.Contains(r.out, "native Anthropic Messages") ||
+		!strings.Contains(r.out, "no provider file was written") {
+		t.Errorf("the refusal is not actionable:\n%s", r.out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "providers")); !os.IsNotExist(err) {
+		t.Errorf("unsupported preset created the provider store: %v", err)
+	}
+}
+
 // THE security test at the CLI boundary. `--api-key-env sk-...` is one
 // keystroke of misunderstanding from the correct command, and if it succeeds
 // the secret is written to a file in the working directory and the next commit
@@ -97,7 +113,7 @@ func TestTheDocumentedFirstCommandsWork(t *testing.T) {
 func TestAKeyPassedToTheFlagIsRefusedAndNothingIsWritten(t *testing.T) {
 	dir := workdir(t)
 
-	r := arxi(t, dir, "provider", "add", "anthropic",
+	r := arxi(t, dir, "provider", "add", "openai",
 		"--api-key-env", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123")
 	if r.code != 2 {
 		t.Errorf("exit %d, want 2 (misuse):\n%s", r.code, r.out)
@@ -109,7 +125,7 @@ func TestAKeyPassedToTheFlagIsRefusedAndNothingIsWritten(t *testing.T) {
 	// The refusal has to happen BEFORE the write. An error message printed
 	// after the file exists is not protection.
 	if _, err := os.Stat(filepath.Join(dir, "providers")); err == nil {
-		body, _ := os.ReadFile(filepath.Join(dir, "providers", "anthropic.json"))
+		body, _ := os.ReadFile(filepath.Join(dir, "providers", "openai.json"))
 		if strings.Contains(string(body), "sk-ant") {
 			t.Fatalf("the secret was written to disk anyway:\n%s", body)
 		}
@@ -124,9 +140,9 @@ func TestTheProviderFileTheCLIWritesIsNotWorldReadable(t *testing.T) {
 		t.Skip("unix permissions")
 	}
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
-	info, err := os.Stat(filepath.Join(dir, "providers", "anthropic.json"))
+	info, err := os.Stat(filepath.Join(dir, "providers", "openai.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,19 +156,19 @@ func TestTheProviderFileTheCLIWritesIsNotWorldReadable(t *testing.T) {
 // success with no effect on disk.
 func TestEnablingAModelChangesWhatIsStored(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
-	if on, found := statusOf(t, dir, "claude-opus-4-1"); !found || on {
-		t.Fatalf("fixture: claude-opus-4-1 found=%v enabled=%v, want found and "+
+	if on, found := statusOf(t, dir, "gpt-5.1-mini"); !found || on {
+		t.Fatalf("fixture: gpt-5.1-mini found=%v enabled=%v, want found and "+
 			"disabled", found, on)
 	}
 
-	r := arxi(t, dir, "model", "enable", "claude-opus-4-1")
+	r := arxi(t, dir, "model", "enable", "gpt-5.1-mini")
 	if r.code != 0 {
 		t.Fatalf("model enable failed (%d):\n%s", r.code, r.out)
 	}
 
-	if on, _ := statusOf(t, dir, "claude-opus-4-1"); !on {
+	if on, _ := statusOf(t, dir, "gpt-5.1-mini"); !on {
 		t.Error("the command reported success and the stored flag did not move")
 	}
 }
@@ -161,16 +177,16 @@ func TestEnablingAModelChangesWhatIsStored(t *testing.T) {
 // enabled at registration — the one an operator would actually want to withhold.
 func TestDisablingTheModelEnabledAtRegistrationWorks(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
-	if on, found := statusOf(t, dir, "claude-sonnet-4-6"); !found || !on {
-		t.Fatalf("fixture: claude-sonnet-4-6 found=%v enabled=%v", found, on)
+	if on, found := statusOf(t, dir, "gpt-5.1"); !found || !on {
+		t.Fatalf("fixture: gpt-5.1 found=%v enabled=%v", found, on)
 	}
 
-	if r := arxi(t, dir, "model", "disable", "claude-sonnet-4-6"); r.code != 0 {
+	if r := arxi(t, dir, "model", "disable", "gpt-5.1"); r.code != 0 {
 		t.Fatalf("model disable failed (%d):\n%s", r.code, r.out)
 	}
-	if on, _ := statusOf(t, dir, "claude-sonnet-4-6"); on {
+	if on, _ := statusOf(t, dir, "gpt-5.1"); on {
 		t.Error("the model is still enabled after `model disable`")
 	}
 }
@@ -180,12 +196,12 @@ func TestDisablingTheModelEnabledAtRegistrationWorks(t *testing.T) {
 // the user that the command does nothing.
 func TestEnablingTwiceSucceedsAndSaysItChangedNothing(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
-	if r := arxi(t, dir, "model", "enable", "claude-opus-4-1"); r.code != 0 {
+	if r := arxi(t, dir, "model", "enable", "gpt-5.1-mini"); r.code != 0 {
 		t.Fatalf("first enable failed: %s", r.out)
 	}
-	r := arxi(t, dir, "model", "enable", "claude-opus-4-1")
+	r := arxi(t, dir, "model", "enable", "gpt-5.1-mini")
 	if r.code != 0 {
 		t.Errorf("exit %d on a second enable: an idempotent deploy script that "+
 			"enables a model every time would break:\n%s", r.code, r.out)
@@ -199,19 +215,19 @@ func TestEnablingTwiceSucceedsAndSaysItChangedNothing(t *testing.T) {
 // every agent at a new endpoint and forget which models an operator enabled.
 func TestRegisteringAProviderTwiceIsRefusedAndKeepsTheFlags(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
-	if r := arxi(t, dir, "model", "enable", "claude-opus-4-1"); r.code != 0 {
+	addProvider(t, dir, "openai")
+	if r := arxi(t, dir, "model", "enable", "gpt-5.1-mini"); r.code != 0 {
 		t.Fatal(r.out)
 	}
 
-	r := arxi(t, dir, "provider", "add", "anthropic")
+	r := arxi(t, dir, "provider", "add", "openai")
 	if r.code != 1 {
 		t.Errorf("exit %d, want 1 (operational, not misuse: the command was "+
 			"spelled correctly):\n%s", r.code, r.out)
 	}
 
 	// The flags the operator chose must survive the refusal.
-	if on, _ := statusOf(t, dir, "claude-opus-4-1"); !on {
+	if on, _ := statusOf(t, dir, "gpt-5.1-mini"); !on {
 		t.Error("the refused add reset an enabled flag anyway")
 	}
 }
@@ -272,7 +288,7 @@ func TestModelListOnAFreshDirectoryExplainsTheNextStep(t *testing.T) {
 // reporting success would contradict the run that then fails to resolve.
 func TestAnAmbiguousModelIsRefusedRatherThanChosen(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 	addProvider(t, dir, "local")
 
 	// Make the collision by hand — this is the realistic shape, a local server
@@ -282,24 +298,24 @@ func TestAnAmbiguousModelIsRefusedRatherThanChosen(t *testing.T) {
   "name": "local",
   "base_url": "http://127.0.0.1:11434/v1",
   "api_key_env": "LOCAL_API_KEY",
-  "models": [{"id": "claude-opus-4-1", "enabled": false}]
+  "models": [{"id": "gpt-5.1-mini", "enabled": false}]
 }
 `
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	r := arxi(t, dir, "model", "enable", "claude-opus-4-1")
+	r := arxi(t, dir, "model", "enable", "gpt-5.1-mini")
 	if r.code == 0 {
 		t.Fatalf("the command chose a provider for the user:\n%s", r.out)
 	}
-	if !strings.Contains(r.out, "local/claude-opus-4-1") &&
-		!strings.Contains(r.out, "anthropic/claude-opus-4-1") {
+	if !strings.Contains(r.out, "local/gpt-5.1-mini") &&
+		!strings.Contains(r.out, "openai/gpt-5.1-mini") {
 		t.Errorf("the error does not show the qualified spelling that fixes it:\n%s", r.out)
 	}
 
 	// And the qualified spelling has to work, or the advice is useless.
-	q := arxi(t, dir, "model", "enable", "local/claude-opus-4-1")
+	q := arxi(t, dir, "model", "enable", "local/gpt-5.1-mini")
 	if q.code != 0 {
 		t.Errorf("the qualified spelling the error recommended does not work "+
 			"(%d):\n%s", q.code, q.out)
@@ -310,13 +326,13 @@ func TestAnAmbiguousModelIsRefusedRatherThanChosen(t *testing.T) {
 // a second command to discover that 4-5 is 4-6.
 func TestATypoInModelEnableSuggestsTheRealID(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
-	r := arxi(t, dir, "model", "enable", "claude-sonnet-4-5")
+	r := arxi(t, dir, "model", "enable", "gpt-5.0")
 	if r.code != 1 {
 		t.Errorf("exit %d, want 1:\n%s", r.code, r.out)
 	}
-	if !strings.Contains(r.out, "claude-sonnet-4-6") {
+	if !strings.Contains(r.out, "gpt-5.1") {
 		t.Errorf("no suggestion for an obvious typo:\n%s", r.out)
 	}
 }
@@ -325,12 +341,12 @@ func TestATypoInModelEnableSuggestsTheRealID(t *testing.T) {
 // got there by another route still does not reach a provider.
 func TestAKeyPastedIntoTheFileIsCaughtWhenTheCLIReadsIt(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
-	path := filepath.Join(dir, "providers", "anthropic.json")
+	path := filepath.Join(dir, "providers", "openai.json")
 	body := `{
-  "name": "anthropic",
-  "base_url": "https://api.anthropic.com/v1",
+  "name": "openai",
+  "base_url": "https://api.openai.com/v1",
   "api_key_env": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
 }
 `
@@ -348,7 +364,7 @@ func TestAKeyPastedIntoTheFileIsCaughtWhenTheCLIReadsIt(t *testing.T) {
 // tool and an agent has no other way to read it.
 func TestModelListJSONIsParseable(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
 	r := arxi(t, dir, "model", "list", "--json")
 	if r.code != 0 {
@@ -382,7 +398,7 @@ func TestADeclaredProviderSubcommandIsNotCalledUnknown(t *testing.T) {
 // touched, and says what is missing.
 func TestModelEnableWithNoArgumentIsRefused(t *testing.T) {
 	dir := workdir(t)
-	addProvider(t, dir, "anthropic")
+	addProvider(t, dir, "openai")
 
 	r := arxi(t, dir, "model", "enable")
 	if r.code != 2 {

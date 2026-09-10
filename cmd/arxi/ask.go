@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -23,8 +24,8 @@ import (
 // would turn all six red, and the honest fix would be to widen the frozen surface
 // so a shortcut could exist. So this is a main.go-level alias, in the manner of
 // `arxi why`: the flags are `run start`'s, expanded through `run start`'s own
-// registry entry, parsed by `run start`'s own parser, and driven by the same
-// executeRun. Nothing here is a second pipeline, so a flag added to `run start`
+// registry entry, parsed by `run start`'s own parser, and driven by the shared
+// submission lifecycle. Nothing here is a second pipeline, so a flag added to
 // arrives on this path already working.
 //
 // # Why it exists anyway
@@ -189,7 +190,7 @@ func askModelNote(cfg kernel.Config, def string, sim bool) string {
 // It renders an agentstore.Record and loads those bytes back, rather than
 // assembling a kernel.Config in place. That buys the name validation, the
 // load-bearing `work` stage, and a bp.Raw that is a real blueprint -- which
-// matters because executeRun freezes Raw into the run directory, and a snapshot
+// matters because durable acceptance freezes Raw into the run directory, and a snapshot
 // that does not parse would leave the run unreplayable by `arxi run why`. Nothing
 // is written under agents/: a run that needed a model for one question should not
 // leave a team behind for the user to discover later and wonder about.
@@ -278,10 +279,8 @@ func lastReply(events []kernel.Event) askReply {
 
 // askRunReply reads the run's own log back after the loop has stopped.
 //
-// Not through the still-open logstore.Store: executeRun holds the writer lock for
-// the length of the run and releases it on a deferred Close, so a read that had to
-// happen before that Close would be a second reason to keep the store open. The
-// last time this path held the lock a moment longer than it needed to, a failed run
+// Not through the resident logstore.Store: submitAndWaitCLI closes the supervisor
+// before this read, so writer ownership has already been released. The last time this path held the lock a moment longer than it needed to, a failed run
 // left writer.lock behind with a dead pid in it and the next command refused.
 // Reading the file is enough, and it cannot hold anything.
 func askRunReply(dir string) (askReply, error) {
@@ -416,10 +415,9 @@ func cmdAsk(args []string) {
 	if f.sim {
 		simNote = "simulated, "
 	}
-	dir, out, loopErr := executeRun(f, bp, func(dir string, cfg kernel.Config) {
+	runtime, err := prepareCLISubmission(f, bp, func(dir string, cfg kernel.Config) {
 		// Printed after run.started is in the log and before the first turn opens:
-		// the last moment a line about this run is still true if the model call
-		// hangs. On stderr, because stdout belongs to the answer.
+		// the last moment a line about this run is still true if the model call hangs.
 		note := askModelNote(cfg, f.model, f.sim)
 		if note != "" {
 			note = ", " + note
@@ -427,6 +425,11 @@ func cmdAsk(args []string) {
 		fmt.Fprintf(os.Stderr, "arxi: %sceiling %s USD (%s)%s, run %s\n",
 			simNote, usd(f.budget), source, note, f.runID)
 	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "arxi: %v\n", err)
+		os.Exit(1)
+	}
+	dir, out, loopErr := submitAndWaitCLI(context.Background(), runtime)
 
 	rep, err := askRunReply(dir)
 	if err != nil {
@@ -490,7 +493,7 @@ func cmdAsk(args []string) {
 			f.runID, filepath.Join(dir, "events.ndjson"))
 	}
 
-	// Plain os.Exit, matching cmdRunStart: executeRun has returned, so its deferred
-	// Close has already released writer.lock and there is no hook left to run.
+	// Plain os.Exit, matching cmdRunStart: submitAndWaitCLI has returned, so the
+	// supervisor has released writer.lock and there is no hook left to run.
 	os.Exit(code)
 }

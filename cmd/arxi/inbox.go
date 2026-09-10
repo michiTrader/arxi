@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/inbox"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -195,6 +198,10 @@ func cmdInboxAnswer(verb string, args []string) {
 	case "reject":
 		reply.Decision = inbox.DecisionReject
 		reply.Text = vals["reason"]
+		if strings.TrimSpace(reply.Text) == "" {
+			fmt.Fprintln(os.Stderr, "arxi inbox reject: --reason is required")
+			os.Exit(2)
+		}
 	case "reply":
 		reply.Decision = inbox.DecisionAnswer
 		reply.Text = vals["text"]
@@ -255,52 +262,88 @@ func cmdInboxAnswer(verb string, args []string) {
 		}
 	}
 
-	ev, err := inbox.Answer(dirs[0], id, reply)
+	var sequence int64
+	// Historical non-approval kinds still accept the CLI's generic reply act;
+	// ordinary questions and approvals use exact kind matching.
+	legacyReply := verb == "reply"
+	if legacyReply {
+		if r, rerr := inbox.OpenRun(dirs[0]); rerr == nil {
+			if it, ierr := r.Item(id); ierr == nil {
+				legacyReply = it.Kind != "question" && it.Kind != "tool_approval"
+			}
+		}
+	}
+	var event kernel.Event
+	resident, residentErr := nativeLifecycles.decision(dirs[0], func(store *logstore.Store) error {
+		var commandErr error
+		if legacyReply {
+			event = externalInboxEvent(id, reply)
+			commandErr = validateExternalDecision(store, event, false)
+			if commandErr == nil {
+				written, appendErr := store.Append([]kernel.Event{event})
+				commandErr = appendErr
+				if appendErr == nil && len(written) == 1 {
+					event = written[0]
+				}
+			}
+		} else {
+			event, commandErr = inbox.AnswerExactStore(store, id, reply)
+		}
+		return commandErr
+	})
+	if resident {
+		err = residentErr
+		sequence = event.Seq
+	} else {
+		if legacyReply {
+			event, err = inbox.Answer(dirs[0], id, reply)
+		} else {
+			event, err = inbox.AnswerExact(dirs[0], id, reply)
+		}
+		if err == nil {
+			sequence = event.Seq
+		} else if isWriterLocked(err) {
+			sequence, err = appendExternalDecision(dirs[0], externalInboxEvent(id, reply), !legacyReply)
+		}
+	}
 	if err != nil {
-		// A run that has ended is its own case, because the generic message
-		// ("inbox: "inbox-1" in run r1 is cancelled: the run has ended...") does
+		// A run that has ended is its own case, because the generic message does
 		// not say what to do, and what to do is the whole difficulty: nothing in
-		// this run will ever read the answer, so the work has to move or be
-		// dropped.
-		if errors.Is(err, inbox.ErrRunOver) {
-			// runID comes from the fold above and is empty only if that read
-			// failed; the directory is then the only handle the user has, and a
-			// remedy line reading "arxi run result " is worse than a long path.
+		// this run will ever read the answer, so the work has to move or be dropped.
+		if errors.Is(err, inbox.ErrRunOver) || residentErrorCode(err) == "run_over" {
 			subject := runID
 			if subject == "" {
 				subject = dirs[0]
 			}
-			fmt.Fprintf(os.Stderr, "arxi inbox %s: %v\n"+
-				"  the reducer folds every event arriving at a terminal run into "+
-				"nothing, so the reply would be written and read by no one.\n"+
+			status := "ended"
+			if r, rerr := inbox.OpenRun(dirs[0]); rerr == nil && r.State().Status != "" {
+				status = string(r.State().Status)
+			}
+			fmt.Fprintf(os.Stderr, "arxi inbox %s: inbox: %q in run %s is %s: %v\n"+
+				"  the reducer folds every event arriving at a terminal run into nothing, so the reply would be written and read by no one.\n"+
 				"  what ended it: arxi run result %s\n"+
-				"  the question stays listed because it is in the log, and the log "+
-				"is not edited.\n", verb, err, subject)
+				"  the question stays listed because it is in the log, and the log is not edited.\n",
+				verb, id, runID, status, err, subject)
 			os.Exit(1)
 		}
-		// A usage mistake and an operational failure get different exit codes,
-		// because a script that separates them should not file a broken-storage
-		// report for a missing --reason.
 		code := 1
 		if errors.Is(err, inbox.ErrNoSuchItem) || errors.Is(err, inbox.ErrAlreadyAnswered) ||
-			strings.Contains(err.Error(), "needs a reason") {
+			errors.Is(err, inbox.ErrWrongDecisionKind) || residentDecisionUsage(err) {
 			code = 2
 		}
 		fmt.Fprintf(os.Stderr, "arxi inbox %s: %v\n", verb, err)
 		os.Exit(code)
 	}
 
-	// §20.2 prints "approved. backend unblocked (r1 seq 6)". The seq is the
-	// useful part: it is where the answer landed in the log, which is what
-	// `run replay --until-seq` and any later argument about what happened are
-	// anchored to.
+	// The projected sequence is the append point of the decision just made.
+	seq := sequence
 	switch {
 	case who != "" && runID != "":
-		fmt.Printf("%s. %s unblocked (%s seq %d)\n", pastTense(verb), who, runID, ev.Seq)
+		fmt.Printf("%s. %s unblocked (%s seq %d)\n", pastTense(verb), who, runID, seq)
 	case runID != "":
-		fmt.Printf("%s. (%s seq %d)\n", pastTense(verb), runID, ev.Seq)
+		fmt.Printf("%s. (%s seq %d)\n", pastTense(verb), runID, seq)
 	default:
-		fmt.Printf("%s. (seq %d)\n", pastTense(verb), ev.Seq)
+		fmt.Printf("%s. (seq %d)\n", pastTense(verb), seq)
 	}
 
 	// The run does not continue by itself, and saying so is the difference
@@ -308,6 +351,36 @@ func cmdInboxAnswer(verb string, args []string) {
 	// answer is in the log; something has to fold it and act, and that is a
 	// different process from the one that just appended an event.
 	fmt.Println("  the answer is in the log. the run resumes when it is next driven.")
+}
+
+func externalInboxEvent(id string, reply inbox.Reply) kernel.Event {
+	return kernel.Event{
+		ID: "inbox-reply-" + id, Ts: nowFunc().UTC().Format(time.RFC3339),
+		Type: kernel.InboxReplied, Source: kernel.SourceHuman,
+		Payload: map[string]any{"inbox_id": id, "text": reply.Text, "decision": reply.Decision},
+	}
+}
+
+func isWriterLocked(err error) bool {
+	var locked *logstore.LockedError
+	return errors.As(err, &locked)
+}
+
+func residentErrorCode(err error) string {
+	var resident *residentDecisionError
+	if errors.As(err, &resident) {
+		return resident.code
+	}
+	return ""
+}
+
+func residentDecisionUsage(err error) bool {
+	switch residentErrorCode(err) {
+	case "already_answered", "not_found", "wrong_kind":
+		return true
+	default:
+		return false
+	}
 }
 
 func pastTense(verb string) string {
