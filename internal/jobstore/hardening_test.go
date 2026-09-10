@@ -10,36 +10,51 @@ import (
 	"github.com/michiTrader/arxi/internal/job"
 )
 
-func TestFilesystemRefusesASecondWriterAndReopensAfterClose(t *testing.T) {
+func TestFilesystemAllowsIndependentClientsAndSerializesTheirCAS(t *testing.T) {
 	dir := t.TempDir()
 	clock := &testClock{now: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
 	first, err := Open(dir, clock.read)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	_, err = Open(dir, clock.read)
-	var locked *LockedError
-	if !errors.As(err, &locked) {
-		first.Close()
-		t.Fatalf("second independent Open returned %v, want *LockedError: two instances could assign the same revision and corrupt the coordination journal", err)
-	}
-	if locked.Owner == "" {
-		first.Close()
-		t.Fatal("lock conflict omitted its owner: an operator cannot distinguish a live writer from a stale lock")
-	}
-	if err := first.Close(); err != nil {
-		t.Fatalf("close first writer: %v", err)
-	}
-	reopened, err := Open(dir, clock.read)
+	defer first.Close()
+	second, err := Open(dir, clock.read)
 	if err != nil {
-		t.Fatalf("Open after Close: %v: a clean restart must release and reacquire coordination ownership", err)
+		t.Fatalf("second independent Open: %v: host and scheduler must share one coordination truth", err)
 	}
-	if err := reopened.Close(); err != nil {
-		t.Fatalf("close reopened writer: %v", err)
+	defer second.Close()
+
+	firstValue := admission("first", "job-first", 100).Occurrence
+	firstValue.State, firstValue.JobID, firstValue.ReservationID = job.OccurrencePending, "", ""
+	_, firstRevision, err := first.RecordOccurrence(0, firstValue)
+	if err != nil {
+		t.Fatalf("first client mutation: %v", err)
+	}
+	secondValue := admission("second", "job-second", 100).Occurrence
+	secondValue.State, secondValue.JobID, secondValue.ReservationID = job.OccurrencePending, "", ""
+	_, actual, err := second.RecordOccurrence(0, secondValue)
+	var revisionErr *RevisionError
+	if !errors.As(err, &revisionErr) || actual != firstRevision || revisionErr.Actual != firstRevision {
+		t.Fatalf("stale independent client returned revision %d, error %v, want stale CAS at %d: each transaction must reload confirmed journal state", actual, err, firstRevision)
+	}
+	if view := second.View(); view.Revision != firstRevision || len(view.Occurrences) != 1 {
+		t.Fatalf("refreshed second view = revision %d, occurrences %d: reads must observe the shared confirmed journal", view.Revision, len(view.Occurrences))
 	}
 }
 
-func TestOpenFailureReleasesItsWriterLock(t *testing.T) {
+func TestStaleAdvisoryLockFileDoesNotBlockOpen(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, lockFile), []byte("pid 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir, time.Now)
+	if err != nil {
+		t.Fatalf("Open with an unlocked lock file: %v: lock-file existence must not turn process death into a permanent outage", err)
+	}
+	store.Close()
+}
+
+func TestOpenFailureDoesNotLeaveAHeldWriterLock(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte("not-json\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -47,9 +62,14 @@ func TestOpenFailureReleasesItsWriterLock(t *testing.T) {
 	if _, err := Open(dir, time.Now); err == nil {
 		t.Fatal("corrupt journal opened successfully: recovery would build an unjustified projection")
 	}
-	if _, err := os.Stat(filepath.Join(dir, lockFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("failed Open left writer lock behind: fixing storage would still require unrelated manual lock deletion: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, journalFile), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
+	store, err := Open(dir, time.Now)
+	if err != nil {
+		t.Fatalf("Open after repairing journal: %v: a failed Open must release its advisory lock", err)
+	}
+	store.Close()
 }
 
 func TestNilClockFailsClosedInsteadOfPanicking(t *testing.T) {

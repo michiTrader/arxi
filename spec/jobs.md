@@ -130,6 +130,14 @@ all records or none. A durable rollback marker contains the prior confirmed byte
 offset; recovery truncates a batch whose marker survived a crash. Confirmed reads
 never expose pending bytes.
 
+The filesystem adapter serializes transactions between processes on one local
+machine with an OS advisory lock (`flock` on Unix and `LockFileEx` on Windows).
+The lock is acquired only for a transaction and is released automatically by the
+OS when a process exits, including hard termination. This is not a distributed
+lock and makes no multi-host guarantee for network/shared filesystems; deployments
+requiring that topology need a coordination backend with distributed transaction
+semantics.
+
 Cross-job record kinds are:
 
 | kind | required identity and purpose |

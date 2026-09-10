@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/advisorylock"
 	"github.com/michiTrader/arxi/internal/job"
 )
 
@@ -26,14 +27,12 @@ type pendingMarker struct {
 }
 
 type File struct {
-	mu      sync.Mutex
-	dir     string
-	clock   Clock
-	state   *state
-	journal *os.File
-	lock    *os.File
-	size    int64
-	closed  bool
+	mu     sync.Mutex
+	dir    string
+	clock  Clock
+	state  *state
+	size   int64
+	closed bool
 }
 
 func Open(dir string, clock Clock) (*File, error) {
@@ -43,39 +42,64 @@ func Open(dir string, clock Clock) (*File, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("jobstore: create directory: %w", err)
 	}
-	lock, err := acquireLock(dir)
+	file := &File{dir: dir, clock: clock, state: newState()}
+	lock, err := file.acquireTransactionLock()
 	if err != nil {
 		return nil, err
 	}
-	file := &File{dir: dir, clock: clock, state: newState(), lock: lock}
-	failed := true
-	defer func() {
-		if failed {
-			_ = file.releaseLock()
-		}
-	}()
-	if err := file.rollback(); err != nil {
-		return nil, err
-	}
-	if err := file.scan(); err != nil {
+	defer lock.Release()
+	if err := file.refreshLocked(); err != nil {
 		return nil, err
 	}
 	journal, err := os.OpenFile(file.journalPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("jobstore: open journal: %w", err)
 	}
-	file.journal = journal
+	if err := journal.Close(); err != nil {
+		return nil, fmt.Errorf("jobstore: close journal: %w", err)
+	}
 	if err := syncDir(dir); err != nil {
-		journal.Close()
 		return nil, err
 	}
-	failed = false
 	return file, nil
 }
 
 func (f *File) journalPath() string { return filepath.Join(f.dir, journalFile) }
 func (f *File) pendingPath() string { return filepath.Join(f.dir, pendingFile) }
 func (f *File) lockPath() string    { return filepath.Join(f.dir, lockFile) }
+
+func (f *File) refreshLocked() error {
+	if err := f.rollback(); err != nil {
+		return err
+	}
+	f.state = newState()
+	f.size = 0
+	return f.scan()
+}
+
+func (f *File) acquireTransactionLock() (*advisorylock.Lock, error) {
+	lock, err := advisorylock.Acquire(f.lockPath(), true)
+	if err != nil {
+		return nil, fmt.Errorf("jobstore: acquire coordination transaction lock: %w", err)
+	}
+	return lock, nil
+}
+
+func (f *File) transaction(fn func() error) (err error) {
+	lock, err := f.acquireTransactionLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := lock.Release(); err == nil && releaseErr != nil {
+			err = releaseErr
+		}
+	}()
+	if err := f.refreshLocked(); err != nil {
+		return err
+	}
+	return fn()
+}
 
 func (f *File) scan() error {
 	journal, err := os.Open(f.journalPath())
@@ -157,10 +181,15 @@ func (f *File) commit(records []record) (Revision, error) {
 	if err := f.writePending(); err != nil {
 		return f.state.view.Revision, err
 	}
-	if _, err := f.journal.Write(body); err != nil {
+	journal, err := os.OpenFile(f.journalPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return f.state.view.Revision, fmt.Errorf("jobstore: open journal for append: %w", err)
+	}
+	defer journal.Close()
+	if _, err := journal.Write(body); err != nil {
 		return f.state.view.Revision, fmt.Errorf("jobstore: append journal: %w", err)
 	}
-	if err := f.journal.Sync(); err != nil {
+	if err := journal.Sync(); err != nil {
 		return f.state.view.Revision, fmt.Errorf("jobstore: sync journal: %w", err)
 	}
 	if err := os.Remove(f.pendingPath()); err != nil {
@@ -218,44 +247,6 @@ func (f *File) rollback() error {
 	return syncDir(f.dir)
 }
 
-func acquireLock(dir string) (*os.File, error) {
-	path := filepath.Join(dir, lockFile)
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		owner := "an unknown process"
-		if body, readErr := os.ReadFile(path); readErr == nil && len(bytes.TrimSpace(body)) > 0 {
-			owner = string(bytes.TrimSpace(body))
-		}
-		return nil, &LockedError{Dir: dir, Owner: owner}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("jobstore: acquire coordination writer lock: %w", err)
-	}
-	if _, err := fmt.Fprintf(lock, "pid %d\n", os.Getpid()); err != nil {
-		lock.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("jobstore: record coordination lock owner: %w", err)
-	}
-	if err := lock.Sync(); err != nil {
-		lock.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("jobstore: sync coordination writer lock: %w", err)
-	}
-	return lock, nil
-}
-
-func (f *File) releaseLock() error {
-	if f.lock == nil {
-		return nil
-	}
-	err := f.lock.Close()
-	f.lock = nil
-	if removeErr := os.Remove(f.lockPath()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && err == nil {
-		err = fmt.Errorf("jobstore: remove coordination writer lock: %w", removeErr)
-	}
-	return err
-}
-
 func truncateSync(path string, size int64) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -286,110 +277,140 @@ func syncDir(dir string) error {
 	return nil
 }
 
-func (f *File) View() View { f.mu.Lock(); defer f.mu.Unlock(); return cloneView(f.state.view) }
-func (f *File) BindSubmission(expected Revision, value Submission) (Submission, Revision, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	records, result, err := f.state.bind(expected, value)
+func transactValue[T any](f *File, fn func() ([]record, T, error)) (result T, revision Revision, err error) {
+	err = f.transaction(func() error {
+		records, value, applyErr := fn()
+		result = value
+		if applyErr != nil {
+			return applyErr
+		}
+		revision, applyErr = f.commit(records)
+		return applyErr
+	})
 	if err != nil {
-		return Submission{}, f.state.view.Revision, err
+		revision = f.state.view.Revision
 	}
-	revision, err := f.commit(records)
-	return result, revision, err
+	return
 }
-func (f *File) RecordOccurrence(expected Revision, value job.Occurrence) (job.Occurrence, Revision, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	records, result, err := f.state.recordOccurrence(expected, value)
+
+func transactRevision(f *File, fn func() ([]record, error)) (revision Revision, err error) {
+	err = f.transaction(func() error {
+		records, applyErr := fn()
+		if applyErr != nil {
+			return applyErr
+		}
+		revision, applyErr = f.commit(records)
+		return applyErr
+	})
 	if err != nil {
-		return job.Occurrence{}, f.state.view.Revision, err
+		revision = f.state.view.Revision
 	}
-	revision, err := f.commit(records)
-	return result, revision, err
+	return
 }
-func (f *File) Admit(expected Revision, value Admission) (job.Occurrence, Revision, error) {
+
+func (f *File) View() View {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, result, err := f.state.admit(expected, value)
-	if err != nil {
-		return job.Occurrence{}, f.state.view.Revision, err
+	if f.closed {
+		return cloneView(f.state.view)
 	}
-	revision, err := f.commit(records)
-	return result, revision, err
+	_ = f.transaction(func() error { return nil })
+	return cloneView(f.state.view)
+}
+func (f *File) BindSubmission(expected Revision, value Submission) (result Submission, revision Revision, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	err = f.transaction(func() error {
+		records, bound, applyErr := f.state.bind(expected, value)
+		result = bound
+		if applyErr != nil {
+			return applyErr
+		}
+		revision, applyErr = f.commit(records)
+		return applyErr
+	})
+	if err != nil {
+		revision = f.state.view.Revision
+	}
+	return
+}
+func (f *File) RecordOccurrence(expected Revision, value job.Occurrence) (result job.Occurrence, revision Revision, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	err = f.transaction(func() error {
+		records, recorded, applyErr := f.state.recordOccurrence(expected, value)
+		result = recorded
+		if applyErr != nil {
+			return applyErr
+		}
+		revision, applyErr = f.commit(records)
+		return applyErr
+	})
+	if err != nil {
+		revision = f.state.view.Revision
+	}
+	return
+}
+func (f *File) Admit(expected Revision, value Admission) (result job.Occurrence, revision Revision, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	err = f.transaction(func() error {
+		records, admitted, applyErr := f.state.admit(expected, value)
+		result = admitted
+		if applyErr != nil {
+			return applyErr
+		}
+		revision, applyErr = f.commit(records)
+		return applyErr
+	})
+	if err != nil {
+		revision = f.state.view.Revision
+	}
+	return
 }
 func (f *File) Claim(expected Revision, id job.JobID, owner string, duration time.Duration) (job.Claim, Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, result, err := f.state.claim(expected, id, owner, duration, f.clock())
-	if err != nil {
-		return job.Claim{}, f.state.view.Revision, err
-	}
-	revision, err := f.commit(records)
-	return result, revision, err
+	return transactValue(f, func() ([]record, job.Claim, error) {
+		return f.state.claim(expected, id, owner, duration, f.clock())
+	})
 }
 func (f *File) Heartbeat(expected Revision, id job.JobID, attempt job.AttemptID, fence job.Fence, duration time.Duration) (job.Claim, Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, result, err := f.state.heartbeat(expected, id, attempt, fence, duration, f.clock())
-	if err != nil {
-		return job.Claim{}, f.state.view.Revision, err
-	}
-	revision, err := f.commit(records)
-	return result, revision, err
+	return transactValue(f, func() ([]record, job.Claim, error) {
+		return f.state.heartbeat(expected, id, attempt, fence, duration, f.clock())
+	})
 }
 func (f *File) Checkpoint(expected Revision, value job.Checkpoint) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, err := f.state.checkpoint(expected, value, f.clock())
-	if err != nil {
-		return f.state.view.Revision, err
-	}
-	return f.commit(records)
+	return transactRevision(f, func() ([]record, error) { return f.state.checkpoint(expected, value, f.clock()) })
 }
 func (f *File) RecordReceipt(expected Revision, value job.Receipt) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, err := f.state.receipt(expected, value, f.clock())
-	if err != nil {
-		return f.state.view.Revision, err
-	}
-	return f.commit(records)
+	return transactRevision(f, func() ([]record, error) { return f.state.receipt(expected, value, f.clock()) })
 }
 func (f *File) Cancel(expected Revision, value Cancellation) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, err := f.state.cancel(expected, value)
-	if err != nil {
-		return f.state.view.Revision, err
-	}
-	return f.commit(records)
+	return transactRevision(f, func() ([]record, error) { return f.state.cancel(expected, value) })
 }
 func (f *File) Settle(expected Revision, value Settlement) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, err := f.state.settle(expected, value, f.clock())
-	if err != nil {
-		return f.state.view.Revision, err
-	}
-	return f.commit(records)
+	return transactRevision(f, func() ([]record, error) { return f.state.settle(expected, value, f.clock()) })
 }
 func (f *File) Complete(expected Revision, value Completion) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, err := f.state.complete(expected, value, f.clock())
-	if err != nil {
-		return f.state.view.Revision, err
-	}
-	return f.commit(records)
+	return transactRevision(f, func() ([]record, error) { return f.state.complete(expected, value, f.clock()) })
 }
 func (f *File) Finalize(expected Revision, value Finalization) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	records, err := f.state.finalize(expected, value, f.clock())
-	if err != nil {
-		return f.state.view.Revision, err
-	}
-	return f.commit(records)
+	return transactRevision(f, func() ([]record, error) { return f.state.finalize(expected, value, f.clock()) })
 }
 func (f *File) Close() error {
 	f.mu.Lock()
@@ -398,14 +419,7 @@ func (f *File) Close() error {
 		return nil
 	}
 	f.closed = true
-	var firstErr error
-	if f.journal != nil {
-		firstErr = f.journal.Close()
-	}
-	if err := f.releaseLock(); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
+	return nil
 }
 
 var _ Store = (*File)(nil)

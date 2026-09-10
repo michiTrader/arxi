@@ -119,6 +119,9 @@ type View struct {
 // Store applies every mutation through revision CAS. Its injected clock is the
 // sole authority for lease expiry, so callers cannot extend stale ownership by
 // supplying a favorable instant.
+// Store coordinates processes on one local machine through an advisory file
+// lock acquired for each transaction. It does not claim distributed locking or
+// cache-coherence guarantees across machines sharing a network filesystem.
 type Store interface {
 	View() View
 	BindSubmission(Revision, Submission) (Submission, Revision, error)
