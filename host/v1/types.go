@@ -20,13 +20,14 @@ type Principal struct {
 // SubmitRequest contains source text and Phase 1 execution controls. Actor is a
 // logical name; resolving filesystem paths remains an adapter responsibility.
 type SubmitRequest struct {
-	Principal Principal `json:"principal"`
-	Actor     string    `json:"actor"`
-	Blueprint string    `json:"blueprint"`
-	Prompt    string    `json:"prompt"`
-	BudgetUSD float64   `json:"budget_usd,omitempty"`
-	MaxTurns  int       `json:"max_turns,omitempty"`
-	Simulated bool      `json:"simulated,omitempty"`
+	Principal      Principal `json:"principal"`
+	Actor          string    `json:"actor"`
+	Blueprint      string    `json:"blueprint"`
+	Prompt         string    `json:"prompt"`
+	BudgetUSD      float64   `json:"budget_usd,omitempty"`
+	MaxTurns       int       `json:"max_turns,omitempty"`
+	Simulated      bool      `json:"simulated,omitempty"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 }
 
 // SubmitResult confirms durable acceptance. AcceptedSeq is the confirmed

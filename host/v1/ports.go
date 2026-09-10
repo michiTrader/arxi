@@ -173,6 +173,51 @@ type JobStorage interface {
 	OpenWriter(context.Context, JobID) (JobWriter, error)
 }
 
+// CoordinationRevision is an opaque cross-job concurrency token.
+type CoordinationRevision string
+
+// SubmissionBinding binds a caller key to one canonical public request.
+type SubmissionBinding struct {
+	Key           string `json:"key"`
+	RequestDigest string `json:"request_digest"`
+	JobID         JobID  `json:"job_id"`
+}
+
+// ExecutionClaim is renewable authority to execute one job attempt. Its fields
+// are exchanged only with Coordination and never appear in lifecycle projections.
+type ExecutionClaim struct {
+	JobID     JobID  `json:"job_id"`
+	AttemptID string `json:"attempt_id"`
+	Fence     uint64 `json:"fence"`
+}
+
+// ExecutionCheckpoint records confirmed continuation evidence, not reducer state.
+type ExecutionCheckpoint struct {
+	Claim           ExecutionClaim `json:"claim"`
+	RunRevision     int64          `json:"run_revision"`
+	CompletedCursor int64          `json:"completed_cursor"`
+}
+
+// ExecutionOutcome is the fenced terminal classification of one attempt.
+type ExecutionOutcome string
+
+const (
+	ExecutionSucceeded ExecutionOutcome = "succeeded"
+	ExecutionFailed    ExecutionOutcome = "failed"
+	ExecutionCancelled ExecutionOutcome = "cancelled"
+	ExecutionUnknown   ExecutionOutcome = "unknown"
+)
+
+// Coordination installs restart recovery without changing JobStorage. The
+// implementation owns lease duration, clock judgments, and optimistic retries.
+type Coordination interface {
+	BindSubmission(context.Context, SubmissionBinding) (SubmissionBinding, error)
+	Claim(context.Context, JobID) (ExecutionClaim, error)
+	Heartbeat(context.Context, ExecutionClaim) error
+	Checkpoint(context.Context, ExecutionCheckpoint) error
+	Complete(context.Context, ExecutionClaim, ExecutionOutcome) error
+}
+
 // AuthorizationRequest asks whether a principal may use one capability. JobID
 // is present only for resource-scoped revalidation.
 type AuthorizationRequest struct {
