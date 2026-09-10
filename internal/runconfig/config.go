@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	FileName = "effective-config.v1.json"
-	Schema   = "arxi.effective-config/v1"
+	FileName         = "effective-config.v1.json"
+	Schema           = "arxi.effective-config/v1"
+	SimulationLegacy = 1
+	SimulationNative = 2
 )
 
 type Contracts struct {
@@ -59,7 +61,7 @@ func New(runID, mode, blueprintSHA, prompt, defaultModel string, cfg kernel.Conf
 	return Artifact{
 		Schema: Schema, RunID: runID, Mode: mode, BlueprintSHA: blueprintSHA,
 		Config: cfg, Prompt: prompt, DefaultModel: defaultModel,
-		Routes: routes, ToolPolicy: policy, SimVersion: 1,
+		Routes: routes, ToolPolicy: policy, SimVersion: SimulationNative,
 		Contracts: Contracts{Kernel: 1, Effects: 1, Surface: surface.SurfaceVersion},
 	}
 }
@@ -214,6 +216,9 @@ func Validate(a Artifact) error {
 	if a.Mode != "live" && a.Mode != "sim" {
 		return fmt.Errorf("mode %q is not live or sim", a.Mode)
 	}
+	if a.Mode == "sim" && a.SimVersion != SimulationLegacy && a.SimVersion != SimulationNative {
+		return fmt.Errorf("unsupported simulation version %d", a.SimVersion)
+	}
 	if len(a.BlueprintSHA) != sha256.Size*2 {
 		return fmt.Errorf("blueprint_sha is not a SHA-256 digest")
 	}
@@ -230,7 +235,7 @@ func Validate(a Artifact) error {
 			return fmt.Errorf("route ref %q is empty or duplicated", r.Ref)
 		}
 		seen[r.Ref] = true
-		if r.Protocol != model.ProtocolOpenAIChatCompletions {
+		if r.Protocol != model.ProtocolOpenAIChatCompletions && r.Protocol != model.ProtocolAnthropicMessages {
 			return fmt.Errorf("route %q uses unsupported protocol %q", r.Ref, r.Protocol)
 		}
 		u, err := url.Parse(r.BaseURL)

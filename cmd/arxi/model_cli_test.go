@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -90,19 +93,41 @@ func TestTheDocumentedFirstCommandsWork(t *testing.T) {
 	}
 }
 
-func TestTheNativeAnthropicPresetIsRefusedWithoutCreatingAStore(t *testing.T) {
+func TestTheNativeAnthropicPresetRegistersAndListsModels(t *testing.T) {
 	dir := workdir(t)
 
 	r := arxi(t, dir, "provider", "add", "anthropic")
-	if r.code != 2 {
-		t.Errorf("exit %d, want 2 (unsupported preset):\n%s", r.code, r.out)
+	if r.code != 0 {
+		t.Fatalf("provider add failed (%d):\n%s", r.code, r.out)
 	}
-	if !strings.Contains(r.out, "native Anthropic Messages") ||
-		!strings.Contains(r.out, "no provider file was written") {
-		t.Errorf("the refusal is not actionable:\n%s", r.out)
+	if !strings.Contains(r.out, "key from $ANTHROPIC_API_KEY") {
+		t.Errorf("the output does not name the Anthropic key variable:\n%s", r.out)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "providers")); !os.IsNotExist(err) {
-		t.Errorf("unsupported preset created the provider store: %v", err)
+	body, err := os.ReadFile(filepath.Join(dir, "providers", "anthropic.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"protocol": "anthropic-messages/v1"`) {
+		t.Errorf("stored provider does not select native Messages:\n%s", body)
+	}
+	list := arxi(t, dir, "model", "list")
+	if list.code != 0 || !strings.Contains(list.out, "claude-sonnet-4-6") || !strings.Contains(list.out, "anthropic") {
+		t.Errorf("native Anthropic models are not listed (%d):\n%s", list.code, list.out)
+	}
+}
+
+func TestRuntimeSelectsFrozenSimulationSemantics(t *testing.T) {
+	legacy := runconfig.New("legacy", "sim", strings.Repeat("a", 64), "prompt", "", kernel.Config{}, nil, nil)
+	legacy.SimVersion = runconfig.SimulationLegacy
+	legacyFake, ok := runtimeExecutor(t.TempDir(), legacy).(*exec.Fake)
+	if !ok || legacyFake.NativeReadTool != "" {
+		t.Fatalf("legacy simulation executor = %#v", legacyFake)
+	}
+	native := legacy
+	native.SimVersion = runconfig.SimulationNative
+	nativeFake, ok := runtimeExecutor(t.TempDir(), native).(*exec.Fake)
+	if !ok || nativeFake.NativeReadTool != "read" {
+		t.Fatalf("native simulation executor = %#v", nativeFake)
 	}
 }
 

@@ -21,6 +21,25 @@ func fixture() Artifact {
 		}}, nil)
 }
 
+func TestSimulationVersionSelectsNativeSemanticsAndPreservesLegacy(t *testing.T) {
+	a := New("r1", "sim", strings.Repeat("a", 64), "ship it", "", kernel.Config{}, nil, nil)
+	if a.SimVersion != SimulationNative {
+		t.Fatalf("new simulation version = %d, want %d", a.SimVersion, SimulationNative)
+	}
+	for _, version := range []int{SimulationLegacy, SimulationNative} {
+		a.SimVersion = version
+		if _, _, err := Encode(a); err != nil {
+			t.Errorf("supported simulation version %d was refused: %v", version, err)
+		}
+	}
+	for _, version := range []int{0, SimulationNative + 1} {
+		a.SimVersion = version
+		if _, _, err := Encode(a); err == nil {
+			t.Errorf("unsupported simulation version %d was accepted", version)
+		}
+	}
+}
+
 func TestPublishRoundTripsExactDigestAndRefusesReplacement(t *testing.T) {
 	dir := t.TempDir()
 	a := fixture()
@@ -60,6 +79,23 @@ func TestLoadIsStrictAndSecretBearingURLsAreRefused(t *testing.T) {
 	}
 	if _, _, err := Load(dir); err == nil {
 		t.Fatal("unknown fields were silently accepted")
+	}
+}
+
+func TestRoutesAcceptEveryImplementedProtocolAndRejectUnknownOnes(t *testing.T) {
+	for _, protocol := range []string{model.ProtocolOpenAIChatCompletions, model.ProtocolAnthropicMessages} {
+		a := fixture()
+		a.Routes[0].Protocol = protocol
+		if _, _, err := Encode(a); err != nil {
+			t.Errorf("implemented protocol %q was refused: %v", protocol, err)
+		}
+	}
+	for _, protocol := range []string{"", "unknown/v1"} {
+		a := fixture()
+		a.Routes[0].Protocol = protocol
+		if _, _, err := Encode(a); err == nil {
+			t.Errorf("unsupported protocol %q was accepted", protocol)
+		}
 	}
 }
 
