@@ -217,6 +217,7 @@ type Coordination interface {
 	Heartbeat(context.Context, ExecutionClaim) error
 	Checkpoint(context.Context, ExecutionCheckpoint) error
 	Complete(context.Context, ExecutionClaim, ExecutionOutcome) error
+	Close() error
 }
 
 // CoordinatedJobStorageV1 is the optional storage contract required for durable

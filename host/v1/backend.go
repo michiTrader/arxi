@@ -379,6 +379,11 @@ func (b *storageBackend) Close() error {
 			closeErr = err
 		}
 	}
+	if b.coordination != nil {
+		if err := b.coordination.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
 	return closeErr
 }
 

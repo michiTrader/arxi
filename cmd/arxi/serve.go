@@ -202,7 +202,12 @@ func cloneProtoPrincipal(principal hostv1.Principal) hostv1.Principal {
 }
 
 func defaultProtoHost() *hostv1.Host {
-	return hostv1.New(hostv1.Options{Storage: newFilesystemJobStorage(runsDir)})
+	storage := newFilesystemJobStorage(runsDir)
+	coordination, err := openHostCoordination(runsDir)
+	if err != nil {
+		return hostv1.New(hostv1.Options{Storage: storage})
+	}
+	return hostv1.New(hostv1.Options{Storage: storage, Coordination: coordination})
 }
 
 // protoHandlers holds the implementations that exist.
