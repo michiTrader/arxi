@@ -34,6 +34,9 @@ func (c *hostCoordination) BindSubmission(_ context.Context, wanted hostv1.Submi
 		if errors.Is(err, jobstore.ErrRevision) {
 			continue
 		}
+		if errors.Is(err, jobstore.ErrConflict) {
+			return hostv1.SubmissionBinding{}, hostv1.ErrStorageConflict
+		}
 		if err != nil {
 			return hostv1.SubmissionBinding{}, err
 		}
