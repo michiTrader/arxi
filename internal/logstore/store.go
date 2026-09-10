@@ -921,6 +921,9 @@ func (s *Store) releaseLock() error {
 	}
 	err := s.lock.Release()
 	s.lock = nil
+	if removeErr := os.Remove(s.lockPath()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && err == nil {
+		err = fmt.Errorf("logstore: remove inactive writer lock file: %w", removeErr)
+	}
 	return err
 }
 
