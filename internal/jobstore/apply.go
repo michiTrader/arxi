@@ -25,7 +25,11 @@ func (s *state) apply(records []record) error {
 				return err
 			}
 			s.view.Occurrences[value.ID] = value
-			s.view.Jobs[value.JobID] = job.Job{ID: value.JobID, State: job.JobAccepted}
+			if value.JobID != "" {
+				if _, exists := s.view.Jobs[value.JobID]; !exists {
+					s.view.Jobs[value.JobID] = job.Job{ID: value.JobID, State: job.JobAccepted}
+				}
+			}
 		case kindReservation:
 			var value Admission
 			if err := decodeData(entry.Data, &value); err != nil {

@@ -85,6 +85,23 @@ type Completion struct {
 	JobState     job.JobState     `json:"job_state"`
 }
 
+// Finalization is the indivisible terminal truth for a scheduled job. Keeping
+// settlement and occurrence completion in the same journal batch prevents a
+// crash from publishing a finished job whose reserved budget still looks live.
+type Finalization struct {
+	Completion Completion          `json:"completion"`
+	Settlement Settlement          `json:"settlement"`
+	Occurrence job.OccurrenceID    `json:"occurrence_id"`
+	State      job.OccurrenceState `json:"occurrence_state"`
+}
+
+// Reconciler is optional because a local response ID is not evidence that a
+// provider supports trustworthy lookup. Installations expose it only when the
+// external system can establish the canonical outcome behind a dispatch key.
+type Reconciler interface {
+	Reconcile(job.DispatchKey) (job.Receipt, bool, error)
+}
+
 type View struct {
 	Revision      Revision
 	Submissions   map[string]Submission
@@ -114,5 +131,6 @@ type Store interface {
 	Cancel(Revision, Cancellation) (Revision, error)
 	Settle(Revision, Settlement) (Revision, error)
 	Complete(Revision, Completion) (Revision, error)
+	Finalize(Revision, Finalization) (Revision, error)
 	Close() error
 }

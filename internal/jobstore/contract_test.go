@@ -197,6 +197,56 @@ func TestStoreContractRecordsReceiptsCancellationAndFencedCompletion(t *testing.
 	}
 }
 
+func TestStoreContractFinalizesOccurrenceSettlementAndJobAtomically(t *testing.T) {
+	for _, factory := range factories() {
+		t.Run(factory.name, func(t *testing.T) {
+			clock := &testClock{now: time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)}
+			store := factory.open(t, clock.read)
+			defer store.Close()
+			claim, revision := seedClaim(t, store)
+			occurrence := admission("occurrence-1", "job-1", 400).Occurrence.ID
+			final := Finalization{
+				Completion: Completion{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, AttemptState: job.AttemptSucceeded, JobState: job.JobSucceeded},
+				Settlement: Settlement{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, ReservationID: "reservation-occurrence-1", Kind: SettlementSpend, Spent: job.NewAmount(125, 2)},
+				Occurrence: occurrence, State: job.OccurrenceCompleted,
+			}
+			if _, err := store.Finalize(revision, final); err != nil {
+				t.Fatalf("atomically finalize scheduled job: %v", err)
+			}
+			view := store.View()
+			if view.Jobs[claim.JobID].State != job.JobSucceeded || view.Attempts[claim.AttemptID].State != job.AttemptSucceeded ||
+				view.Occurrences[occurrence].State != job.OccurrenceCompleted || view.Reservations[final.Settlement.ReservationID].State != job.ReservationSettled {
+				t.Fatalf("terminal projection is partial: job=%s attempt=%s occurrence=%s reservation=%s; one crash-safe batch must publish all terminal truth",
+					view.Jobs[claim.JobID].State, view.Attempts[claim.AttemptID].State, view.Occurrences[occurrence].State, view.Reservations[final.Settlement.ReservationID].State)
+			}
+		})
+	}
+}
+
+func TestStoreContractRejectsStaleAtomicFinalization(t *testing.T) {
+	for _, factory := range factories() {
+		t.Run(factory.name, func(t *testing.T) {
+			clock := &testClock{now: time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)}
+			store := factory.open(t, clock.read)
+			defer store.Close()
+			claim, revision := seedClaim(t, store)
+			clock.now = claim.ExpiresAt
+			final := Finalization{
+				Completion: Completion{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, AttemptState: job.AttemptSucceeded, JobState: job.JobSucceeded},
+				Settlement: Settlement{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, ReservationID: "reservation-occurrence-1", Kind: SettlementSpend, Spent: job.NewAmount(1, 2)},
+				Occurrence: admission("occurrence-1", "job-1", 400).Occurrence.ID, State: job.OccurrenceCompleted,
+			}
+			if _, err := store.Finalize(revision, final); !errors.Is(err, job.ErrExpiredClaim) {
+				t.Fatalf("expired finalization returned %v, want ErrExpiredClaim: a stale worker could settle money and publish terminal truth", err)
+			}
+			view := store.View()
+			if job.JobTerminal(view.Jobs[claim.JobID].State) || view.Reservations[final.Settlement.ReservationID].State != job.ReservationActive {
+				t.Fatal("failed fenced finalization changed terminal or budget state: rejection must leave the entire transaction unpublished")
+			}
+		})
+	}
+}
+
 func TestStoreContractRejectsCheckpointRegressionAndExpiredHeartbeat(t *testing.T) {
 	for _, factory := range factories() {
 		t.Run(factory.name, func(t *testing.T) {

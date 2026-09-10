@@ -166,6 +166,19 @@ func (m *Memory) Complete(expected Revision, value Completion) (Revision, error)
 	}
 	return m.commit(records)
 }
+func (m *Memory) Finalize(expected Revision, value Finalization) (Revision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return m.state.view.Revision, clockErr
+	}
+	records, err := m.state.finalize(expected, value, now)
+	if err != nil {
+		return m.state.view.Revision, err
+	}
+	return m.commit(records)
+}
 func (m *Memory) Close() error { m.mu.Lock(); defer m.mu.Unlock(); m.closed = true; return nil }
 
 var _ Store = (*Memory)(nil)

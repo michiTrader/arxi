@@ -382,6 +382,15 @@ func (f *File) Complete(expected Revision, value Completion) (Revision, error) {
 	}
 	return f.commit(records)
 }
+func (f *File) Finalize(expected Revision, value Finalization) (Revision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	records, err := f.state.finalize(expected, value, f.clock())
+	if err != nil {
+		return f.state.view.Revision, err
+	}
+	return f.commit(records)
+}
 func (f *File) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

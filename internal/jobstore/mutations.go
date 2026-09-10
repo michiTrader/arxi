@@ -104,6 +104,10 @@ func (s *state) complete(expected Revision, value Completion, now time.Time) ([]
 	if err := s.checkRevision(expected); err != nil {
 		return nil, err
 	}
+	return s.completionRecords(value, now)
+}
+
+func (s *state) completionRecords(value Completion, now time.Time) ([]record, error) {
 	j, a, _, err := s.active(value.JobID, value.AttemptID, value.Fence, now)
 	if err != nil {
 		return nil, err
@@ -118,4 +122,36 @@ func (s *state) complete(expected Revision, value Completion, now time.Time) ([]
 		{Kind: kindAttemptFinished, Data: encodeData(value)},
 		{Kind: kindJobFinished, Data: encodeData(value)},
 	}, nil
+}
+
+func (s *state) finalize(expected Revision, value Finalization, now time.Time) ([]record, error) {
+	if err := s.checkRevision(expected); err != nil {
+		return nil, err
+	}
+	completion := value.Completion
+	if value.Settlement.JobID != completion.JobID || value.Settlement.AttemptID != completion.AttemptID ||
+		value.Settlement.Fence != completion.Fence {
+		return nil, ErrConflict
+	}
+	occurrence, ok := s.view.Occurrences[value.Occurrence]
+	if !ok || occurrence.JobID != completion.JobID || occurrence.State != job.OccurrenceAdmitted {
+		return nil, ErrNotFound
+	}
+	if value.State != job.OccurrenceCompleted && value.State != job.OccurrenceUnknown {
+		return nil, job.ErrIllegalTransition
+	}
+	if value.State == job.OccurrenceUnknown && (completion.JobState != job.JobUnknown || value.Settlement.Kind != SettlementUnknown) {
+		return nil, ErrConflict
+	}
+	settlementRecords, err := s.settle(expected, value.Settlement, now)
+	if err != nil {
+		return nil, err
+	}
+	completionRecords, err := s.completionRecords(completion, now)
+	if err != nil {
+		return nil, err
+	}
+	terminalOccurrence := occurrence
+	terminalOccurrence.State = value.State
+	return append(append(settlementRecords, completionRecords...), record{Kind: kindOccurrence, Data: encodeData(terminalOccurrence)}), nil
 }
