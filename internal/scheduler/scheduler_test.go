@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/job"
+	"github.com/michiTrader/arxi/internal/jobstore"
 	"github.com/michiTrader/arxi/internal/trigger"
 )
 
@@ -734,6 +736,139 @@ func TestARunnerThatReturnsNoExecutionIsRefused(t *testing.T) {
 	if got := s.Running()["nightly-audit"]; got != 0 {
 		t.Errorf("a phantom execution was booked: %d in flight", got)
 	}
+}
+
+type memoryCoordinator struct{ store jobstore.Store }
+
+func (c memoryCoordinator) View() CoordinationView {
+	view := c.store.View()
+	return CoordinationView{Revision: uint64(view.Revision), Occurrences: view.Occurrences, Jobs: view.Jobs}
+}
+func (c memoryCoordinator) RecordOccurrence(revision uint64, value job.Occurrence) (job.Occurrence, uint64, error) {
+	got, next, err := c.store.RecordOccurrence(jobstore.Revision(revision), value)
+	return got, uint64(next), err
+}
+func (c memoryCoordinator) Admit(revision uint64, value Admission) (job.Occurrence, uint64, error) {
+	got, next, err := c.store.Admit(jobstore.Revision(revision), jobstore.Admission{Occurrence: value.Occurrence, Window: value.Window, Ceiling: value.Ceiling, Reserved: value.Reserved})
+	return got, uint64(next), err
+}
+func (c memoryCoordinator) Cancel(revision uint64, value Cancellation) (uint64, error) {
+	next, err := c.store.Cancel(jobstore.Revision(revision), jobstore.Cancellation{JobID: value.JobID, Actor: value.Actor, Reason: value.Reason})
+	return uint64(next), err
+}
+
+type durableFakeRunner struct {
+	fakeRunner
+	slots []Slot
+}
+
+func (r *durableFakeRunner) StartSlot(rec trigger.Record, slot Slot, action trigger.Action) (Execution, error) {
+	r.slots = append(r.slots, slot)
+	return r.Start(rec, action)
+}
+
+func TestDurableSchedulersShareOneOccurrenceAndRecoverPublication(t *testing.T) {
+	clock := func() time.Time { return rfc("2026-08-02T03:00:00Z") }
+	store := jobstore.NewMemory(clock)
+	coordinator := memoryCoordinator{store: store}
+	triggerStore := &fakeStore{recs: []trigger.Record{nightly()}}
+	firstRunner := &durableFakeRunner{fakeRunner: fakeRunner{err: errors.New("acceptance unavailable")}}
+	first, err := NewDurable(triggerStore, firstRunner, coordinator, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Tick(clock()); err != nil {
+		t.Fatal(err)
+	}
+	view := store.View()
+	if len(view.Occurrences) != 1 || len(view.Jobs) != 1 {
+		t.Fatalf("failed publication left %d occurrences and %d jobs, want one durable accepted identity for recovery", len(view.Occurrences), len(view.Jobs))
+	}
+	secondRunner := &durableFakeRunner{}
+	second, err := NewDurable(triggerStore, secondRunner, coordinator, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Tick(clock().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondRunner.slots) != 1 {
+		t.Fatalf("replacement scheduler launched %d jobs, want one retry of the admitted occurrence", len(secondRunner.slots))
+	}
+	for _, occurrence := range store.View().Occurrences {
+		if secondRunner.slots[0].OccurrenceID != occurrence.ID || secondRunner.slots[0].JobID != occurrence.JobID {
+			t.Fatalf("recovery used slot %#v instead of durable occurrence %#v: crash retry could publish a different run", secondRunner.slots[0], occurrence)
+		}
+	}
+	thirdRunner := &durableFakeRunner{}
+	third, _ := NewDurable(triggerStore, thirdRunner, coordinator, nil)
+	if err := third.Tick(clock().Add(2 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(thirdRunner.slots) != 0 || len(store.View().Occurrences) != 1 {
+		t.Fatalf("duplicate tick launched %d jobs across %d occurrences: one nominal slot must remain one job", len(thirdRunner.slots), len(store.View().Occurrences))
+	}
+}
+
+func TestDurableQueueRecordsPendingThenAdmitsTheSameIdentity(t *testing.T) {
+	clock := func() time.Time { return rfc("2026-08-02T03:00:00Z") }
+	store := jobstore.NewMemory(clock)
+	coordinator := memoryCoordinator{store: store}
+	r := nightly()
+	r.Overlap = trigger.OverlapQueue
+	r.OnMissed = trigger.MissedRunOnce
+	triggerStore := &fakeStore{recs: []trigger.Record{r}}
+	firstRunner := &durableFakeRunner{}
+	first, _ := NewDurable(triggerStore, firstRunner, coordinator, nil)
+	if err := first.Tick(clock()); err != nil {
+		t.Fatal(err)
+	}
+	secondSlot := clock().Add(24 * time.Hour)
+	triggerStore.recs[0].LastScheduledAt = clock().Format(time.RFC3339Nano)
+	second, _ := NewDurable(triggerStore, &durableFakeRunner{}, coordinator, nil)
+	if err := second.Tick(secondSlot); err != nil {
+		t.Fatal(err)
+	}
+	pendingID := job.OccurrenceIdentity(job.TriggerID(r.Identity()), secondSlot)
+	if got := store.View().Occurrences[pendingID].State; got != job.OccurrencePending {
+		t.Fatalf("queued occurrence state = %q, want pending: an unrecorded queue would lose identity across restart", got)
+	}
+	view := store.View()
+	for id, stored := range view.Jobs {
+		stored.State = job.JobSucceeded
+		view.Jobs[id] = stored
+	}
+	// Memory store projections are intentionally immutable, so terminal evidence is
+	// represented by a fresh coordinator view for this scheduler-level policy test.
+	terminal := coordinatorWithView{base: coordinator, jobs: view.Jobs}
+	thirdRunner := &durableFakeRunner{}
+	third, _ := NewDurable(triggerStore, thirdRunner, terminal, nil)
+	if err := third.Tick(secondSlot.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(thirdRunner.slots) != 1 || thirdRunner.slots[0].OccurrenceID != pendingID {
+		t.Fatalf("queue admitted slots %#v, want the original pending identity %s", thirdRunner.slots, pendingID)
+	}
+}
+
+type coordinatorWithView struct {
+	base memoryCoordinator
+	jobs map[job.JobID]job.Job
+}
+
+func (c coordinatorWithView) View() CoordinationView {
+	view := c.base.View()
+	view.Jobs = c.jobs
+	return view
+}
+func (c coordinatorWithView) RecordOccurrence(r uint64, o job.Occurrence) (job.Occurrence, uint64, error) {
+	return c.base.RecordOccurrence(r, o)
+}
+func (c coordinatorWithView) Admit(r uint64, a Admission) (job.Occurrence, uint64, error) {
+	return c.base.Admit(r, a)
+}
+func (c coordinatorWithView) Cancel(r uint64, v Cancellation) (uint64, error) {
+	return c.base.Cancel(r, v)
 }
 
 // ---- bookkeeping -----------------------------------------------------------

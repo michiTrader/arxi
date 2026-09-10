@@ -8,19 +8,18 @@ import (
 )
 
 const (
-	kindSubmission         = "submission.bound"
-	kindOccurrence         = "occurrence.recorded"
-	kindOccurrenceAdmitted = "occurrence.admitted"
-	kindReservation        = "budget.reserved"
-	kindExpired            = "attempt.expired"
-	kindClaimed            = "attempt.claimed"
-	kindHeartbeat          = "attempt.heartbeat"
-	kindCheckpoint         = "attempt.checkpointed"
-	kindReceipt            = "external.receipt_recorded"
-	kindSettlement         = "budget.settled"
-	kindCancellation       = "job.cancel_requested"
-	kindAttemptFinished    = "attempt.finished"
-	kindJobFinished        = "job.finished"
+	kindSubmission      = "submission.bound"
+	kindOccurrence      = "occurrence.recorded"
+	kindReservation     = "budget.reserved"
+	kindExpired         = "attempt.expired"
+	kindClaimed         = "attempt.claimed"
+	kindHeartbeat       = "attempt.heartbeat"
+	kindCheckpoint      = "attempt.checkpointed"
+	kindReceipt         = "external.receipt_recorded"
+	kindSettlement      = "budget.settled"
+	kindCancellation    = "job.cancel_requested"
+	kindAttemptFinished = "attempt.finished"
+	kindJobFinished     = "job.finished"
 )
 
 func (s *state) bind(expected Revision, value Submission) ([]record, Submission, error) {
@@ -111,9 +110,6 @@ func (s *state) admit(expected Revision, value Admission) ([]record, job.Occurre
 		return nil, job.Occurrence{}, ErrBudgetExceeded
 	}
 	records := []record{{Kind: kindOccurrence, Data: encodeData(o)}, {Kind: kindReservation, Data: encodeData(value)}}
-	if old, ok := s.view.Occurrences[o.ID]; ok && old.State == job.OccurrencePending {
-		records[0].Kind = kindOccurrenceAdmitted
-	}
 	return records, o, nil
 }
 

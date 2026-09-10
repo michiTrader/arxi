@@ -513,6 +513,9 @@ func (s *Scheduler) recordFiring(r trigger.Record, now time.Time, started int, a
 	// LastFiredAt remains the wall-clock observation shown to operators. The
 	// separate schedule cursor advances by nominal slot so a late tick cannot make
 	// an interval schedule drift and durable occurrence identity remains exact.
+	if r.ID == "" {
+		r.ID = r.Identity()
+	}
 	r.LastFiredAt = now.Format(time.RFC3339)
 	consumed := append(append([]time.Time(nil), d.Slots...), d.SkippedSlots...)
 	if len(consumed) > 0 {
