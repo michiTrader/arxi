@@ -55,16 +55,16 @@ The smallest complete path, and the one that decides whether the tool feels
 usable. A new user has an API key and a task.
 
 ```
-$ arxi provider add anthropic --api-key-env ANTHROPIC_API_KEY
-provider anthropic registered (key from $ANTHROPIC_API_KEY)
+$ arxi provider add openai --api-key-env OPENAI_API_KEY
+provider openai registered (key from $OPENAI_API_KEY)
 
 $ arxi model list
 NAME                     PROVIDER    STATUS
-claude-sonnet-4-6        anthropic   enabled
-claude-opus-4-1          anthropic   disabled
+gpt-5.1                  openai      enabled
+gpt-5.1-mini             openai      disabled
 
-$ arxi model enable claude-opus-4-1
-model claude-opus-4-1 enabled
+$ arxi model enable gpt-5.1-mini
+model gpt-5.1-mini enabled
 ```
 
 `provider add` takes `--api-key-env`, the *name of a variable*, not the key. A
@@ -73,7 +73,7 @@ every user on the machine. Accepting `--api-key` would make the insecure path th
 short one.
 
 ```
-$ arxi agent create reviewer --model claude-sonnet-4-6 --tools read,grep
+$ arxi agent create reviewer --model gpt-5.1 --tools read,grep
 agent reviewer created (tools: read, grep — policy: allow)
 
 $ arxi run start reviewer "review the diff in HEAD and list real risks" --budget 2.00

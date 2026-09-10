@@ -108,10 +108,40 @@ it explicitly instead of showing an empty line:
 | `tool.call` | `tool`, `args?` |
 | `tool.call_completed` | `tool`, `result?` |
 | `tool.call_denied` | `tool`, `policy` |
-| `llm.response` | `cost_usd`, `tokens_in?`, `tokens_out?`, `model?` |
+| `llm.response` | `cost_usd`, `tokens_in?`, `tokens_out?`, `model?`, `ok?`, `error?`, `status?`, `code?`, `retryable?`, `response_id?`, `finish_reason?`, `text?`, `coalesced?` |
+
+A provider-native tool request that the active executor cannot perform is a
+completed turn with a known outcome, not a transport failure. It records
+`ok: false`, `code: "unsupported_tool_calls"`, and `retryable: false`, preserves
+usage/cost and provider response identifiers when available, and is followed by
+`agent.turn_done`. It does not emit `tool.call` or execute a tool.
 
 `tool.call_denied` with `policy: "ask"` is **not an error**: it is a question. It
 creates an inbox item and leaves `blocked_ref` so the remedy is automatic.
+
+## Durable execution progress
+
+Execution metadata records what the runtime did with the effects decided from a
+domain event. These events are reducer- and watcher-inert: they reconstruct safe
+continuation boundaries, but do not themselves cause more effects.
+
+| type | payload | notes |
+|---|---|---|
+| `exec.work_prepared` | `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest` | The full manifest for a source event is committed before any external dispatch. IDs and digests use `canonical-effect-v1`. |
+| `exec.work_started` | `work_id` | Durable boundary immediately before an independent external dispatch. Local control effects do not cross this boundary. |
+| `exec.work_finished` | `work_id`, `status`, `error?` | `status` is exactly `completed`, `failed`, or `unknown`. Outcome domain events and this record are one append batch. |
+| `exec.step_completed` | `source_seq`, `source_event_id`, `work_ids` | Commits that every effect of the source event has a durable terminal outcome. `work_ids` preserves effect-list order. |
+
+A prepared work item may be dispatched after restart. A started item without a
+terminal record is materialized as `unknown` and is never automatically
+redispatched. A durable `unknown` blocks continuation until a later reconciliation
+facility can establish the external outcome. Finished work is not repeated, even
+when the process stopped before `exec.step_completed`; recovery closes the source
+step after validating its deterministic manifest.
+
+The resume cursor is the greatest contiguous source-event frontier proven by
+`exec.step_completed`. The physical log head is not a cursor: domain outcomes and
+execution metadata can exist above an unfinished source event.
 
 ## Resources
 
@@ -231,13 +261,25 @@ the moment of the timeout there is nobody watching anymore.
 
 ## Clock
 
-| type | payload |
-|---|---|
-| `timer.tick` | `timer_id` |
+| type | payload | notes |
+|---|---|---|
+| `timer.scheduled` | `timer_id`, `after_ms`, `deadline_ms` | Durable arming record. `deadline_ms` is absolute on the run's clock timeline. |
+| `timer.cancelled` | `timer_id` | Durable disarm; a cancelled timer is never restored. |
+| `timer.fired` | `timer_id`, `fired_at_ms` | Operational firing record, appended atomically with its `timer.tick`. |
+| `timer.tick` | `timer_id` | Reducer-facing delivery of the elapsed timer. |
 
-Timers are armed with relative offsets in milliseconds, not absolute timestamps.
-That is what lets the virtual clock of `--sim` run the same fold without waiting
-half an hour of real time.
+`SetTimer` still receives a relative offset in milliseconds. The runtime records
+its exact absolute deadline so restart does not recompute it from a later
+instant. Live deadlines and firing instants are Unix milliseconds; simulated
+ones are logical milliseconds beginning at zero, and downtime never advances
+that logical clock.
+
+The first three records are operational and reducer/watcher-inert. On restart,
+the clock restores schedules minus cancellations and firings (a legacy
+`timer.tick` also counts as fired). A live deadline that elapsed during downtime
+is delivered immediately; a future one preserves its original deadline.
+`timer.fired` and `timer.tick` share one confirmed append, so a crash cannot
+record consumption without delivery or deliver a confirmed timer twice.
 
 ## User events
 

@@ -228,6 +228,7 @@ same time**. The two are different facts:
 |---|---|---|
 | Tool ran, exited non-zero | `tool.call_completed`, the exit status in `result` | no |
 | Provider refused the prompt | `llm.response` with `ok: false`, then `agent.turn_done` | no |
+| Provider requested native tool calls the executor does not implement | `llm.response` with `ok: false`, `code: unsupported_tool_calls`, then `agent.turn_done` | no |
 | Connection reset before the turn landed | `agent.failed`, the provider's message in `error` | yes |
 | Context cancelled mid-turn | `agent.failed`, the cancellation in `error` | yes |
 | A tool call could not be delivered | none | yes |
@@ -291,13 +292,19 @@ means paying a provider to act on a state that never existed.
 
 ### Snapshots
 
-`Snapshot` re-folds from the log rather than snapshotting a state handed to it.
-By the time it runs, the control `Emit`s before it have already moved the state,
-so writing the pre-`Emit` state would produce a cache that disagrees with the
-log — and since the cache is read *in preference to* the log, that is a wrong
-answer served fast.
+`Snapshot` means “capture now”; it carries no sequence chosen by the reducer.
+When the effect runs, the preceding control `Emit`s have already committed, so
+the runner reads the confirmed log head, re-folds exactly through that sequence,
+and writes the state tagged with that same sequence. Passing the source event's
+sequence would snapshot the state before the very transition that requested it;
+using `0` as an implicit head would make the boundary a convention rather than an
+invariant. The required equality is literal:
 
-And a snapshot that cannot be written does not fail the run. The run is still
+```
+snapshot.State == Fold(config, snapshot.Seq)
+```
+
+A snapshot that cannot be written does not fail the run. The run is still
 entirely correct, only slower to inspect. Aborting because a cache write failed
 would invert ADR-0002 and make an optimization mandatory: a read-only disk would
 start killing runs that are otherwise fine. The skip is counted in
