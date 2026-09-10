@@ -218,6 +218,14 @@ type Coordination interface {
 	Complete(context.Context, ExecutionClaim, ExecutionOutcome) error
 }
 
+// CoordinatedJobStorageV1 is the optional storage contract required for durable
+// execution. A returned writer must reject every mutation after claim expiry or
+// replacement; checking only when the writer opens leaves stale hosts able to append.
+type CoordinatedJobStorageV1 interface {
+	JobStorage
+	OpenClaimedWriter(context.Context, ExecutionClaim) (JobWriter, error)
+}
+
 // AuthorizationRequest asks whether a principal may use one capability. JobID
 // is present only for resource-scoped revalidation.
 type AuthorizationRequest struct {
