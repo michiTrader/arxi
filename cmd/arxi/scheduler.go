@@ -17,6 +17,8 @@ import (
 
 	"github.com/michiTrader/arxi/internal/app"
 	internalinbox "github.com/michiTrader/arxi/internal/inbox"
+	"github.com/michiTrader/arxi/internal/job"
+	"github.com/michiTrader/arxi/internal/jobstore"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/scheduler"
@@ -326,6 +328,8 @@ type selfRunner struct {
 	// runner as an interactive run start.
 	prepare func(startFlags, func(string)) (cliSubmission, error)
 
+	coordinator jobstore.Store
+
 	// resident retains process ownership of accepted native runs. Subprocess
 	// fallbacks survive a one-shot scheduler process on their own; goroutines do
 	// not, so --once waits on this group before allowing the process to exit.
@@ -377,7 +381,14 @@ func newSelfRunner(self string) *selfRunner {
 // surface remains the fallback vocabulary for every other trigger action.
 func (r *selfRunner) Start(rec trigger.Record, a trigger.Action) (scheduler.Execution, error) {
 	if isRunStart(a) {
-		return r.startRun(rec, a)
+		return r.startRun(rec, scheduler.Slot{}, a)
+	}
+	return r.startSubprocess(a)
+}
+
+func (r *selfRunner) StartSlot(rec trigger.Record, slot scheduler.Slot, a trigger.Action) (scheduler.Execution, error) {
+	if isRunStart(a) {
+		return r.startRun(rec, slot, a)
 	}
 	return r.startSubprocess(a)
 }
@@ -386,11 +397,14 @@ func isRunStart(a trigger.Action) bool {
 	return len(a.Path) == 2 && a.Path[0] == "run" && a.Path[1] == "start"
 }
 
-func (r *selfRunner) startRun(rec trigger.Record, a trigger.Action) (scheduler.Execution, error) {
+func (r *selfRunner) startRun(rec trigger.Record, slot scheduler.Slot, a trigger.Action) (scheduler.Execution, error) {
 	args := append([]string(nil), a.Args...)
 	f, err := parseScheduledStartArgs(args, rec.Budget)
 	if err != nil {
 		return nil, err
+	}
+	if slot.JobID != "" {
+		f.runID = string(slot.JobID)
 	}
 	prepare := r.prepare
 	if prepare == nil {
@@ -400,6 +414,14 @@ func (r *selfRunner) startRun(rec trigger.Record, a trigger.Action) (scheduler.E
 	runtime, err := prepare(f, func(dir string) { acceptedDir = dir })
 	if err != nil {
 		return nil, err
+	}
+	if slot.OccurrenceID != "" {
+		if r.coordinator == nil {
+			_ = runtime.supervisor.Close(context.Background())
+			return nil, errors.New("scheduled acceptance has no durable coordinator")
+		}
+		runtime.prepared.IdempotencyKey = string(slot.OccurrenceID)
+		runtime.service.Submissions = coordinatorSubmissionAdapter{store: r.coordinator}
 	}
 	submission, err := runtime.service.SubmitPrepared(context.Background(), runtime.prepared)
 	if err != nil {
@@ -556,6 +578,51 @@ func (r *runExec) Cancel() {
 	})
 }
 
+type schedulerCoordinatorAdapter struct{ store jobstore.Store }
+
+func (a schedulerCoordinatorAdapter) View() scheduler.CoordinationView {
+	view := a.store.View()
+	return scheduler.CoordinationView{Revision: uint64(view.Revision), Occurrences: view.Occurrences, Jobs: view.Jobs}
+}
+
+func (a schedulerCoordinatorAdapter) RecordOccurrence(revision uint64, occurrence job.Occurrence) (job.Occurrence, uint64, error) {
+	got, next, err := a.store.RecordOccurrence(jobstore.Revision(revision), occurrence)
+	return got, uint64(next), err
+}
+
+func (a schedulerCoordinatorAdapter) Admit(revision uint64, admission scheduler.Admission) (job.Occurrence, uint64, error) {
+	got, next, err := a.store.Admit(jobstore.Revision(revision), jobstore.Admission{
+		Occurrence: admission.Occurrence, Window: admission.Window, Ceiling: admission.Ceiling, Reserved: admission.Reserved,
+	})
+	return got, uint64(next), err
+}
+
+func (a schedulerCoordinatorAdapter) Cancel(revision uint64, cancellation scheduler.Cancellation) (uint64, error) {
+	next, err := a.store.Cancel(jobstore.Revision(revision), jobstore.Cancellation{
+		JobID: cancellation.JobID, Actor: cancellation.Actor, Reason: cancellation.Reason,
+	})
+	return uint64(next), err
+}
+
+type coordinatorSubmissionAdapter struct{ store jobstore.Store }
+
+func (a coordinatorSubmissionAdapter) BindSubmission(wanted app.SubmissionBinding) (app.SubmissionBinding, error) {
+	for {
+		view := a.store.View()
+		bound, _, err := a.store.BindSubmission(view.Revision, jobstore.Submission{Key: wanted.Key, RequestDigest: wanted.RequestDigest, JobID: wanted.JobID})
+		if errors.Is(err, jobstore.ErrRevision) {
+			continue
+		}
+		if errors.Is(err, jobstore.ErrConflict) {
+			return app.SubmissionBinding{}, app.ErrSubmissionConflict
+		}
+		if err != nil {
+			return app.SubmissionBinding{}, err
+		}
+		return app.SubmissionBinding{Key: bound.Key, RequestDigest: bound.RequestDigest, JobID: bound.JobID}, nil
+	}
+}
+
 // dryRunner reports what would start, and starts nothing.
 //
 // It returns an already-finished Execution rather than nil. The scheduler
@@ -569,6 +636,10 @@ func (d *dryRunner) Start(rec trigger.Record, a trigger.Action) (scheduler.Execu
 	d.n++
 	fmt.Printf("  would run: %s\n", a.CLI())
 	return finished{}, nil
+}
+
+func (d *dryRunner) StartSlot(rec trigger.Record, _ scheduler.Slot, a trigger.Action) (scheduler.Execution, error) {
+	return d.Start(rec, a)
 }
 
 // dryStore reads the real triggers and throws away every write.
@@ -653,6 +724,7 @@ func cmdTriggerRun(args []string) {
 
 	var runner scheduler.Runner
 	var resident *selfRunner
+	var schedulerCoordinator scheduler.Coordinator
 	if dry {
 		// Both sinks are faked, not just the runner. See dryStore.
 		runner = &dryRunner{}
@@ -666,11 +738,24 @@ func cmdTriggerRun(args []string) {
 				"binary, which is what runs each trigger's --then: %v\n", err)
 			os.Exit(1)
 		}
+		coordination, err := jobstore.Open(filepath.Join(filepath.Dir(triggerDir), ".arxi", "coordination"), nowFunc)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "arxi trigger run: open durable coordination: %v\n", err)
+			os.Exit(1)
+		}
+		defer coordination.Close()
 		resident = newSelfRunner(self)
+		resident.coordinator = coordination
 		runner = resident
+		schedulerCoordinator = schedulerCoordinatorAdapter{store: coordination}
 	}
 
-	sched, err := scheduler.New(store, runner, printReport)
+	var sched *scheduler.Scheduler
+	if dry {
+		sched, err = scheduler.New(store, runner, printReport)
+	} else {
+		sched, err = scheduler.NewDurable(store, runner, schedulerCoordinator, printReport)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi trigger run: %v\n", err)
 		os.Exit(1)
