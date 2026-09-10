@@ -589,14 +589,15 @@ func (c *scheduledClaim) Heartbeat() error {
 func (c *scheduledClaim) Finish(out arxiexec.Outcome, runErr error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	attemptState, jobState, occurrenceState, settlement := job.AttemptFailed, job.JobFailed, job.OccurrenceCompleted, jobstore.SettlementRelease
-	if errors.Is(runErr, arxiexec.ErrUnknownWork) {
+	attemptState, jobState := job.AttemptFailed, job.JobFailed
+	occurrenceState, settlement := job.OccurrenceCompleted, jobstore.SettlementSpend
+	if runErr != nil {
 		attemptState, jobState, occurrenceState, settlement = job.AttemptUnknown, job.JobUnknown, job.OccurrenceUnknown, jobstore.SettlementUnknown
 	} else if out.State.Status == kernel.StatusCancelled {
 		attemptState, jobState = job.AttemptCancelled, job.JobCancelled
 	} else if out.State.Status == kernel.StatusSucceeded {
-		attemptState, jobState, settlement = job.AttemptSucceeded, job.JobSucceeded, jobstore.SettlementSpend
-	} else if runErr == nil {
+		attemptState, jobState = job.AttemptSucceeded, job.JobSucceeded
+	} else if out.State.Status != kernel.StatusFailed && out.State.Status != kernel.StatusExpired {
 		return nil
 	}
 	spent, err := amountFromRuntimeUSD(out.State.TreeSpentUSD)

@@ -45,6 +45,13 @@ type Claim interface {
 	Finish(exec.Outcome, error) error
 }
 
+// Reconciler may establish a canonical terminal outcome for ambiguous external
+// work. It is intentionally absent from built-in providers until their APIs
+// offer trustworthy receipt lookup rather than only returning response IDs.
+type Reconciler interface {
+	Reconcile(context.Context, string) (bool, error)
+}
+
 // Options are process-level dependencies; run state is never supplied here.
 type Options struct {
 	Build        Build
@@ -52,6 +59,7 @@ type Options struct {
 	CommandLimit int
 	Claim        Claim
 	Heartbeat    time.Duration
+	Reconciler   Reconciler
 }
 
 // Supervisor guarantees at most one resident worker for each run id.
@@ -463,7 +471,29 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		return fail(ErrLegacy)
 	}
 	if len(recovery.Unknown) > 0 {
-		return fail(fmt.Errorf("%w: %s", ErrUnknown, recovery.Unknown[0]))
+		if w.opts.Reconciler == nil {
+			return fail(fmt.Errorf("%w: %s", ErrUnknown, recovery.Unknown[0]))
+		}
+		for _, workID := range recovery.Unknown {
+			reconciled, reconcileErr := w.opts.Reconciler.Reconcile(context.Background(), workID)
+			if reconcileErr != nil {
+				return fail(fmt.Errorf("reconcile unknown work %s: %w", workID, reconcileErr))
+			}
+			if !reconciled {
+				return fail(fmt.Errorf("%w: %s", ErrUnknown, workID))
+			}
+		}
+		events, err = store.Read(1, 0)
+		if err != nil {
+			return fail(fmt.Errorf("read reconciled execution progress: %w", err))
+		}
+		recovery, err = exec.Recover(events)
+		if err != nil {
+			return fail(fmt.Errorf("recover reconciled execution progress: %w", err))
+		}
+		if len(recovery.Unknown) > 0 {
+			return fail(fmt.Errorf("%w: %s", ErrUnknown, recovery.Unknown[0]))
+		}
 	}
 	timers, err := exec.RecoverTimers(events)
 	if err != nil {
