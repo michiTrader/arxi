@@ -74,7 +74,14 @@ func TestStoreContractBindsIdempotencyAndRejectsConflicts(t *testing.T) {
 			if err != nil || got != bound || repeated != revision {
 				t.Fatalf("identical submission repeat advanced or failed at revision %d: retries must observe the original job without changing history: %v", repeated, err)
 			}
+			conflictingJob := bound
+			conflictingJob.JobID = "job-b"
+			got, repeated, err = store.BindSubmission(revision, conflictingJob)
+			if err != nil || got != bound || repeated != revision {
+				t.Fatalf("same digest with a new candidate returned %#v at revision %d with %v: recovery must retain the job chosen by the first durable binding", got, repeated, err)
+			}
 			conflict := bound
+
 			conflict.RequestDigest = "digest-b"
 			if _, _, err := store.BindSubmission(revision, conflict); !errors.Is(err, ErrConflict) {
 				t.Fatalf("conflicting key reuse returned %v, want ErrConflict: one idempotency key cannot authorize two canonical requests", err)

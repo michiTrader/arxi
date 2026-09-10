@@ -30,7 +30,7 @@ func (s *state) bind(expected Revision, value Submission) ([]record, Submission,
 		return nil, Submission{}, ErrNotFound
 	}
 	if old, ok := s.view.Submissions[value.Key]; ok {
-		if old == value {
+		if old.RequestDigest == value.RequestDigest {
 			return nil, old, nil
 		}
 		return nil, Submission{}, ErrConflict
