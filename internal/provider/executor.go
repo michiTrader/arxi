@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
 	"github.com/michiTrader/arxi/internal/surface"
@@ -102,6 +103,10 @@ type Executor struct {
 	// every context, because it is what the run was started to do.
 	Prompt string
 
+	// Prices freezes the rates selected when the run started. A nil map retains
+	// the compiled table for direct users and tests; run wiring always supplies it.
+	Prices map[string]model.Price
+
 	// NewClient builds the caller for a resolution. Injectable so tests point at
 	// an httptest server without reaching the network.
 	NewClient func(model.Resolution) *Client
@@ -138,14 +143,18 @@ type Executor struct {
 //     was charged for and then declined still costs money.
 func (x *Executor) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Event, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("spawn turn for %s: %w", e.Agent, err)
+		return nil, exec.NotDispatched(fmt.Errorf("spawn turn for %s: %w", e.Agent, err))
 	}
 
 	// Resolution happens before anything is emitted, so a misconfigured model
 	// costs nothing and produces no half-open turn.
 	res, price, err := x.resolve(e.Agent)
 	if err != nil {
-		return nil, fmt.Errorf("spawn turn for %s: %w", e.Agent, err)
+		return nil, exec.NotDispatched(fmt.Errorf("spawn turn for %s: %w", e.Agent, err))
+	}
+	if res.Protocol != "" && res.Protocol != model.ProtocolOpenAIChatCompletions {
+		return nil, exec.NotDispatched(fmt.Errorf("spawn turn for %s: provider %s uses unsupported protocol %s (supported: %s)",
+			e.Agent, res.Provider, res.Protocol, model.ProtocolOpenAIChatCompletions))
 	}
 
 	client := x.newClient(res)
@@ -214,6 +223,18 @@ func (x *Executor) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.
 		llm["error"] = apiErr.Message
 		llm["status"] = apiErr.Status
 		llm["retryable"] = apiErr.Retryable()
+	} else if resp.requestsTools() {
+		// The endpoint answered successfully, but asked for a provider-native tool
+		// loop this executor cannot perform. This is a known, non-retryable outcome:
+		// recording empty text as success would advance the run on work nobody did.
+		llm["ok"] = false
+		llm["code"] = "unsupported_tool_calls"
+		llm["error"] = "provider requested tool calls, but this executor supports text completions only"
+		llm["retryable"] = false
+		llm["response_id"] = resp.ID
+		if fr := resp.finishReason(); fr != "" {
+			llm["finish_reason"] = fr
+		}
 	} else {
 		llm["ok"] = true
 		if text, present := resp.text(); present {
@@ -275,7 +296,10 @@ func (x *Executor) resolve(agent string) (model.Resolution, model.Price, error) 
 	if err != nil {
 		return model.Resolution{}, model.Price{}, err
 	}
-	price, ok := model.PriceOf(res.Model)
+	price, ok := x.Prices[res.Model]
+	if x.Prices == nil {
+		price, ok = model.PriceOf(res.Model)
+	}
 	if !ok {
 		return model.Resolution{}, model.Price{}, &model.ErrNoPrice{Ref: res.Model}
 	}
@@ -427,7 +451,7 @@ func (x *Executor) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.Ev
 		// skipped writing the question would leave a member blocked on an inbox
 		// item that does not exist, so `arxi inbox` would show nothing to answer
 		// for a run that cannot proceed without an answer.
-		return nil, fmt.Errorf("ask a human (%s: %q): %w", e.Kind, e.Question, err)
+		return nil, exec.NotDispatched(fmt.Errorf("ask a human (%s: %q): %w", e.Kind, e.Question, err))
 	}
 
 	payload := map[string]any{

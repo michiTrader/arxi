@@ -144,6 +144,25 @@ func cmdRunReplay(args []string) {
 		id = filepath.Base(dir)
 	}
 
+	// Modern runs bind replay to the same immutable config and contract versions
+	// used by fresh execution and resume. Legacy logs remain inspectable with their
+	// frozen blueprint, but a partially present binding is corruption, not legacy.
+	if started := runStartedEvent(events); started != nil {
+		bound := started.Str("effective_config_schema") != "" ||
+			started.Str("effective_config_path") != "" ||
+			started.Str("effective_config_sha") != ""
+		if bound {
+			effective, _, loadErr := loadEffectiveForResume(dir, id, events)
+			if loadErr != nil {
+				fmt.Fprintf(os.Stderr, "arxi run replay: %v\n", loadErr)
+				os.Exit(1)
+			}
+			cfg = effective.Config
+			simulated = effective.Mode == "sim"
+			final, _ = kernel.Fold(kernel.State{}, events, cfg)
+		}
+	}
+
 	if len(events) == 0 {
 		fmt.Fprintf(os.Stderr, "arxi run replay: run %s has an empty log, so there "+
 			"is no state to fold to.\n"+

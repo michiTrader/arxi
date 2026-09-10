@@ -89,6 +89,32 @@ func TestRunCancelRecordsRunCancelledWithTheReason(t *testing.T) {
 	}
 }
 
+func TestRunCancelCustomDirectoryKeepsRecordedRunIdentity(t *testing.T) {
+	dir := t.TempDir()
+	const id = "rmtcnl4kq-71c2a0de"
+	cancellableRun(t, dir, id)
+
+	custom := filepath.Join(dir, "not-the-run-id")
+	if err := os.Rename(filepath.Join(dir, "runs", id), custom); err != nil {
+		t.Fatal(err)
+	}
+	out, errb, code := arxiStreams(t, dir, "run", "cancel", custom, "--reason", "moved run")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	}
+	if !strings.Contains(out, "run "+id+" cancelled at seq 3") {
+		t.Errorf("headline lost the recorded run id:\n%s", out)
+	}
+	raw, err := os.ReadFile(filepath.Join(custom, "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if got := lines[len(lines)-1]; !strings.Contains(got, `"scope":"run:`+id+`"`) {
+		t.Errorf("custom-directory cancel changed event scope:\n%s", got)
+	}
+}
+
 // TestRunCancelReasonIsWhatRunResultShows is the cross-command half.
 //
 // resultText (runresult.go:199) uses the cancel reason as the run's result when

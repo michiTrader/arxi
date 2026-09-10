@@ -1,15 +1,26 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/app"
+	internalinbox "github.com/michiTrader/arxi/internal/inbox"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/scheduler"
+	"github.com/michiTrader/arxi/internal/supervisor"
 	"github.com/michiTrader/arxi/internal/surface"
 	"github.com/michiTrader/arxi/internal/trigger"
 )
@@ -22,33 +33,323 @@ import (
 // a scheduler with no caller outside its own tests is a library, not a feature.
 // This is the file that makes a user able to reach it.
 
-// selfRunner starts each firing as a child process of this binary.
-//
-// # Why a subprocess and not a goroutine
-//
-// A goroutine is cheaper and would have been less code. Three reasons it is
-// wrong here, in increasing order of how much they cost when ignored:
-//
-// First, re-entrancy. `--then "trigger run"` is a trigger that schedules the
-// scheduler, and in-process that is an infinite recursion inside one process
-// rather than a visible pile of subprocesses. One of those is diagnosable from
-// `ps`; the other is a stack overflow with no clue as to why.
-//
-// Second, isolation is the entire value of the overlap policies.
-// `cancel-previous` has to be able to stop work that is not cooperating; a
-// goroutine cannot be killed, so cancel-previous would degrade to "ask nicely
-// and hope", which is exactly the behaviour it exists to avoid. A process can
-// be signalled.
-//
-// Third, a scheduled run that panics must not take the scheduler with it. An
-// unattended process whose whole job is to keep firing hourly triggers cannot
-// die because one audit hit a nil map.
+// lifecycleRegistry exposes resident scheduled workers to other command routes
+// in this process. The exact run directory is the key because ids repeat across
+// roots and renamed legacy directories remain addressable by the inbox CLI.
+type lifecycleRegistry struct {
+	mu   sync.Mutex
+	runs map[string]*supervisor.Handle
+}
+
+var nativeLifecycles = lifecycleRegistry{runs: map[string]*supervisor.Handle{}}
+var externalDecisionSequence atomic.Uint64
+
+const externalDecisionTimeout = 5 * time.Second
+
+type externalDecisionRequest struct {
+	Event kernel.Event `json:"event"`
+	Exact bool         `json:"exact"`
+}
+
+type externalDecisionResult struct {
+	Sequence int64  `json:"sequence,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Code     string `json:"code,omitempty"`
+}
+
+func lifecycleKey(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return filepath.Clean(dir)
+	}
+	return filepath.Clean(abs)
+}
+
+func (r *lifecycleRegistry) register(dir string, h *supervisor.Handle) func() {
+	if h == nil {
+		return func() {}
+	}
+	key := lifecycleKey(dir)
+	r.mu.Lock()
+	r.runs[key] = h
+	r.mu.Unlock()
+	return func() {
+		r.mu.Lock()
+		if r.runs[key] == h {
+			delete(r.runs, key)
+		}
+		r.mu.Unlock()
+	}
+}
+
+func (r *lifecycleRegistry) decision(dir string, fn supervisor.Command) (bool, error) {
+	r.mu.Lock()
+	h := r.runs[lifecycleKey(dir)]
+	r.mu.Unlock()
+	if h == nil {
+		return false, nil
+	}
+	if err := h.Command(context.Background(), fn); err != nil {
+		if errors.Is(err, supervisor.ErrClosed) {
+			return false, nil
+		}
+		return true, err
+	}
+	h.Wake()
+	return true, nil
+}
+
+// appendExternalDecision is the cross-process fallback for a resident scheduled
+// worker. The worker owns the writer lock, so the inbox process publishes an
+// exact one-event request beside the run rather than contending for events.ndjson.
+// The resident imports it through Handle.Command, then removes the request.
+func appendExternalDecision(dir string, event kernel.Event, exact bool) (int64, error) {
+	pending := filepath.Join(dir, "inbox.decisions")
+	if err := os.MkdirAll(pending, 0o755); err != nil {
+		return 0, err
+	}
+	request := externalDecisionRequest{Event: event, Exact: exact}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return 0, err
+	}
+	body = append(body, '\n')
+	name := fmt.Sprintf("%s-%d-%d", event.Str("inbox_id"), os.Getpid(), externalDecisionSequence.Add(1))
+	requestPath := filepath.Join(pending, name+".request")
+	resultPath := filepath.Join(pending, name+".result")
+	tmp := filepath.Join(pending, "."+name+".tmp")
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(tmp, requestPath); err != nil {
+		_ = os.Remove(tmp)
+		return 0, err
+	}
+	defer os.Remove(requestPath)
+	defer os.Remove(resultPath)
+	deadline := time.Now().Add(externalDecisionTimeout)
+	for {
+		body, err := os.ReadFile(resultPath)
+		if err == nil {
+			var result externalDecisionResult
+			if err := json.Unmarshal(body, &result); err != nil {
+				return 0, fmt.Errorf("decode resident decision result: %w", err)
+			}
+			if result.Error != "" {
+				return 0, externalDecisionError(result)
+			}
+			return result.Sequence, nil
+		}
+		if !os.IsNotExist(err) {
+			return 0, err
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("resident run did not acknowledge inbox decision within %s", externalDecisionTimeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func importExternalDecisions(store *logstore.Store) (bool, error) {
+	pending := filepath.Join(store.Dir(), "inbox.decisions")
+	entries, err := os.ReadDir(pending)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	imported := false
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".request" {
+			continue
+		}
+		if imported {
+			break
+		}
+		requestPath := filepath.Join(pending, entry.Name())
+		resultPath := strings.TrimSuffix(requestPath, ".request") + ".result"
+		body, err := os.ReadFile(requestPath)
+		if err != nil {
+			return imported, err
+		}
+		var request externalDecisionRequest
+		if err := json.Unmarshal(body, &request); err != nil {
+			return imported, fmt.Errorf("decode external decision %s: %w", entry.Name(), err)
+		}
+		var event kernel.Event
+		if request.Exact {
+			reply := internalinbox.Reply{Decision: request.Event.Str("decision"), Text: request.Event.Str("text")}
+			event, err = internalinbox.AnswerExactStore(store, request.Event.Str("inbox_id"), reply)
+		} else {
+			err = validateExternalDecision(store, request.Event, false)
+			if err == nil {
+				request.Event.Seq = 0
+				var written []kernel.Event
+				written, err = store.Append([]kernel.Event{request.Event})
+				if err == nil && len(written) == 1 {
+					event = written[0]
+				}
+			}
+		}
+		result := externalDecisionResult{Sequence: event.Seq}
+		if err != nil {
+			result.Error, result.Code = err.Error(), externalDecisionCode(err)
+		}
+		if err := writeExternalDecisionResult(resultPath, result); err != nil {
+			return imported, err
+		}
+		if err := os.Remove(requestPath); err != nil && !os.IsNotExist(err) {
+			return imported, err
+		}
+		if result.Error == "" {
+			imported = true
+		}
+	}
+	return imported, nil
+}
+
+func validateExternalDecision(store *logstore.Store, event kernel.Event, exact bool) error {
+	if event.Type != kernel.InboxReplied || event.Source != kernel.SourceHuman {
+		return errors.New("external decision is not a human inbox reply")
+	}
+	id := event.Str("inbox_id")
+	decision := event.Str("decision")
+	text := event.Str("text")
+	reply := internalinbox.Reply{Decision: decision, Text: text}
+	if decision != internalinbox.DecisionApprove && decision != internalinbox.DecisionReject && decision != internalinbox.DecisionAnswer {
+		return fmt.Errorf("invalid external inbox decision %q", decision)
+	}
+	run, err := internalinbox.OpenRun(store.Dir())
+	if err != nil {
+		return err
+	}
+	item, err := run.Item(id)
+	if err != nil {
+		return err
+	}
+	if item.Replied {
+		return internalinbox.ErrAlreadyAnswered
+	}
+	if run.State().Status.Terminal() {
+		return internalinbox.ErrRunOver
+	}
+	if decision == internalinbox.DecisionReject && strings.TrimSpace(reply.Text) == "" {
+		return errors.New("rejection needs a reason")
+	}
+	if decision == internalinbox.DecisionAnswer && strings.TrimSpace(reply.Text) == "" {
+		return errors.New("answer text is required")
+	}
+	if item.Kind == "tool_approval" {
+		if decision == internalinbox.DecisionAnswer {
+			return internalinbox.ErrWrongDecisionKind
+		}
+	} else if decision != internalinbox.DecisionAnswer || exact && item.Kind != "question" {
+		return internalinbox.ErrWrongDecisionKind
+	}
+	return nil
+}
+
+func writeExternalDecisionResult(path string, result externalDecisionResult) error {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func externalDecisionCode(err error) string {
+	switch {
+	case errors.Is(err, internalinbox.ErrAlreadyAnswered):
+		return "already_answered"
+	case errors.Is(err, internalinbox.ErrNoSuchItem):
+		return "not_found"
+	case errors.Is(err, internalinbox.ErrWrongDecisionKind):
+		return "wrong_kind"
+	case errors.Is(err, internalinbox.ErrRunOver):
+		return "run_over"
+	default:
+		return ""
+	}
+}
+
+type residentDecisionError struct {
+	message string
+	code    string
+}
+
+func (e *residentDecisionError) Error() string { return e.message }
+
+func externalDecisionError(result externalDecisionResult) error {
+	return &residentDecisionError{message: result.Error, code: result.Code}
+}
+
+func watchExternalDecisions(dir string, h *supervisor.Handle, stop <-chan struct{}) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if _, err := os.Stat(filepath.Join(dir, "inbox.decisions")); err != nil {
+				continue
+			}
+			_ = h.Command(context.Background(), func(store *logstore.Store) error {
+				_, err := importExternalDecisions(store)
+				return err
+			})
+			h.Wake()
+		}
+	}
+}
+
+// selfRunner dispatches native run starts through the shared acceptance and
+// supervisor lifecycle. Other triggerable commands retain subprocess isolation.
 type selfRunner struct {
-	// self is the binary to re-invoke. Resolved once at construction, because
-	// os.Executable() can start failing later (the file is replaced during an
-	// upgrade) and discovering that per-firing would give one trigger a
-	// different answer from the next.
+	// self is the binary used by the fallback path. It is resolved once so all
+	// fallback firings agree about which executable they invoke.
 	self string
+
+	// prepare is a test seam around the native CLI preparation path. Keeping this
+	// seam here (rather than rebuilding app input in the scheduler) guarantees the
+	// scheduled path freezes the same routes, prices, policy, workspace and tool
+	// runner as an interactive run start.
+	prepare func(startFlags, func(string)) (cliSubmission, error)
+
+	// resident retains process ownership of accepted native runs. Subprocess
+	// fallbacks survive a one-shot scheduler process on their own; goroutines do
+	// not, so --once waits on this group before allowing the process to exit.
+	resident sync.WaitGroup
+}
+
+func newSelfRunner(self string) *selfRunner {
+	return &selfRunner{
+		self: self,
+		prepare: func(f startFlags, accepted func(string)) (cliSubmission, error) {
+			bp, err := resolveActor(f.actor)
+			if err != nil {
+				return cliSubmission{}, err
+			}
+			if !f.sim {
+				if err := checkEveryMemberHasAModel(bp.Config, f.model); err != nil {
+					return cliSubmission{}, err
+				}
+			}
+			return prepareCLISubmission(f, bp, func(dir string, _ kernel.Config) {
+				accepted(dir)
+			})
+		},
+	}
 }
 
 // How children agree with the parent about where triggers live
@@ -72,39 +373,103 @@ type selfRunner struct {
 // today, and TestChildrenInheritTheTriggerDirectory is what fails on the day
 // one arrives.
 
-// Start launches the action as a child process.
-func (r selfRunner) Start(rec trigger.Record, a trigger.Action) (scheduler.Execution, error) {
+// Start routes only run start through the resident lifecycle. The command
+// surface remains the fallback vocabulary for every other trigger action.
+func (r *selfRunner) Start(rec trigger.Record, a trigger.Action) (scheduler.Execution, error) {
+	if isRunStart(a) {
+		return r.startRun(rec, a)
+	}
+	return r.startSubprocess(a)
+}
+
+func isRunStart(a trigger.Action) bool {
+	return len(a.Path) == 2 && a.Path[0] == "run" && a.Path[1] == "start"
+}
+
+func (r *selfRunner) startRun(rec trigger.Record, a trigger.Action) (scheduler.Execution, error) {
+	args := append([]string(nil), a.Args...)
+	f, err := parseScheduledStartArgs(args, rec.Budget)
+	if err != nil {
+		return nil, err
+	}
+	prepare := r.prepare
+	if prepare == nil {
+		prepare = newSelfRunner(r.self).prepare
+	}
+	var acceptedDir string
+	runtime, err := prepare(f, func(dir string) { acceptedDir = dir })
+	if err != nil {
+		return nil, err
+	}
+	submission, err := runtime.service.SubmitPrepared(context.Background(), runtime.prepared)
+	if err != nil {
+		_ = runtime.supervisor.Close(context.Background())
+		return nil, err
+	}
+	if acceptedDir == "" {
+		acceptedDir = submission.Dir
+	}
+	ex := &runExec{
+		jobID: submission.Result.JobID, dir: acceptedDir,
+		supervisor: runtime.supervisor, submission: submission,
+		done: make(chan struct{}), onDone: r.resident.Done,
+		externalStop: make(chan struct{}),
+	}
+	ex.unregister = nativeLifecycles.register(acceptedDir, submission.Handle)
+	go watchExternalDecisions(acceptedDir, submission.Handle, ex.externalStop)
+	r.resident.Add(1)
+	go ex.observe()
+	return ex, nil
+}
+
+// parseScheduledStartArgs applies the trigger's per-period ceiling to the run
+// when the action omits --budget. An explicit action budget must equal it: two
+// different ceilings cannot both be honestly described as the limit, and taking
+// either the larger or smaller one would silently change configuration.
+func parseScheduledStartArgs(args []string, recordBudget float64) (startFlags, error) {
+	seed := startFlags{workspace: "auto"}
+	if !hasBudgetFlag(args) {
+		seed.budget, seed.budgetSet = recordBudget, true
+	}
+	f, err := parseStartArgs(args, seed)
+	if err != nil {
+		return f, err
+	}
+	if f.budget != recordBudget {
+		return f, fmt.Errorf("action --budget %s conflicts with trigger budget %s; remove --budget or make the two ceilings equal",
+			usd(f.budget), usd(recordBudget))
+	}
+	return f, nil
+}
+
+func hasBudgetFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--budget" || len(arg) > len("--budget=") && arg[:len("--budget=")] == "--budget=" {
+			return true
+		}
+	}
+	return false
+}
+
+// startSubprocess preserves the existing execution and process-group cancellation
+// semantics for commands which have no private in-process lifecycle adapter.
+func (r *selfRunner) startSubprocess(a trigger.Action) (scheduler.Execution, error) {
 	args := append(append([]string{}, a.Path...), a.Args...)
-
 	cmd := exec.Command(r.self, args...)
-
-	// Output goes to the scheduler's own stdout and stderr rather than being
-	// captured. A long-running scheduler that buffered every child's output
-	// would grow without bound and show nothing until the child exited, which
-	// is precisely backwards for the audience: somebody watching an unattended
-	// process wants to see it working now.
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	// Its own process group, so Cancel can signal the whole tree. Without
-	// this, killing `arxi run start` would leave anything IT spawned running
-	// and unparented — which is how a "cancelled" run keeps spending.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-
 	ex := &childExec{cmd: cmd, done: make(chan struct{})}
-
-	// One Wait per child, here and nowhere else. Wait is not safe to call
-	// twice, and the scheduler learns a child is finished by watching Done()
-	// — so the goroutine that waits is also the one that closes the channel.
 	go func() {
 		ex.err = cmd.Wait()
 		close(ex.done)
 	}()
-
 	return ex, nil
 }
 
@@ -138,6 +503,56 @@ func (c *childExec) Cancel() {
 			return
 		}
 		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+	})
+}
+
+// runExec observes one durably accepted resident run. Idle and blocked outcomes
+// keep it in flight; only a terminal fold or definitive observation failure closes
+// Done. Cancel appends one lifecycle cancellation request through the worker and
+// does not pretend that request is completion.
+type runExec struct {
+	jobID        string
+	dir          string
+	supervisor   interface{ Close(context.Context) error }
+	submission   app.Submission
+	done         chan struct{}
+	onDone       func()
+	unregister   func()
+	externalStop chan struct{}
+	cancelOnce   sync.Once
+}
+
+func (r *runExec) Done() <-chan struct{} { return r.done }
+
+func (r *runExec) observe() {
+	defer close(r.done)
+	if r.onDone != nil {
+		defer r.onDone()
+	}
+	if r.unregister != nil {
+		defer r.unregister()
+	}
+	if r.externalStop != nil {
+		defer close(r.externalStop)
+	}
+	defer r.supervisor.Close(context.Background())
+	_, _ = app.Wait(context.Background(), r.submission, app.WaitTerminal)
+}
+
+func (r *runExec) Cancel() {
+	r.cancelOnce.Do(func() {
+		h := r.submission.Handle
+		if h == nil {
+			return
+		}
+		go func() {
+			services := app.MutationServices{RunsDir: filepath.Dir(r.dir), Now: nowFunc}
+			_ = h.Command(context.Background(), func(store *logstore.Store) error {
+				_, err := services.CancelStore(store, r.jobID, "scheduler overlap policy")
+				return err
+			})
+			h.Wake()
+		}()
 	})
 }
 
@@ -237,6 +652,7 @@ func cmdTriggerRun(args []string) {
 	var store scheduler.Store = openStore()
 
 	var runner scheduler.Runner
+	var resident *selfRunner
 	if dry {
 		// Both sinks are faked, not just the runner. See dryStore.
 		runner = &dryRunner{}
@@ -250,7 +666,8 @@ func cmdTriggerRun(args []string) {
 				"binary, which is what runs each trigger's --then: %v\n", err)
 			os.Exit(1)
 		}
-		runner = selfRunner{self: self}
+		resident = newSelfRunner(self)
+		runner = resident
 	}
 
 	sched, err := scheduler.New(store, runner, printReport)
@@ -263,6 +680,9 @@ func cmdTriggerRun(args []string) {
 		if err := sched.Tick(nowFunc()); err != nil {
 			fmt.Fprintf(os.Stderr, "arxi trigger run: %v\n", err)
 			os.Exit(1)
+		}
+		if resident != nil {
+			resident.resident.Wait()
 		}
 		return
 	}

@@ -14,9 +14,8 @@ import (
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
-	"github.com/michiTrader/arxi/internal/provider"
+	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/surface"
-	"github.com/michiTrader/arxi/internal/toolrun"
 )
 
 // cmdRunUnpause implements `arxi run unpause <run> [--budget N]`.
@@ -43,32 +42,16 @@ import (
 // act as paying for the turns the answer unblocks. Unpause is the other half,
 // and it is where "resume this run" becomes a thing a person can actually do.
 //
-// # THE CURSOR PROBLEM, and why the log tip is the honest answer
+// # THE CURSOR PROBLEM, and its durable answer
 //
-// exec.Loop needs a Cursor: the seq whose effects were already carried out. Its
-// doc is explicit that both ways of guessing are wrong -- Head() skips the
-// effects of anything a previous pass had not reached, and zero re-spawns every
-// turn the run already paid for. `run start` knows the cursor because it just
-// built it, prints it as "resume from here", and nothing persists it anywhere.
-//
-// A resume in a new process therefore cannot know it. This command uses the log
-// tip, which is Head(), and that is a deliberate choice of which failure to
-// take:
-//
-//   - Head() risks stranding the effects of events a previous pass folded but
-//     did not execute. Those runs are the ones that crashed mid-fold.
-//   - Zero risks re-spawning every turn in the log. On a run that has done real
-//     work, that is the whole bill a second time.
-//
-// The first costs a run that may be stuck anyway; the second costs money on
-// every healthy run. So the tip wins, and the newly appended run.unpaused sits
-// ABOVE it -- which is what makes the resume work at all: that event is unread
-// by construction, the loop reads it first, and the drain it triggers is what
-// hands back the parked work.
-//
-// This is a real limitation and not a hidden one: `run unpause` reports what it
-// resumed from, so a resume that produced nothing can be recognised as such
-// rather than blamed on the blueprint.
+// A continuation must know which source event's effects were committed. The
+// event-log tip cannot answer that: progress records and domain outcomes may sit
+// above an unfinished source event. Restarting from zero is worse because it can
+// repeat paid work. Modern runs therefore commit exec.step_completed and derive
+// the cursor from the greatest validated source-event frontier. A run without
+// those records remains inspectable but is refused before any continuation event
+// is appended; guessing would turn recovery into either omission or duplicate
+// external work.
 func cmdRunUnpause(args []string) {
 	c := surface.Lookup("run", "unpause")
 	vals, err := parseInvocation(c, args)
@@ -113,11 +96,24 @@ func cmdRunUnpause(args []string) {
 	// The state is read BEFORE the append, because what to say about this
 	// resume depends on what it is resuming from -- and after the append the run
 	// is already running, so the question cannot be asked any more.
-	pre, cfg, simulated, err := foldRunDir(dir)
+	pre, _, simulated, events, err := foldRunDirEvents(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi run unpause: %v\n", err)
 		os.Exit(1)
 	}
+	// Resume validates the immutable execution contract before acquiring the writer
+	// lock or appending run.unpaused. Legacy inspection remains available through
+	// foldRunDir, but an execution that cannot be reconstructed is never guessed.
+	effective, _, err := loadEffectiveForResume(dir, pre.RunID, events)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "arxi run unpause: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := recoverExecution(events); err != nil {
+		fmt.Fprintf(os.Stderr, "arxi run unpause: cannot resume safely: %v\n", err)
+		os.Exit(1)
+	}
+	simulated = effective.Mode == "sim"
 
 	// A run that is already running is refused rather than resumed. Appending a
 	// second run.unpaused would be harmless to the reducer and dishonest in the
@@ -183,14 +179,10 @@ func cmdRunUnpause(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	// Both, and they are not redundant. The defer covers the ordinary returns;
-	// atExit covers os.Exit, which does not run defers -- and there are four
-	// such paths under this lock (two fatals in driveResumedRun's wiring, the
-	// append error, and the stopped-early branch). Measured: a run resumed with
-	// an unparseable policy file left writer.lock holding a dead pid, and the
-	// next command on that run refused with advice to delete a file by hand.
-	//
-	// Close is idempotent, so whichever fires first is the one that matters.
+	// Both, and they are not redundant. The defer covers ordinary returns;
+	// atExit covers os.Exit, which does not run defers -- including append and
+	// stopped-early failures below. Configuration has already been validated by
+	// preflightEffectiveRun, before this lock was acquired.
 	defer store.Close()
 	atExit(func() { store.Close() })
 
@@ -247,43 +239,64 @@ func cmdRunUnpause(args []string) {
 			"the same fake executor: no model is called and no money is spent.\n")
 	}
 
-	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
+	driveEffectiveRun(dir, effective, store, pre.RunID)
 }
 
-// driveResumedRun folds the log forward and carries out what the reducer decides.
-//
-// The executor is built exactly as `run start` builds it, including the tool
-// policy overrides, and that is the point: a resumed run must be judged by the
-// same rules as a fresh one. Duplicating the wiring is a real risk -- if the two
-// drift, a resumed run and a new run behave differently on the same blueprint,
-// which is the class of bug nobody thinks to look for.
-//
-// # simulated is honoured here rather than by refusing to drive
-//
-// This used to build a live executor unconditionally, and every caller therefore
-// had to check the flag itself and print "this run was started with --sim, so it
-// is not driven here" instead of driving. That was correct about the danger --
-// resuming a rehearsal with a live executor charges real money for a run that
-// was explicitly not real -- and wrong about the remedy, because it left a
-// simulated run with NO way to be driven at all after `run start` returned.
-//
-// Measured, and the reason this moved: `run prompt` on a quiescent simulated run
-// appended the cause, printed success, and changed nothing; its own closing line
-// then sent the user to `run unpause`, which refuses a running run outright. A
-// rehearsal that cannot be advanced is not a rehearsal of anything.
-//
-// The fake executor and the virtual clock are what --sim means, and they are
-// already what `run start` uses. Driving with them is the honest continuation:
-// no provider is called, no money is spent, and the loop, the reducer and the
-// log are the same ones a real run would use -- which is the property that makes
-// --sim worth trusting in the first place.
-func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID string, simulated bool) {
+// preflightEffectiveRun folds the confirmed log and verifies the immutable
+// execution contract before any caller takes the writer lock or appends.
+// driveEffectiveRun receives the already-loaded artifact, so no mutable provider
+// or policy store is consulted after the run begins.
+func preflightEffectiveRun(dir string) (kernel.State, runconfig.Artifact, []kernel.Event, error) {
+	pre, _, _, events, err := foldRunDirEvents(dir)
+	if err != nil {
+		return kernel.State{}, runconfig.Artifact{}, nil, err
+	}
+	effective, _, err := loadEffectiveForResume(dir, pre.RunID, events)
+	if err != nil {
+		return kernel.State{}, runconfig.Artifact{}, nil, err
+	}
+	if _, err := recoverExecution(events); err != nil {
+		return kernel.State{}, runconfig.Artifact{}, nil, fmt.Errorf("cannot resume safely: %w", err)
+	}
+	return pre, effective, events, nil
+}
+
+func recoverExecution(events []kernel.Event) (exec.Recovery, error) {
+	recovery, err := exec.Recover(events)
+	if err != nil {
+		return recovery, err
+	}
+	if !recovery.HasProgress {
+		return recovery, fmt.Errorf("this run has no durable exec.step_completed records; inspect it with run show or replay it, but starting external work from an inferred cursor could duplicate paid effects")
+	}
+	if len(recovery.Unknown) > 0 {
+		return recovery, fmt.Errorf("%d external work item(s) have unknown outcomes (%s); automatic redispatch is disabled", len(recovery.Unknown), recovery.Unknown[0])
+	}
+	return recovery, nil
+}
+
+func driveEffectiveRun(dir string, effective runconfig.Artifact, store *logstore.Store, runID string) {
+	cfg := effective.Config
+	simulated := effective.Mode == "sim"
 	var (
 		clock    exec.Clock
 		timekeep exec.Timekeeper
 		executor exec.Executor
 		now      func() string
 	)
+
+	events, err := store.Read(1, 0)
+	if err != nil {
+		fatal(fmt.Errorf("read durable execution progress: %w", err))
+	}
+	recovery, err := recoverExecution(events)
+	if err != nil {
+		fatal(fmt.Errorf("cannot resume safely: %w", err))
+	}
+	timers, err := exec.RecoverTimers(events)
+	if err != nil {
+		fatal(fmt.Errorf("cannot restore durable timers: %w", err))
+	}
 
 	if simulated {
 		// Built exactly as cmdRunStart builds it for --sim, and with the same
@@ -296,30 +309,20 @@ func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID
 		// from simulated time to now and back, and `event trace` reads those
 		// timestamps.
 		vc := exec.NewVirtualClock()
+		if err := vc.Restore(timers.NowMs, timers.Pending); err != nil {
+			fatal(fmt.Errorf("restore simulated timers: %w", err))
+		}
 		clock, timekeep, executor = vc, exec.VirtualTime{C: vc}, exec.NewFake()
 		now = func() string {
 			return time.UnixMilli(vc.NowMs()).UTC().Format(time.RFC3339Nano)
 		}
 	} else {
-		overrides, err := openPolicies().LoadAll()
-		if err != nil {
-			fatal(err)
-		}
-
 		rc := exec.NewRealClock()
-		clock, timekeep = rc, exec.RealTime{C: rc}
-		executor = &provider.Executor{
-			Resolver: providerResolver{openProviders()},
-			Members:  cfg.Members,
-			// No Prompt. The run's opening instruction is already in its log,
-			// and inventing one here would inject a second cause into a run
-			// that asked only to continue.
-			ToolPolicy: overrides,
-			Tools: &toolrun.Runner{
-				Root:   filepath.Join(dir, "workspace"),
-				Shared: cfg.Workspace == "shared",
-			},
+		if err := rc.Restore(timers.Pending); err != nil {
+			fatal(fmt.Errorf("restore live timers: %w", err))
 		}
+		clock, timekeep = rc, exec.RealTime{C: rc}
+		executor = runtimeExecutor(dir, effective)
 		now = func() string { return nowFunc().UTC().Format(time.RFC3339Nano) }
 	}
 
@@ -328,20 +331,8 @@ func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID
 		Clock:    clock,
 		Executor: executor,
 		Config:   cfg,
+		RunID:    runID,
 		Now:      now,
-	}
-
-	// Cursor is the log tip MINUS the event just appended, so run.unpaused is
-	// read and decided rather than absorbed into the starting state. Absorbing
-	// it would set the status to running and never run drainParked, so the
-	// resume would hand back nothing -- exactly the silent failure drainParked's
-	// own doc describes.
-	//
-	// See this file's header for why the tip is the honest cursor for a resume in
-	// a fresh process.
-	cursor := store.Head() - 1
-	if cursor < 0 {
-		cursor = 0
 	}
 
 	loop := &exec.Loop{
@@ -349,7 +340,7 @@ func driveResumedRun(dir string, cfg kernel.Config, store *logstore.Store, runID
 		Log:    store,
 		Time:   timekeep,
 		Config: cfg,
-		Cursor: cursor,
+		Cursor: recovery.Cursor,
 	}
 
 	out, err := loop.Run(context.Background())
@@ -447,7 +438,7 @@ func foldRunDirEvents(dir string) (kernel.State, kernel.Config, bool, []kernel.E
 // copy of it in attach.go would be the copy that keeps saying --dir after the
 // flag is renamed.
 func readRunLog(dir string) ([]byte, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "events.ndjson"))
+	read, err := logstore.ReadConfirmed(dir, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf(
@@ -455,17 +446,16 @@ func readRunLog(dir string) ([]byte, error) {
 					"  runs live under ./%s/<run-id> unless --dir said otherwise\n"+
 					"  see what is waiting: arxi inbox", dir, runsDir)
 		}
-		return nil, fmt.Errorf("read the log of %s: %w", dir, err)
+		return nil, fmt.Errorf("read the confirmed log of %s: %w", dir, err)
 	}
-	return raw, nil
+	return read.Bytes, nil
 }
 
 // runFrozenConfig loads the blueprint snapshot a run was started with.
 //
-// A missing snapshot is not fatal, matching internal/inbox: the events still
-// fold. What is lost is the roster, so the reducer cannot resume a member it
-// cannot find -- and driveResumedRun would then spawn nothing. Refusing to
-// invent a Config is the honest half of that.
+// A missing snapshot is not fatal for inspection, matching internal/inbox: the
+// events still fold. Execution preflight is stricter and rejects a missing or
+// mismatched snapshot because it cannot reproduce the original reducer config.
 func runFrozenConfig(dir string) (kernel.Config, error) {
 	snap, err := os.ReadFile(filepath.Join(dir, "blueprint.snapshot.yaml"))
 	switch {

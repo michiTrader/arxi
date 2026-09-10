@@ -101,14 +101,15 @@ func cmdStateUnlock(args []string) {
 
 	dir := resolveRunDir(runArg)
 
-	// Folded twice, per cmdStateLock, and for the same reason: this one answers "is
-	// that a run at all" without having taken the writer lock, because logstore.Open
-	// calls MkdirAll and a run id with a typo in it would otherwise leave an empty
-	// directory behind for `run list` to show as a run.
-	if _, _, _, err := foldRunDir(dir); err != nil {
+	// Preflight the immutable execution contract before taking the writer lock.
+	// The second state fold still happens under the lock for arbitration.
+	_, effective, _, err := preflightEffectiveRun(dir)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi state unlock: %v\n", err)
 		os.Exit(1)
 	}
+	cfg := effective.Config
+	simulated := effective.Mode == "sim"
 
 	// The writer lock is taken BEFORE the fold that decides, exactly as `state lock`
 	// does, and this command is the mirror image of the same race. It is a
@@ -130,7 +131,7 @@ func cmdStateUnlock(args []string) {
 	defer store.Close()
 	atExit(func() { store.Close() })
 
-	pre, cfg, simulated, err := foldRunDir(dir)
+	pre, _, _, err := foldRunDir(dir)
 	if err != nil {
 		// Unreachable in practice: the fold above just succeeded on this directory.
 		// Handled anyway rather than ignored, because carrying on would decide who holds
@@ -305,7 +306,7 @@ func cmdStateUnlock(args []string) {
 		fmt.Printf("  this run was started with --sim, so the turn is taken by the " +
 			"same fake executor: no model is called and no money is spent.\n")
 	}
-	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
+	driveEffectiveRun(dir, effective, store, pre.RunID)
 }
 
 // checkUnlockKey refuses the keys no lock could be held under.

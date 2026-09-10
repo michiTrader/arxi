@@ -14,6 +14,7 @@ import (
 // holding a handle to a record another command may be rewriting.
 type Resolution struct {
 	Provider  string
+	Protocol  string
 	Model     string
 	BaseURL   string
 	APIKeyEnv string
@@ -62,8 +63,8 @@ func Resolve(ps []Provider, ref string) (Resolution, error) {
 	if len(ps) == 0 {
 		return Resolution{}, fmt.Errorf("no providers are registered, so %q cannot "+
 			"be resolved to anything callable.\n"+
-			"  register one first: arxi provider add anthropic --api-key-env "+
-			"ANTHROPIC_API_KEY", ref)
+			"  register an OpenAI-compatible provider first, for example: "+
+			"arxi provider add openai --api-key-env OPENAI_API_KEY", ref)
 	}
 
 	type hit struct {
@@ -100,6 +101,12 @@ func Resolve(ps []Provider, ref string) (Resolution, error) {
 	}
 
 	h := hits[0]
+	protocol := h.p.EffectiveProtocol()
+	if protocol != ProtocolOpenAIChatCompletions {
+		return Resolution{}, fmt.Errorf("provider %s uses %s, but this build implements only %s.\n"+
+			"  no request was sent; register an OpenAI-compatible endpoint under a different provider name",
+			h.p.Name, protocol, ProtocolOpenAIChatCompletions)
+	}
 	if !h.m.Enabled {
 		return Resolution{}, fmt.Errorf("model %s/%s is disabled, so this run will "+
 			"not call it.\n"+
@@ -110,6 +117,7 @@ func Resolve(ps []Provider, ref string) (Resolution, error) {
 
 	return Resolution{
 		Provider:  h.p.Name,
+		Protocol:  protocol,
 		Model:     h.m.ID,
 		BaseURL:   h.p.BaseURL,
 		APIKeyEnv: h.p.APIKeyEnv,

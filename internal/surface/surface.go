@@ -117,6 +117,18 @@ func (c Cmd) CLI() string { return strings.Join(c.Path, " ") }
 // two vocabularies the mapping would have to be maintained by hand forever.
 func (c Cmd) ProtocolType() string { return strings.Join(c.Path, ".") }
 
+// InVersion reports whether the command belongs to a surface version. Since is
+// inclusive and DeprecatedIn is exclusive. A zero version is never a surface,
+// and a zero DeprecatedIn means the command has no declared upper bound.
+func (c Cmd) InVersion(version int) bool {
+	return version > 0 && c.Since > 0 && c.Since <= version &&
+		(c.DeprecatedIn == 0 || version < c.DeprecatedIn)
+}
+
+// HasVersion reports whether this build carries membership metadata for a
+// surface version. It deliberately does not negotiate future versions.
+func HasVersion(version int) bool { return version > 0 && version <= SurfaceVersion }
+
 func p(name, typ, desc string) Param   { return Param{Name: name, Type: typ, Desc: desc} }
 func req(pp Param) Param               { pp.Required = true; return pp }
 func pos(pp Param) Param               { pp.Positional = true; pp.Required = true; return pp }

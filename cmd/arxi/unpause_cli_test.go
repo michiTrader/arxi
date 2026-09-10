@@ -252,50 +252,13 @@ func TestASuccessfulResumeReleasesTheWriterLock(t *testing.T) {
 	}
 }
 
-// TestAFatalUnderTheLockDoesNotLockOutTheNextCommand is the second walk defect,
-// and the version of it that actually catches the bug.
-//
-// The first version of this test resumed a --sim run twice and asserted no lock
-// was left. It passed. It also passed with the fix REVERTED, which is how the
-// mistake was found: a --sim resume returns before the stopped-early branch, so
-// the os.Exit path being guarded was never reached. A guard that cannot fail is
-// not a guard, and the only way to know is to break the code and watch.
-//
-// So this reaches a path that IS taken. An unparseable policy file makes
-// openPolicies fatal, and openPolicies is called AFTER the lock is taken and
-// AFTER run.unpaused is appended. Measured before the fix: writer.lock survived
-// holding pid 5871, and the next command refused with
-//
-//	already open for writing by pid 5871 ... remove writer.lock by hand
-//
-// for a run whose log says it was successfully resumed.
-//
-// The advice is also dangerous to generalise: an operator who learns to delete
-// writer.lock after a crash will eventually delete a live one.
-func TestAFatalUnderTheLockDoesNotLockOutTheNextCommand(t *testing.T) {
+// Mutable policy files are not consulted during resume. The effective config
+// published at start is the execution contract, so later corruption cannot
+// change or brick the run.
+func TestResumeIgnoresPolicyMutationAfterStart(t *testing.T) {
 	dir := workdir(t)
 	run := budgetBlockedRun(t, dir)
 
-	// The run must not be simulated, or the command returns before it wires up
-	// the executor and the fatal is never reached. Patching the log is the
-	// honest way to say "pretend this was live": the flag is read off
-	// run.started, which is exactly the fact being overridden.
-	log := filepath.Join(dir, "runs", run, "events.ndjson")
-	raw, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	patched := strings.Replace(string(raw), `"simulated":true`, `"simulated":false`, 1)
-	if patched == string(raw) {
-		t.Fatalf("run.started does not carry simulated:true, so this test is "+
-			"no longer reaching the drive path:\n%s", raw)
-	}
-	if err := os.WriteFile(log, []byte(patched), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// policies/ is relative to the working directory, so this is the real file
-	// the real command reads.
 	if err := os.MkdirAll(filepath.Join(dir, "policies"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -305,31 +268,14 @@ func TestAFatalUnderTheLockDoesNotLockOutTheNextCommand(t *testing.T) {
 	}
 
 	got := arxi(t, dir, "run", "unpause", run, "--budget", "5")
-	if !strings.Contains(got.out, "backend.json") {
-		t.Fatalf("the bad policy file was not reached, so this test is not "+
-			"exercising a fatal under the lock:\n%s", got.out)
+	if got.code != 0 {
+		t.Fatalf("resume reread a mutable policy file: exit %d\n%s", got.code, got.out)
 	}
-
+	if strings.Contains(got.out, "backend.json") {
+		t.Errorf("resume reported the mutable policy file instead of its frozen policy: %s", got.out)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "runs", run, "writer.lock")); err == nil {
-		t.Errorf("writer.lock survived a fatal exit.\n\n" +
-			"os.Exit skips defers, so the lock outlived the process holding " +
-			"it. The run's log already says it was resumed, and the next " +
-			"command on it will refuse with a dead pid.")
-	}
-
-	// The symptom, from the user's side: the next command must work once the
-	// bad file is gone. This is what actually got reported before the fix.
-	if err := os.Remove(pol); err != nil {
-		t.Fatal(err)
-	}
-	next := arxi(t, dir, "run", "unpause", run, "--budget", "9")
-	if strings.Contains(next.out, "already open for writing") {
-		t.Errorf("the next command hit a stale writer lock:\n%s\n\n"+
-			"The previous process is gone and the run is fine; only the lock "+
-			"file disagrees.", next.out)
-	}
-	if next.code != 0 {
-		t.Errorf("the next command failed: exit %d\n%s", next.code, next.out)
+		t.Error("writer.lock survived a successful resume")
 	}
 }
 

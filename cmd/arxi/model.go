@@ -165,8 +165,8 @@ func cmdModelList(args []string) {
 		// step. `model list` on a fresh checkout is a question, and the answer
 		// has to include what to do about it.
 		fmt.Println("no models: no providers are registered yet.")
-		fmt.Printf("  register one: arxi provider add anthropic --api-key-env "+
-			"ANTHROPIC_API_KEY\n  known providers: %v\n", model.KnownNames())
+		fmt.Printf("  register one: arxi provider add openai --api-key-env "+
+			"OPENAI_API_KEY\n  known providers: %v\n", model.KnownNames())
 		return
 	}
 

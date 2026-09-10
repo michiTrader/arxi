@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	hostv1 "github.com/michiTrader/arxi/host/v1"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -61,6 +65,20 @@ func one(t *testing.T, line string) protoResponse {
 			"answer to the wrong question", len(rs))
 	}
 	return rs[0]
+}
+
+func oneSession(t *testing.T, session protoSession, line string) protoResponse {
+	t.Helper()
+	return handleLineSession(context.Background(), session, line)
+}
+
+func helloSession(t *testing.T, session protoSession) helloMsg {
+	t.Helper()
+	hello, err := protoHelloSession(context.Background(), &session)
+	if err != nil {
+		t.Fatalf("protoHelloSession: %v", err)
+	}
+	return hello
 }
 
 // Every line gets exactly one response, in order.
@@ -389,18 +407,288 @@ func TestTheHelloPrecedesEverythingAndDescribesTheProtocol(t *testing.T) {
 		if !want[ty] {
 			t.Errorf("hello lists %q as implemented but it is not even a protocol type", ty)
 		}
-		if _, ok := protoHandlers[ty]; !ok {
-			t.Errorf("hello claims %q is implemented and there is no handler.\n"+
-				"  consequence: the client sends it, gets not_implemented, and can "+
-				"no longer trust the one field that exists to spare it that", ty)
+		if _, static := protoHandlers[ty]; !static {
+			handler, lifecycle := lifecycleHandlers[ty]
+			if !lifecycle || !containsCapability(h.Capabilities, handler.capability) {
+				t.Errorf("hello claims %q is implemented and there is no effective handler.\n"+
+					"  consequence: the client sends it, gets not_implemented, and can "+
+					"no longer trust the one field that exists to spare it that", ty)
+			}
 		}
 	}
-	if len(h.Implemented) != len(protoHandlers) {
-		t.Errorf("hello lists %d implemented types and there are %d handlers.\n"+
-			"  consequence: a working capability is undiscoverable, so it is used "+
-			"by whoever read the source and by nobody else",
-			len(h.Implemented), len(protoHandlers))
+	if len(h.Implemented) != len(protoHandlers)+len(lifecycleHandlerDescriptors) {
+		t.Errorf("hello lists %d implemented types, but this session has %d static and %d effective lifecycle handlers.\n"+
+			"  consequence: a working capability is undiscoverable or an entry is duplicated",
+			len(h.Implemented), len(protoHandlers), len(lifecycleHandlerDescriptors))
 	}
+}
+
+type recordingLifecycleHost struct {
+	capabilities   hostv1.CapabilitySet
+	capabilityErr  error
+	capabilityReq  hostv1.CapabilitiesRequest
+	inspect        hostv1.InspectRequest
+	cancel         hostv1.CancelRequest
+	inspectCtx     context.Context
+	cancelCtx      context.Context
+	inspectStarted chan struct{}
+	blockInspect   bool
+	response       hostv1.Job
+	err            error
+}
+
+func (h *recordingLifecycleHost) Inspect(ctx context.Context, req hostv1.InspectRequest) (hostv1.Job, error) {
+	h.inspectCtx = ctx
+	h.inspect = req
+	if h.inspectStarted != nil {
+		close(h.inspectStarted)
+	}
+	if h.blockInspect {
+		<-ctx.Done()
+		return hostv1.Job{}, ctx.Err()
+	}
+	return h.response, h.err
+}
+
+func (h *recordingLifecycleHost) Cancel(ctx context.Context, req hostv1.CancelRequest) (hostv1.Job, error) {
+	h.cancelCtx = ctx
+	h.cancel = req
+	return h.response, h.err
+}
+
+func (h *recordingLifecycleHost) Capabilities(_ context.Context, req hostv1.CapabilitiesRequest) (hostv1.CapabilitySet, error) {
+	h.capabilityReq = req
+	return h.capabilities, h.capabilityErr
+}
+
+func TestConnectionPrincipalPropagatesToLifecycleDispatch(t *testing.T) {
+	host := &recordingLifecycleHost{response: hostv1.Job{ID: "r1"}}
+	principal := hostv1.Principal{ID: "socket-owner", Attributes: map[string]string{"tenant": "red"}}
+	session := newProtoSession(principal, host)
+	principal.Attributes["tenant"] = "changed-after-connect"
+
+	got := oneSession(t, session, `{"id":"inspect","type":"run.show","params":{"run":"r1"}}`)
+	if !got.OK {
+		t.Fatalf("run.show failed: %+v", got.Error)
+	}
+	if host.inspect.Principal.ID != "socket-owner" || host.inspect.Principal.Attributes["tenant"] != "red" {
+		t.Fatalf("inspect principal = %#v; connection identity was not propagated immutably", host.inspect.Principal)
+	}
+
+	got = oneSession(t, session, `{"id":"cancel","type":"run.cancel","params":{"run":"r1","reason":"operator request"}}`)
+	if !got.OK {
+		t.Fatalf("run.cancel failed: %+v", got.Error)
+	}
+	if host.cancel.Principal.ID != "socket-owner" || host.cancel.JobID != "r1" || host.cancel.Reason != "operator request" {
+		t.Fatalf("cancel request = %#v", host.cancel)
+	}
+}
+
+func TestLifecycleDispatchUsesConnectionContext(t *testing.T) {
+	host := &recordingLifecycleHost{
+		capabilities: hostv1.CapabilitySet{Capabilities: []hostv1.Capability{hostv1.CapabilityInspect}},
+		response:     hostv1.Job{ID: "r1"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var out strings.Builder
+	if err := serveConnSessionContext(ctx, strings.NewReader(`{"id":"1","type":"run.show","params":{"run":"r1"}}`), &out,
+		newProtoSession(hostv1.Principal{ID: "p"}, host)); err != nil {
+		t.Fatalf("serveConnSessionContext: %v", err)
+	}
+	cancel()
+	if host.inspectCtx == nil || !errors.Is(host.inspectCtx.Err(), context.Canceled) {
+		t.Fatalf("dispatch context error = %v, want connection cancellation", contextError(host.inspectCtx))
+	}
+}
+
+func contextError(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
+func TestConnectionCancellationEndsAnActiveHostCall(t *testing.T) {
+	host := &recordingLifecycleHost{
+		capabilities:   hostv1.CapabilitySet{Capabilities: []hostv1.Capability{hostv1.CapabilityInspect}},
+		inspectStarted: make(chan struct{}),
+		blockInspect:   true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var out strings.Builder
+	done := make(chan error, 1)
+	go func() {
+		done <- serveConnSessionContext(ctx, strings.NewReader(`{"id":"1","type":"run.show","params":{"run":"r1"}}`), &out,
+			newProtoSession(hostv1.Principal{ID: "p"}, host))
+	}()
+	<-host.inspectStarted
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("serveConnSessionContext error = %v, want clean completion or context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active host call did not end when the connection context was cancelled")
+	}
+}
+
+func TestHelloAdvertisesOnlyEffectiveRepresentableCapabilities(t *testing.T) {
+	host := &recordingLifecycleHost{capabilities: hostv1.CapabilitySet{Capabilities: []hostv1.Capability{
+		hostv1.CapabilitySubmit, hostv1.CapabilityInspect, hostv1.CapabilityApprove,
+		hostv1.CapabilitySubscribe, hostv1.CapabilityCancel, hostv1.CapabilityWait,
+	}}}
+	hello := helloSession(t, newProtoSession(hostv1.Principal{ID: "p"}, host))
+	if host.capabilityReq.Principal.ID != "p" {
+		t.Fatalf("capability snapshot principal = %#v, want connection principal", host.capabilityReq.Principal)
+	}
+
+	want := []hostv1.Capability{hostv1.CapabilityCancel, hostv1.CapabilityInspect}
+	if !reflect.DeepEqual(hello.Capabilities, want) {
+		t.Fatalf("hello capabilities = %#v, want %#v; unrepresentable or uninstalled operations must not be advertised", hello.Capabilities, want)
+	}
+	for _, ty := range []string{"run.show", "run.cancel"} {
+		if !containsString(hello.Implemented, ty) {
+			t.Errorf("effective capability %q is absent from implemented: %#v", ty, hello.Implemented)
+		}
+	}
+	for _, ty := range []string{"run.start", "run.attach", "inbox.approve"} {
+		if containsString(hello.Implemented, ty) {
+			t.Errorf("%q is advertised as implemented without a safe request/response adapter", ty)
+		}
+	}
+}
+
+func TestLifecycleDispatchRequiresCapabilityAdvertisedByHello(t *testing.T) {
+	host := &recordingLifecycleHost{response: hostv1.Job{ID: "r1"}}
+	var out strings.Builder
+	if err := serveConnSession(strings.NewReader(`{"id":"1","type":"run.show","params":{"run":"r1"}}`), &out,
+		newProtoSession(hostv1.Principal{ID: "p"}, host)); err != nil {
+		t.Fatalf("serveConnSession: %v", err)
+	}
+	var hello helloMsg
+	var response protoResponse
+	dec := json.NewDecoder(strings.NewReader(out.String()))
+	if err := dec.Decode(&hello); err != nil {
+		t.Fatalf("decode hello: %v", err)
+	}
+	if err := dec.Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if containsCapability(hello.Capabilities, hostv1.CapabilityInspect) || containsString(hello.Implemented, "run.show") {
+		t.Fatalf("hello unexpectedly advertised inspect: %#v", hello)
+	}
+	if response.OK || response.Error == nil || response.Error.Code != errNotImplemented {
+		t.Fatalf("unadvertised lifecycle dispatch response = %#v, want not_implemented", response)
+	}
+	if host.inspectCtx != nil {
+		t.Fatal("unadvertised lifecycle capability reached host dispatch")
+	}
+}
+
+func TestHelloDeduplicatesCapabilitiesAndImplementedTypes(t *testing.T) {
+	host := &recordingLifecycleHost{capabilities: hostv1.CapabilitySet{Capabilities: []hostv1.Capability{
+		hostv1.CapabilityInspect, hostv1.CapabilityInspect, hostv1.CapabilityCancel,
+	}}}
+	hello := helloSession(t, newProtoSession(hostv1.Principal{ID: "p"}, host))
+	wantCapabilities := []hostv1.Capability{hostv1.CapabilityCancel, hostv1.CapabilityInspect}
+	if !reflect.DeepEqual(hello.Capabilities, wantCapabilities) {
+		t.Fatalf("capabilities = %#v, want deduplicated %#v", hello.Capabilities, wantCapabilities)
+	}
+	for _, ty := range []string{"run.show", "run.cancel"} {
+		count := 0
+		for _, implemented := range hello.Implemented {
+			if implemented == ty {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("implemented contains %q %d times: %#v", ty, count, hello.Implemented)
+		}
+	}
+}
+
+func TestHelloFailsClosedWhenAuthorizationSnapshotFails(t *testing.T) {
+	host := &recordingLifecycleHost{capabilityErr: hostv1.NewError(hostv1.CodeInternal, "capabilities", "authorizer unavailable", nil)}
+	var out strings.Builder
+	err := serveConnSession(strings.NewReader(`{"id":"1","type":"schema"}`), &out,
+		newProtoSession(hostv1.Principal{ID: "p"}, host))
+	if err == nil || out.Len() != 0 {
+		t.Fatalf("serveConnSession error = %v, output = %q; no unauthorised hello or response may be emitted", err, out.String())
+	}
+}
+
+func TestLifecycleDenialAndConcealmentKeepHostDistinction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code hostv1.ErrorCode
+	}{
+		{name: "denied", code: hostv1.CodePermissionDenied},
+		{name: "concealed", code: hostv1.CodeNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := &recordingLifecycleHost{err: hostv1.NewError(tc.code, string(hostv1.CapabilityInspect), tc.name, nil)}
+			got := oneSession(t, newProtoSession(hostv1.Principal{ID: "p"}, host), `{"id":"1","type":"run.show","params":{"run":"secret"}}`)
+			if got.OK || got.Error == nil || got.Error.Code != string(tc.code) {
+				t.Fatalf("response = %#v, want host code %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestLifecycleErrorsPreserveStableResourceFields(t *testing.T) {
+	hostErr := hostv1.NewError(hostv1.CodePermissionDenied, string(hostv1.CapabilityInspect), "resource denied", nil)
+	hostErr.JobID = "secret"
+	hostErr.ItemID = "approval-3"
+	hostErr.AfterSeq = 41
+	host := &recordingLifecycleHost{err: hostErr}
+
+	got := oneSession(t, newProtoSession(hostv1.Principal{ID: "p"}, host), `{"id":"1","type":"run.show","params":{"run":"secret"}}`)
+	if got.OK || got.Error == nil {
+		t.Fatalf("response = %#v, want host failure", got)
+	}
+	if got.Error.Code != string(hostv1.CodePermissionDenied) || got.Error.Message != "resource denied" ||
+		got.Error.Operation != string(hostv1.CapabilityInspect) || got.Error.JobID != "secret" ||
+		got.Error.ItemID != "approval-3" || got.Error.AfterSeq != 41 {
+		t.Fatalf("wire host error lost stable fields: %#v", got.Error)
+	}
+}
+
+func TestLifecycleDispatchDoesNotTrustHelloSnapshotForResourceAuthorization(t *testing.T) {
+	host := &recordingLifecycleHost{
+		capabilities: hostv1.CapabilitySet{Capabilities: []hostv1.Capability{hostv1.CapabilityInspect}},
+		err:          hostv1.NewError(hostv1.CodePermissionDenied, string(hostv1.CapabilityInspect), "resource denied", nil),
+	}
+	session := newProtoSession(hostv1.Principal{ID: "p"}, host)
+	if hello := helloSession(t, session); !containsCapability(hello.Capabilities, hostv1.CapabilityInspect) {
+		t.Fatalf("preflight snapshot unexpectedly omitted inspect: %#v", hello.Capabilities)
+	}
+
+	got := oneSession(t, session, `{"id":"1","type":"run.show","params":{"run":"forbidden"}}`)
+	if got.OK || got.Error.Code != string(hostv1.CodePermissionDenied) {
+		t.Fatalf("resource denial was bypassed after hello advertised inspect: %#v", got)
+	}
+	if host.inspect.JobID != "forbidden" {
+		t.Fatalf("host did not receive exact resource for reauthorization: %#v", host.inspect)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCapability(capabilities []hostv1.Capability, want hostv1.Capability) bool {
+	for _, capability := range capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Every handler key must be a real protocol type.
@@ -586,6 +874,33 @@ func TestOKAndErrorNeverContradictEachOther(t *testing.T) {
 			t.Errorf("response %s carries code %q with no message.\n"+
 				"  consequence: every client reimplements the English, and they "+
 				"will not agree", r.ID, r.Error.Code)
+		}
+	}
+}
+
+func TestTheOneMiBLimitIncludesTheBoundary(t *testing.T) {
+	request := `{"id":"boundary","type":"schema"}`
+	line := request + strings.Repeat(" ", maxLineBytes-len(request))
+	if len(line) != maxLineBytes {
+		t.Fatalf("test line is %d bytes, want %d", len(line), maxLineBytes)
+	}
+
+	for _, ending := range []string{"\n", "\r\n"} {
+		var out strings.Builder
+		if err := serveConn(strings.NewReader(line+ending), &out); err != nil {
+			t.Fatalf("a request exactly at the 1 MiB limit with ending %q was rejected: %v", ending, err)
+		}
+		var hello helloMsg
+		var response protoResponse
+		dec := json.NewDecoder(strings.NewReader(out.String()))
+		if err := dec.Decode(&hello); err != nil {
+			t.Fatalf("decode hello: %v", err)
+		}
+		if err := dec.Decode(&response); err != nil {
+			t.Fatalf("decode boundary response: %v", err)
+		}
+		if response.ID != "boundary" || !response.OK || response.Error != nil {
+			t.Fatalf("boundary response = %#v; the line must be read whole and answered normally", response)
 		}
 	}
 }

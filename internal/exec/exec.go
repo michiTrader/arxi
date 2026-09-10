@@ -43,6 +43,14 @@ type Log interface {
 	// runner does not assign it either, for the same reason. Only the log does.
 	Append(events []kernel.Event) ([]kernel.Event, error)
 
+	// Read exposes confirmed events for durable work recovery. The runner rebuilds
+	// prepared/started/finished state from these records before dispatching.
+	Read(fromSeq, toSeq int64) ([]kernel.Event, error)
+
+	// Head returns the highest confirmed sequence. Snapshot reads it only after
+	// all preceding control effects have completed.
+	Head() int64
+
 	// Fold rebuilds the state up to untilSeq. The runner needs this to honour
 	// Snapshot, see the comment in runSnapshot.
 	Fold(c kernel.Config, untilSeq int64) (kernel.State, error)
@@ -61,8 +69,12 @@ type Log interface {
 // exercises. A `time.Sleep` hidden inside the runner would make that
 // impossible and would push everyone to test timeouts by not testing them.
 type Clock interface {
-	// SetTimer arms a timer that fires afterMs milliseconds from now.
-	SetTimer(id string, afterMs int64) error
+	// SetTimer arms a timer and returns the exact absolute deadline stored by
+	// the clock. Virtual clocks use logical milliseconds; real clocks use Unix
+	// milliseconds. Persisting this value is what makes restart restoration exact.
+	SetTimer(id string, afterMs int64) (deadlineMs int64, err error)
+	// NowMs returns the current instant on the same timeline as SetTimer.
+	NowMs() int64
 	// CancelTimer disarms a timer. Cancelling a timer that does not exist is
 	// NOT an error: the reducer legitimately cancels defensively (a stage that
 	// advanced before its timeout), and turning that into a failure would make
@@ -106,6 +118,25 @@ type Executor interface {
 // that is hardest to ever reproduce.
 var ErrUnorderedEffects = errors.New("effects are not ordered: control after independent")
 
+// ErrUnknownWork means an external dispatch crossed its durable start boundary
+// without a committed terminal outcome. Retrying could duplicate paid or
+// mutating work, so the run stops until a later reconciliation can establish
+// what happened.
+var ErrUnknownWork = errors.New("external work has an unknown outcome")
+
+// ErrNotDispatched marks an effect failure known to have happened before any
+// external action began. It is safe to record as failed and continue; every
+// unmarked error after ExecWorkStarted is conservatively ambiguous.
+var ErrNotDispatched = errors.New("external work was not dispatched")
+
+// NotDispatched marks cause as a certain pre-dispatch failure.
+func NotDispatched(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrNotDispatched, cause)
+}
+
 // Result is what one step of the runner produced.
 type Result struct {
 	// Events are the events appended to the log, with Seq assigned, in the
@@ -140,6 +171,9 @@ type Runner struct {
 	Clock    Clock
 	Executor Executor
 	Config   kernel.Config
+
+	// RunID is frozen into every deterministic work identity.
+	RunID string
 
 	// Now supplies the timestamp stamped onto events that arrive without one.
 	//
@@ -207,6 +241,277 @@ func (r *Runner) stamp(events []kernel.Event) []kernel.Event {
 		}
 	}
 	return events
+}
+
+// RunStep executes the effects decided from source under durable work records.
+// The full manifest is committed before any effect crosses a side-effect boundary.
+func (r *Runner) RunStep(ctx context.Context, source kernel.Event, fx []kernel.Effect) (Result, error) {
+	var res Result
+	work, err := manifest(r.RunID, source, fx)
+	if err != nil {
+		return res, err
+	}
+	progress, err := r.workProgress(source.Seq)
+	if err != nil {
+		return res, err
+	}
+	if progress.stepComplete {
+		return res, nil
+	}
+	if len(progress.prepared) == 0 {
+		if err := r.prepareStep(source, work); err != nil {
+			return res, err
+		}
+	} else if err := verifyManifest(work, progress.prepared); err != nil {
+		return res, err
+	}
+
+	split, err := controlPrefixLen(fx)
+	if err != nil {
+		return res, err
+	}
+	for i := range work[:split] {
+		if status := progress.finished[work[i].ID]; status != "" {
+			if status == "unknown" {
+				return res, fmt.Errorf("%w: work %s has a durable unknown terminal record", ErrUnknownWork, work[i].ID)
+			}
+			continue
+		}
+		if progress.started[work[i].ID] {
+			if err := r.finishUnknown(work[i], &res); err != nil {
+				return res, err
+			}
+			return res, fmt.Errorf("%w: work %s was started before restart; automatic redispatch is unsafe", ErrUnknownWork, work[i].ID)
+		}
+		if err := r.runDurableControl(ctx, work[i], &res); err != nil {
+			return res, err
+		}
+	}
+	remaining := make([]Work, 0, len(work)-split)
+	for i := range work[split:] {
+		w := work[split+i]
+		if status := progress.finished[w.ID]; status != "" {
+			if status == "unknown" {
+				return res, fmt.Errorf("%w: work %s has a durable unknown terminal record", ErrUnknownWork, w.ID)
+			}
+			continue
+		}
+		if progress.started[w.ID] {
+			if err := r.finishUnknown(w, &res); err != nil {
+				return res, err
+			}
+			return res, fmt.Errorf("%w: work %s was started before restart; automatic redispatch is unsafe", ErrUnknownWork, w.ID)
+		}
+		remaining = append(remaining, w)
+	}
+	if err := r.runDurableIndependent(ctx, remaining, &res); err != nil {
+		return res, err
+	}
+	if err := r.completeStep(source, work); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+type stepProgress struct {
+	prepared     map[string]bool
+	started      map[string]bool
+	finished     map[string]string
+	stepComplete bool
+}
+
+func (r *Runner) workProgress(sourceSeq int64) (stepProgress, error) {
+	p := stepProgress{prepared: map[string]bool{}, started: map[string]bool{}, finished: map[string]string{}}
+	events, err := r.Log.Read(1, 0)
+	if err != nil {
+		return p, fmt.Errorf("read durable work progress: %w", err)
+	}
+	for _, event := range events {
+		switch event.Type {
+		case kernel.ExecWorkPrepared:
+			if int64(event.Num("source_seq")) == sourceSeq {
+				p.prepared[event.Str("work_id")] = true
+			}
+		case kernel.ExecWorkStarted:
+			p.started[event.Str("work_id")] = true
+		case kernel.ExecWorkFinished:
+			p.finished[event.Str("work_id")] = event.Str("status")
+		case kernel.ExecStepCompleted:
+			if int64(event.Num("source_seq")) == sourceSeq {
+				p.stepComplete = true
+			}
+		}
+	}
+	return p, nil
+}
+
+func verifyManifest(work []Work, prepared map[string]bool) error {
+	if len(work) != len(prepared) {
+		return fmt.Errorf("durable manifest has %d work records, reducer produced %d", len(prepared), len(work))
+	}
+	for _, w := range work {
+		if !prepared[w.ID] {
+			return fmt.Errorf("durable manifest differs from reducer output at effect %d (%s)", w.EffectIndex, w.Kind)
+		}
+	}
+	return nil
+}
+
+func (r *Runner) finishUnknown(w Work, res *Result) error {
+	return r.finishWork(w, "unknown", nil,
+		fmt.Errorf("process stopped after external dispatch began and before a terminal outcome was committed"), res)
+}
+
+func (r *Runner) prepareStep(source kernel.Event, work []Work) error {
+	events := make([]kernel.Event, 0, len(work))
+	for _, w := range work {
+		events = append(events, r.progressEvent(kernel.ExecWorkPrepared, map[string]any{
+			"work_id": w.ID, "source_seq": w.SourceSeq, "source_event_id": w.SourceID,
+			"effect_index": w.EffectIndex, "effect_kind": w.Kind,
+			"effect_class": w.Class, "effect_digest": w.Digest,
+		}, w.Source))
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	if _, err := r.Log.Append(r.stamp(events)); err != nil {
+		return fmt.Errorf("append work manifest for source seq %d: %w", source.Seq, err)
+	}
+	return nil
+}
+
+func (r *Runner) progressEvent(kind kernel.EventType, payload map[string]any, source kernel.Event) kernel.Event {
+	event := kernel.Event{Type: kind, Source: kernel.SourceRuntime, Payload: payload}
+	if source.ID != "" {
+		event.CausedBy = []string{source.ID}
+		event.CorrelationID = source.CorrelationID
+		if event.CorrelationID == "" {
+			event.CorrelationID = source.ID
+		}
+		event.Depth = source.Depth + 1
+	}
+	return event
+}
+
+func (r *Runner) finishWork(w Work, status string, events []kernel.Event, cause error, res *Result) error {
+	payload := map[string]any{"work_id": w.ID, "status": status}
+	if cause != nil {
+		payload["error"] = cause.Error()
+	}
+	batch := append([]kernel.Event(nil), events...)
+	batch = append(batch, r.progressEvent(kernel.ExecWorkFinished, payload, w.Source))
+	written, err := r.Log.Append(r.stamp(batch))
+	if err != nil {
+		return fmt.Errorf("append terminal record for %s: %w", w.ID, err)
+	}
+	if len(written) > 1 {
+		res.Events = append(res.Events, written[:len(written)-1]...)
+	}
+	return nil
+}
+
+func (r *Runner) completeStep(source kernel.Event, work []Work) error {
+	ids := make([]string, len(work))
+	for i := range work {
+		ids[i] = work[i].ID
+	}
+	_, err := r.Log.Append(r.stamp([]kernel.Event{r.progressEvent(kernel.ExecStepCompleted, map[string]any{
+		"source_seq": source.Seq, "source_event_id": source.ID, "work_ids": ids,
+	}, source)}))
+	if err != nil {
+		return fmt.Errorf("append step completion for source seq %d: %w", source.Seq, err)
+	}
+	return nil
+}
+
+func (r *Runner) runDurableControl(ctx context.Context, w Work, res *Result) error {
+	switch v := w.Effect.(type) {
+	case kernel.Emit:
+		return r.finishWork(w, "completed", []kernel.Event{v.Event}, nil, res)
+	case kernel.SetTimer:
+		deadline, err := r.Clock.SetTimer(v.ID, v.FiresAtMs)
+		if err != nil {
+			_ = r.finishWork(w, "failed", nil, err, res)
+			return fmt.Errorf("set timer %s: %w", v.ID, err)
+		}
+		event := r.progressEvent(kernel.TimerScheduled, map[string]any{
+			"timer_id": v.ID, "after_ms": v.FiresAtMs, "deadline_ms": deadline,
+		}, w.Source)
+		return r.finishWork(w, "completed", []kernel.Event{event}, nil, res)
+	case kernel.CancelTimer:
+		if err := r.Clock.CancelTimer(v.ID); err != nil {
+			_ = r.finishWork(w, "failed", nil, err, res)
+			return fmt.Errorf("cancel timer %s: %w", v.ID, err)
+		}
+		event := r.progressEvent(kernel.TimerCancelled, map[string]any{"timer_id": v.ID}, w.Source)
+		return r.finishWork(w, "completed", []kernel.Event{event}, nil, res)
+	case kernel.Snapshot:
+		r.runSnapshot(res)
+		return r.finishWork(w, "completed", nil, nil, res)
+	default:
+		err := fmt.Errorf("unhandled control effect %T", w.Effect)
+		_ = r.finishWork(w, "failed", nil, err, res)
+		return err
+	}
+}
+
+func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, res *Result) error {
+	if len(work) == 0 {
+		return nil
+	}
+
+	type outcome struct {
+		events []kernel.Event
+		err    error
+	}
+	outcomes := make([]outcome, len(work))
+	var wg sync.WaitGroup
+	started := 0
+	var startErr error
+	for i := range work {
+		start := r.progressEvent(kernel.ExecWorkStarted, map[string]any{"work_id": work[i].ID}, work[i].Source)
+		if _, err := r.Log.Append(r.stamp([]kernel.Event{start})); err != nil {
+			startErr = fmt.Errorf("append start of %s: %w", work[i].ID, err)
+			break
+		}
+		started++
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					outcomes[i].err = fmt.Errorf("effect %T panicked: %v", work[i].Effect, p)
+				}
+			}()
+			outcomes[i].events, outcomes[i].err = r.dispatch(ctx, work[i].Effect)
+		}(i)
+	}
+	wg.Wait()
+	var ambiguous []string
+	for i := 0; i < started; i++ {
+		got := outcomes[i]
+		events := attribute(work[i].Effect, got.events)
+		status := "completed"
+		if got.err != nil {
+			if ev := turnFailure(work[i].Effect, got.events, got.err); ev != nil {
+				events = append(events, attribute(work[i].Effect, []kernel.Event{*ev})...)
+			}
+			status = "unknown"
+			if errors.Is(got.err, ErrNotDispatched) {
+				status = "failed"
+			} else {
+				ambiguous = append(ambiguous, work[i].ID)
+			}
+			res.Errs = append(res.Errs, got.err)
+		}
+		if err := r.finishWork(work[i], status, events, got.err, res); err != nil {
+			return err
+		}
+	}
+	if len(ambiguous) > 0 {
+		return fmt.Errorf("%w: %d dispatched work item(s), first %s", ErrUnknownWork, len(ambiguous), ambiguous[0])
+	}
+	return startErr
 }
 
 // Run executes one effect list under the rule from ADR-0003: the control
@@ -280,7 +585,7 @@ func (r *Runner) runControl(ctx context.Context, e kernel.Effect, res *Result) e
 		return nil
 
 	case kernel.SetTimer:
-		if err := r.Clock.SetTimer(v.ID, v.FiresAtMs); err != nil {
+		if _, err := r.Clock.SetTimer(v.ID, v.FiresAtMs); err != nil {
 			return fmt.Errorf("set timer %s: %w", v.ID, err)
 		}
 		return nil
@@ -292,7 +597,7 @@ func (r *Runner) runControl(ctx context.Context, e kernel.Effect, res *Result) e
 		return nil
 
 	case kernel.Snapshot:
-		r.runSnapshot(v, res)
+		r.runSnapshot(res)
 		return nil
 
 	default:
@@ -317,13 +622,14 @@ func (r *Runner) runControl(ctx context.Context, e kernel.Effect, res *Result) e
 // Second, a snapshot that cannot be written is not a failed run. The run is
 // still entirely correct, it is only slower to inspect. Aborting because a
 // cache write failed would invert ADR-0002 and make an optimization mandatory.
-func (r *Runner) runSnapshot(v kernel.Snapshot, res *Result) {
-	st, err := r.Log.Fold(r.Config, v.AtSeq)
+func (r *Runner) runSnapshot(res *Result) {
+	atSeq := r.Log.Head()
+	st, err := r.Log.Fold(r.Config, atSeq)
 	if err != nil {
 		res.SnapshotSkipped++
 		return
 	}
-	if err := r.Log.WriteSnapshot(st, v.AtSeq); err != nil {
+	if err := r.Log.WriteSnapshot(st, atSeq); err != nil {
 		res.SnapshotSkipped++
 	}
 }

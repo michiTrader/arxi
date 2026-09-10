@@ -121,6 +121,219 @@ func newRunner() (*Runner, *memLog, *Fake, *VirtualClock) {
 	return &Runner{Log: log, Clock: clock, Executor: fake, Config: kernel.Config{}}, log, fake, clock
 }
 
+func testSource(seq int64) kernel.Event {
+	return kernel.Event{Seq: seq, ID: fmt.Sprintf("source-%d", seq), Type: kernel.RunStarted,
+		CorrelationID: "source-1", Source: kernel.SourceHuman}
+}
+
+func typesOf(events []kernel.Event) []kernel.EventType {
+	out := make([]kernel.EventType, len(events))
+	for i := range events {
+		out[i] = events[i].Type
+	}
+	return out
+}
+
+func TestRecoverDerivesCompletedDomainFrontier(t *testing.T) {
+	events := []kernel.Event{
+		{Seq: 1, Type: kernel.RunStarted},
+		{Seq: 2, Type: kernel.ExecWorkPrepared, Payload: map[string]any{"work_id": "w1", "source_seq": int64(1)}},
+		{Seq: 3, Type: kernel.ExecWorkFinished, Payload: map[string]any{"work_id": "w1", "status": "completed"}},
+		{Seq: 4, Type: kernel.ExecStepCompleted, Payload: map[string]any{"source_seq": int64(1)}},
+		{Seq: 5, Type: kernel.StageEntered},
+		{Seq: 6, Type: kernel.ExecStepCompleted, Payload: map[string]any{"source_seq": int64(5)}},
+		{Seq: 7, Type: kernel.RunPrompt},
+	}
+	got, err := Recover(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Cursor != 5 || !got.HasProgress {
+		t.Fatalf("recovery = %#v, want cursor 5 with progress", got)
+	}
+
+	bad := append([]kernel.Event(nil), events...)
+	bad[5].Payload = map[string]any{"source_seq": int64(7)}
+	if _, err := Recover(bad); err == nil {
+		t.Fatal("accepted a completion that skipped unfinished domain seq 5")
+	}
+}
+
+func TestRecoverSurfacesUnknownAndMalformedRecords(t *testing.T) {
+	events := []kernel.Event{
+		{Seq: 1, Type: kernel.RunStarted},
+		{Seq: 2, Type: kernel.ExecWorkPrepared, Payload: map[string]any{"work_id": "w", "source_seq": int64(1)}},
+		{Seq: 3, Type: kernel.ExecWorkStarted, Payload: map[string]any{"work_id": "w"}},
+		{Seq: 4, Type: kernel.ExecWorkFinished, Payload: map[string]any{"work_id": "w", "status": "unknown"}},
+	}
+	got, err := Recover(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Unknown, []string{"w"}) {
+		t.Fatalf("unknown work = %v", got.Unknown)
+	}
+	events[1].Payload["source_seq"] = 1.5
+	if _, err := Recover(events); err == nil {
+		t.Fatal("accepted fractional source_seq")
+	}
+}
+
+func TestDurableManifestIdentityIsCanonical(t *testing.T) {
+	source := testSource(7)
+	a, err := manifest("run-1", source, []kernel.Effect{kernel.CallTool{
+		Agent: "builder", Tool: "write", Args: map[string]any{"z": 1, "a": []any{"x", nil}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := manifest("run-1", source, []kernel.Effect{kernel.CallTool{
+		Agent: "builder", Tool: "write", Args: map[string]any{"a": []any{"x", nil}, "z": 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a[0].ID != b[0].ID || a[0].Digest != b[0].Digest {
+		t.Fatalf("map insertion order changed work identity: %s/%s vs %s/%s",
+			a[0].ID, a[0].Digest, b[0].ID, b[0].Digest)
+	}
+
+	empty, _ := manifest("run-1", source, []kernel.Effect{kernel.CallTool{Args: map[string]any{}}})
+	nilArgs, _ := manifest("run-1", source, []kernel.Effect{kernel.CallTool{Args: nil}})
+	if empty[0].Digest == nilArgs[0].Digest {
+		t.Fatal("canonical-effect-v1 collapsed empty and nil tool args")
+	}
+	otherRun, _ := manifest("run-2", source, []kernel.Effect{kernel.CallTool{
+		Agent: "builder", Tool: "write", Args: map[string]any{"a": []any{"x", nil}, "z": 1},
+	}})
+	if a[0].ID == otherRun[0].ID {
+		t.Fatal("work identity did not include run id")
+	}
+}
+
+func TestRunStepCommitsManifestBeforeDispatchAndCompletesEmptyStep(t *testing.T) {
+	r, log, fake, _ := newRunner()
+	r.RunID = "run-1"
+	if _, err := r.RunStep(context.Background(), testSource(1), []kernel.Effect{
+		kernel.SpawnTurn{Agent: "a"}, kernel.SpawnTurn{Agent: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := typesOf(log.events)
+	wantPrefix := []kernel.EventType{kernel.ExecWorkPrepared, kernel.ExecWorkPrepared,
+		kernel.ExecWorkStarted, kernel.ExecWorkStarted}
+	if !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("durable order got %v, want prefix %v", got, wantPrefix)
+	}
+	if len(fake.Calls) != 2 {
+		t.Fatalf("dispatched %d effects, want 2", len(fake.Calls))
+	}
+
+	emptySource := testSource(99)
+	if _, err := r.RunStep(context.Background(), emptySource, nil); err != nil {
+		t.Fatal(err)
+	}
+	last := log.events[len(log.events)-1]
+	if last.Type != kernel.ExecStepCompleted || int64(last.Num("source_seq")) != emptySource.Seq {
+		t.Fatalf("empty step ended with %#v, want its exec.step_completed", last)
+	}
+}
+
+func TestRunStepRecoveryDoesNotRepeatFinishedOrAmbiguousWork(t *testing.T) {
+	t.Run("finished without step marker", func(t *testing.T) {
+		r, log, fake, _ := newRunner()
+		r.RunID = "run-1"
+		source := testSource(3)
+		work, _ := manifest(r.RunID, source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}})
+		_ = r.prepareStep(source, work)
+		_ = r.finishWork(work[0], "completed", nil, nil, &Result{})
+		if _, err := r.RunStep(context.Background(), source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.Calls) != 0 {
+			t.Fatalf("finished work was dispatched %d time(s)", len(fake.Calls))
+		}
+		if log.events[len(log.events)-1].Type != kernel.ExecStepCompleted {
+			t.Fatal("recovery did not close the source step")
+		}
+	})
+
+	t.Run("prepared may dispatch", func(t *testing.T) {
+		r, _, fake, _ := newRunner()
+		r.RunID = "run-1"
+		source := testSource(4)
+		work, _ := manifest(r.RunID, source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}})
+		_ = r.prepareStep(source, work)
+		if _, err := r.RunStep(context.Background(), source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.Calls) != 1 {
+			t.Fatalf("prepared work dispatched %d time(s), want 1", len(fake.Calls))
+		}
+	})
+
+	t.Run("started becomes unknown", func(t *testing.T) {
+		r, log, fake, _ := newRunner()
+		r.RunID = "run-1"
+		source := testSource(5)
+		work, _ := manifest(r.RunID, source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}})
+		_ = r.prepareStep(source, work)
+		_, _ = log.Append([]kernel.Event{r.progressEvent(kernel.ExecWorkStarted,
+			map[string]any{"work_id": work[0].ID}, source)})
+		if _, err := r.RunStep(context.Background(), source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}}); !errors.Is(err, ErrUnknownWork) {
+			t.Fatalf("started recovery error = %v, want ErrUnknownWork", err)
+		}
+		if len(fake.Calls) != 0 {
+			t.Fatalf("ambiguous work was redispatched %d time(s)", len(fake.Calls))
+		}
+		last := log.events[len(log.events)-1]
+		if last.Type != kernel.ExecWorkFinished || last.Str("status") != "unknown" {
+			t.Fatalf("ambiguous work ended with %#v", last)
+		}
+		if _, err := r.RunStep(context.Background(), source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}}); !errors.Is(err, ErrUnknownWork) {
+			t.Fatalf("durable unknown was not blocking: %v", err)
+		}
+	})
+	t.Run("current ambiguous dispatch blocks the step", func(t *testing.T) {
+		r, log, _, _ := newRunner()
+		r.RunID = "run-1"
+		r.Executor = panicExecutor{}
+		source := testSource(6)
+		res, err := r.RunStep(context.Background(), source, []kernel.Effect{kernel.SpawnTurn{Agent: "a"}})
+		if !errors.Is(err, ErrUnknownWork) {
+			t.Fatalf("ambiguous dispatch error = %v, want ErrUnknownWork", err)
+		}
+		if len(res.Errs) != 1 {
+			t.Fatalf("ambiguous dispatch exposed %d effect errors, want 1", len(res.Errs))
+		}
+		last := log.events[len(log.events)-1]
+		if last.Type != kernel.ExecWorkFinished || last.Str("status") != "unknown" {
+			t.Fatalf("ambiguous dispatch ended with %#v", last)
+		}
+		for _, event := range log.events {
+			if event.Type == kernel.ExecStepCompleted {
+				t.Fatal("ambiguous work incorrectly completed its source step")
+			}
+		}
+	})
+}
+
+func TestRunStepAppendsOutcomeAndFinishAtomically(t *testing.T) {
+	r, log, _, _ := newRunner()
+	r.RunID = "run-1"
+	if _, err := r.RunStep(context.Background(), testSource(6), []kernel.Effect{
+		kernel.Emit{Event: kernel.Event{Type: kernel.StageEntered}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := typesOf(log.events)
+	want := []kernel.EventType{kernel.ExecWorkPrepared, kernel.StageEntered,
+		kernel.ExecWorkFinished, kernel.ExecStepCompleted}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("durable control order got %v, want %v", got, want)
+	}
+}
+
 func emit(t kernel.EventType) kernel.Effect {
 	return kernel.Emit{Event: kernel.Event{ID: string(t), Type: t}}
 }
@@ -715,7 +928,7 @@ func (panicExecutor) AskHuman(ctx context.Context, e kernel.AskHuman) ([]kernel.
 // TestSnapshotIsRefoldedFromTheLog protects ADR-0002 the practical way: the
 // snapshot must reflect the state AFTER the control Emits that preceded it,
 // because a cache that disagrees with the log is a wrong answer served fast.
-func TestSnapshotIsRefoldedFromTheLog(t *testing.T) {
+func TestSnapshotMatchesTheConfirmedHeadAfterPrecedingEmits(t *testing.T) {
 	r, log, _, _ := newRunner()
 
 	fx := []kernel.Effect{
@@ -723,22 +936,28 @@ func TestSnapshotIsRefoldedFromTheLog(t *testing.T) {
 			ID: "e1", Type: kernel.RunStarted,
 			Payload: map[string]any{"run_id": "r1", "actor": "me", "budget_usd": 1.0},
 		}},
-		kernel.Snapshot{AtSeq: 0}, // 0 means "everything appended so far"
+		kernel.Emit{Event: kernel.Event{
+			ID: "e2", Type: kernel.RunPaused,
+		}},
+		kernel.Snapshot{},
 	}
 	if _, err := r.Run(context.Background(), fx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	st, ok := log.snapshots[0]
+	at := log.Head()
+	st, ok := log.snapshots[at]
 	if !ok {
-		t.Fatal("no snapshot was written")
+		t.Fatalf("no snapshot was written at confirmed head %d; snapshots: %v", at, log.snapshots)
 	}
-	if st.RunID != "r1" {
-		t.Fatalf("the snapshot has RunID %q, want %q. The snapshot must be re-folded "+
-			"from the log AFTER the preceding control Emits, not taken from a "+
-			"state captured before them: a snapshot that disagrees with the log "+
-			"is read in preference to the log, so it serves a wrong answer fast. "+
-			"Remedy: keep the Log.Fold call inside runSnapshot.", st.RunID, "r1")
+	want, err := log.Fold(r.Config, at)
+	if err != nil {
+		t.Fatalf("fold confirmed head %d: %v", at, err)
+	}
+	if !reflect.DeepEqual(st, want) {
+		t.Fatalf("snapshot at seq %d differs from Fold(config, seq):\n snapshot: %#v\n fold: %#v\n"+
+			"the snapshot must capture the head after every preceding control Emit, or the cache serves a state the log does not justify",
+			at, st, want)
 	}
 }
 
@@ -754,7 +973,7 @@ func TestSnapshotFailureDoesNotFailTheRun(t *testing.T) {
 			r, log, _, _ := newRunner()
 			setup(log)
 
-			res, err := r.Run(context.Background(), []kernel.Effect{kernel.Snapshot{AtSeq: 1}})
+			res, err := r.Run(context.Background(), []kernel.Effect{kernel.Snapshot{}})
 			if err != nil {
 				t.Fatalf("Run failed because a SNAPSHOT could not be written: %v. The "+
 					"snapshot is a cache and the log is the truth (ADR-0002): the run "+

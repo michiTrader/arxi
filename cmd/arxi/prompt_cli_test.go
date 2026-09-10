@@ -108,16 +108,18 @@ func quiescentRun(t *testing.T, dir string) string {
 		"  - {name: frontend, role: implementer, tools: [read]}\n" +
 		"stages:\n" +
 		"  - {name: build, advance_when: all}\n"
+	rawBP := []byte(bp)
 	if err := os.WriteFile(filepath.Join(run, "blueprint.snapshot.yaml"),
-		[]byte(bp), 0o644); err != nil {
+		rawBP, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	contract := installSimEffective(t, run, id, rawBP)
 
 	// backend's submit lands BEFORE its turn_done because that is the only order a
 	// real run produces: an agent submits by calling a tool while its turn is open.
 	// applyTurnDone's Submitted exception depends on that order, so a fixture with
 	// the two swapped would exercise a path the runtime never takes.
-	log := `{"id":"e1","seq":1,"ts":"2026-01-01T00:00:00Z","type":"run.started","source":"human","payload":{"actor":"feature-team","run_id":"q1","budget_usd":10,"simulated":true}}
+	log := `{"id":"e1","seq":1,"ts":"2026-01-01T00:00:00Z","type":"run.started","source":"human","payload":{"actor":"feature-team","run_id":"q1","budget_usd":10,"simulated":true` + contract + `}}
 {"id":"e2","seq":2,"ts":"2026-01-01T00:00:01Z","type":"stage.entered","source":"system","payload":{"stage":"build","index":0}}
 {"id":"e3","seq":3,"ts":"2026-01-01T00:00:02Z","type":"agent.activated","source":"system","actor":"backend","payload":{"agent":"backend"}}
 {"id":"e4","seq":4,"ts":"2026-01-01T00:00:03Z","type":"agent.activated","source":"system","actor":"frontend","payload":{"agent":"frontend"}}
@@ -125,10 +127,11 @@ func quiescentRun(t *testing.T, dir string) string {
 {"id":"e6","seq":6,"ts":"2026-01-01T00:00:05Z","type":"agent.turn_done","source":"system","actor":"backend","payload":{"agent":"backend"}}
 {"id":"e7","seq":7,"ts":"2026-01-01T00:00:06Z","type":"agent.turn_done","source":"system","actor":"frontend","payload":{"agent":"frontend"}}
 `
-	if err := os.WriteFile(filepath.Join(run, "events.ndjson"),
-		[]byte(log), 0o644); err != nil {
+	path := filepath.Join(run, "events.ndjson")
+	if err := os.WriteFile(path, []byte(log), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	installFixtureProgress(t, path)
 	return id
 }
 

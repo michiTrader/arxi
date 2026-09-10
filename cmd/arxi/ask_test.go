@@ -183,10 +183,10 @@ func TestAskModelNoteNamesWhatTheRosterWillUse(t *testing.T) {
 	}
 }
 
-// The one-off team has to be a real blueprint, because executeRun freezes bp.Raw
-// into the run directory as blueprint.snapshot.yaml. A Config assembled in place
-// would leave Raw empty, the snapshot unparseable, and `arxi run why` unable to fold
-// the run the user just paid for.
+// The one-off team has to be a real blueprint, because durable acceptance freezes
+// bp.Raw into the run directory as blueprint.snapshot.yaml. A Config assembled in
+// place would leave Raw empty, the snapshot unparseable, and `arxi run why` unable
+// to fold the run the user just paid for.
 func TestEphemeralAgentIsARunnableBlueprint(t *testing.T) {
 	bp, err := ephemeralAgent(defaultAgentName, "openai/gpt-4o-mini")
 	if err != nil {
@@ -194,7 +194,7 @@ func TestEphemeralAgentIsARunnableBlueprint(t *testing.T) {
 	}
 	if len(bp.Raw) == 0 {
 		t.Error("bp.Raw is empty.\n" +
-			"  consequence: executeRun writes an empty blueprint.snapshot.yaml, and the " +
+			"  consequence: durable acceptance writes an empty blueprint.snapshot.yaml, and the " +
 			"run cannot be replayed or explained afterwards.")
 	}
 	if len(bp.Config.Stages) == 0 {

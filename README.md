@@ -14,8 +14,8 @@ Everything else is a consequence of that.
 ```bash
 go build -o arxi ./cmd/arxi
 
-arxi provider add anthropic --api-key-env ANTHROPIC_API_KEY
-arxi -p "ping" -m anthropic/claude-sonnet-4-6
+arxi provider add openai --api-key-env OPENAI_API_KEY
+arxi -p "ping" -m openai/gpt-5.1
 ```
 
 Three commands, and the third one is the product. `provider add` fills in the
@@ -523,7 +523,7 @@ directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
 |---|---|---|
-| the engine — event types the reducer folds | **33 / 33 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
+| the engine — event types the reducer folds | **40 / 40 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
 | the CLI surface | **50 / 50 — 100.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
@@ -1011,16 +1011,20 @@ Decoding that half is a parse error, and the follow would die on a log that is
 perfectly healthy. So only whole lines — up to the last newline — are ever
 decoded, and the remainder is held for the next read.
 
-**A batch that was never committed must not be shown.** `logstore` writes
-`pending.commit`, then the events, then removes the marker; the next `Open` rolls
-an uncommitted tail back. A follower that printed those bytes would report an
-event that a later `arxi event log` on the same run does not have — the follower
-would be its only witness. So `logstore.BatchInFlight` is consulted **after** each
-read, which is what makes the answer sound: no marker *now* proves the bytes just
-read are durable. When the writer dies mid-batch, the footer names the byte count
-being withheld and says the next command will roll it back, rather than printing
-lines that are about to stop existing or going quiet, which reads as the log
-simply stopping.
+**A batch that was never committed must not be shown.** `logstore` writes a
+versioned `pending.commit` containing a commit id and the pre-append byte offset,
+then the events, then removes the marker; the next `Open` rolls an uncommitted
+tail back. A follower that printed those bytes would report an event that a later
+`arxi event log` on the same run does not have — the follower would be its only
+witness. All lock-free readers therefore use `logstore.ReadConfirmed`, which
+samples the marker around one log read, limits visibility to the recorded offset,
+and returns only complete lines plus a safe next offset. The initial attach join
+and every follow poll use that same boundary, so even a complete provisional line
+already present before attach starts cannot enter the folded state or advance the
+join point. When the writer dies mid-batch, the footer names the byte count being
+withheld and says the next command will roll it back, rather than printing lines
+that are about to stop existing or going quiet, which reads as the log simply
+stopping.
 
 The lock is sampled **before** each read, and the order is the whole argument for
 why the tail cannot be lost: if the lock is gone at time T, nothing appends after
@@ -2217,17 +2221,19 @@ UPDATE_GOLDEN=1 go test ./internal/kernel
 | path | what is there |
 |---|---|
 | [`docs/design/30-vision.md`](docs/design/30-vision.md) | the intended product direction, its boundaries and the decisions deliberately left open |
+| [`docs/roadmap.md`](docs/roadmap.md) | the proposed implementation order from runtime foundations through governed memory and Asha |
 | [`docs/design/20-use-cases.md`](docs/design/20-use-cases.md) | every command, reached by walking eleven realistic scenarios |
 | [`docs/design/10-execution.md`](docs/design/10-execution.md) | the full execution model |
 | [`docs/adr/`](docs/adr/) | why each accepted decision exists, and what breaks if it is reverted |
 | [`spec/events.md`](spec/events.md) | the current event catalogue and the `blocked_ref` contract |
 
 Start with the vision to understand where the product is intended to go and the
-boundaries it must preserve. Start with the use cases to learn what works today,
-with the ADRs to learn why accepted decisions were made, and with the specs when
-you need the contracts current implementations must obey. The use-case document
-is enforced by tests: a capability no scenario reaches, or an example using a verb
-that does not exist, fails the build.
+boundaries it must preserve. Continue with the roadmap for the proposed delivery
+order and the evidence required before later capabilities begin. Start with the
+use cases to learn what works today, with the ADRs to learn why accepted decisions
+were made, and with the specs when you need the contracts current implementations
+must obey. The use-case document is enforced by tests: a capability no scenario
+reaches, or an example using a verb that does not exist, fails the build.
 
 The ADRs are the best entry point for an accepted architectural choice: each one
 says what was decided, which alternative was discarded and **which test enforces

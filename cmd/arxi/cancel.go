@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	hostv1 "github.com/michiTrader/arxi/host/v1"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/surface"
@@ -89,88 +91,97 @@ func cmdRunCancel(args []string) {
 		id = filepath.Base(dir)
 	}
 
-	if pre.Status.Terminal() {
-		printCancelRefusal(pre, id, events)
+	var seq int64
+	// The public host addresses a run by storage root and JobID. A run reached by an
+	// arbitrary path can have a recorded run id different from its directory's
+	// basename; routing that through Host.Cancel would rewrite the event scope to
+	// the basename and change the CLI's established custom-directory semantics.
+	// Keep that incompatible presentation/storage edge on the legacy append path.
+	if filepath.Base(dir) != id {
+		seq, err = cancelRunAtCustomDir(dir, pre, id, reason)
+	} else {
+		host := hostv1.New(hostv1.Options{Storage: newFilesystemJobStorage(filepath.Dir(dir)), Now: nowFunc})
+		defer host.Close()
+		atExit(func() { _ = host.Close() })
+		var job hostv1.Job
+		job, err = host.Cancel(context.Background(), hostv1.CancelRequest{
+			Principal: hostv1.Principal{ID: "local"}, JobID: hostv1.JobID(id), Reason: reason,
+		})
+		seq = job.Sequence
+	}
+	if err != nil {
+		var terminal *customCancelTerminalError
+		if hostv1.IsCode(err, hostv1.CodeAlreadyTerminal) || errors.As(err, &terminal) {
+			printCancelRefusal(pre, id, events)
+			os.Exit(1)
+		}
+		if hostv1.IsCode(err, hostv1.CodeConflict) || !isHostError(err) {
+			var locked *logstore.LockedError
+			if errors.As(err, &locked) {
+				fmt.Fprintf(os.Stderr, "arxi run cancel: run %s is being driven right now by %s, so it cannot be cancelled from here.\n"+
+					"  one writer per log: the process holding it is the only thing that may append, and this command is not it.\n"+
+					"  stop that process (Ctrl-C) -- it stops at the next quiescence, and then this command works.\n"+
+					"  do NOT delete %s: two writers produce duplicate seq and a log that no longer folds.\n",
+					id, locked.Owner, filepath.Join(dir, "writer.lock"))
+				os.Exit(1)
+			}
+			var cas *logstore.CASError
+			if errors.As(err, &cas) {
+				fmt.Fprintf(os.Stderr, "arxi run cancel: run %s moved while this command was deciding (it was at seq %d, the log is at seq %d).\n"+
+					"  nothing was written, and this is the case worth re-reading: the run may have finished on its own.\n"+
+					"  what it is now: arxi run show %s\n", id, cas.Expected, cas.Actual, id)
+				os.Exit(1)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "arxi run cancel: %v\n", err)
 		os.Exit(1)
-	}
-
-	store, err := logstore.Open(dir)
-	if err != nil {
-		var locked *logstore.LockedError
-		if errors.As(err, &locked) {
-			// Deliberately not locked.Error(): its advice is to remove
-			// writer.lock by hand, which is right for a lock left by a dead
-			// process and dangerous here, where the refusal happens BECAUSE the
-			// writer is alive. Two writers produce duplicate seq and an
-			// unfoldable log.
-			fmt.Fprintf(os.Stderr, "arxi run cancel: run %s is being driven right "+
-				"now by %s, so it cannot be cancelled from here.\n"+
-				"  one writer per log: the process holding it is the only thing "+
-				"that may append, and this command is not it.\n"+
-				"  stop that process (Ctrl-C) -- it stops at the next quiescence, "+
-				"and then this command works.\n"+
-				"  do NOT delete %s: two writers produce duplicate seq and a log "+
-				"that no longer folds.\n",
-				id, locked.Owner, filepath.Join(dir, "writer.lock"))
-			os.Exit(1)
-		}
-		fatal(err)
-	}
-	defer store.Close()
-	atExit(func() { store.Close() })
-
-	payload := map[string]any{}
-	if reason != "" {
-		payload["reason"] = reason
-	}
-
-	ev := kernel.Event{
-		ID:   "cancel-" + strconv.FormatInt(store.Head()+1, 10),
-		Type: kernel.RunCancelled,
-		// A cancel is somebody's decision, and an audit that cannot tell it from
-		// a run the runtime failed cannot answer why the work stopped.
-		Source: kernel.SourceHuman,
-		Scope:  "run:" + id,
-		// Stamped here because nothing else will: this append does not go through
-		// the effect runner. Measured omission -- inbox replies landed with
-		// "ts":"" for exactly this reason.
-		Ts: nowFunc().UTC().Format(time.RFC3339),
-		// reason? per spec/events.md:41, and omitted entirely when absent rather
-		// than written as "". `run result` treats a non-empty reason as the run's
-		// result text (runresult.go:199), so an empty string would give a
-		// cancelled run a result that is one blank line.
-		Payload: payload,
-	}
-
-	// AppendIfSeq, not Append: the terminal-status refusal above was decided from
-	// a state folded at pre.Seq, and this makes the append conditional on the log
-	// still being there. Without the CAS, a cancel racing a run that is finishing
-	// records a human cancelling a run that had already succeeded -- and the
-	// reducer, having reached terminal first, ignores it. The log would then say
-	// the run was cancelled and `run result` would say it succeeded.
-	written, err := store.AppendIfSeq(pre.Seq, []kernel.Event{ev})
-	if err != nil {
-		var cas *logstore.CASError
-		if errors.As(err, &cas) {
-			fmt.Fprintf(os.Stderr, "arxi run cancel: run %s moved while this "+
-				"command was deciding (it was at seq %d, the log is at seq %d).\n"+
-				"  nothing was written, and this is the case worth re-reading: the "+
-				"run may have finished on its own.\n"+
-				"  what it is now: arxi run show %s\n", id, cas.Expected, cas.Actual, id)
-			os.Exit(1)
-		}
-		fatal(fmt.Errorf("record run.cancelled: %w", err))
 	}
 
 	sim := ""
 	if simulated {
 		sim = "  [simulated]"
 	}
-	// The headline docs/design/20-use-cases.md:406 promises, verbatim: "run r1
-	// cancelled at seq 61". Everything else is indented beneath it.
-	fmt.Printf("run %s cancelled at seq %d%s\n", id, written[0].Seq, sim)
+	fmt.Printf("run %s cancelled at seq %d%s\n", id, seq, sim)
 
 	printCancelEffect(pre, id, reason)
+}
+
+// cancelRunAtCustomDir preserves the CLI's historical support for a run whose
+// directory name is not its recorded run id. Public Host mutations deliberately
+// address jobs by directory key, so this is the one incompatible case.
+func cancelRunAtCustomDir(dir string, pre kernel.State, id, reason string) (int64, error) {
+	if pre.Status.Terminal() {
+		return 0, &customCancelTerminalError{}
+	}
+	store, err := logstore.Open(dir)
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	atExit(func() { _ = store.Close() })
+	payload := map[string]any{}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	ev := kernel.Event{
+		ID: "cancel-" + strconv.FormatInt(store.Head()+1, 10), Type: kernel.RunCancelled,
+		Source: kernel.SourceHuman, Scope: "run:" + id,
+		Ts: nowFunc().UTC().Format(time.RFC3339), Payload: payload,
+	}
+	written, err := store.AppendIfSeq(pre.Seq, []kernel.Event{ev})
+	if err != nil {
+		return 0, err
+	}
+	return written[0].Seq, nil
+}
+
+type customCancelTerminalError struct{}
+
+func (*customCancelTerminalError) Error() string { return "run is already terminal" }
+
+func isHostError(err error) bool {
+	var hostErr *hostv1.Error
+	return errors.As(err, &hostErr)
 }
 
 // printCancelRefusal explains a cancel that was not needed.

@@ -43,6 +43,46 @@ func NewVirtualClock() *VirtualClock {
 	return &VirtualClock{timers: map[string]int64{}}
 }
 
+// Restore replaces the virtual clock with state reconstructed from the event
+// log. Pending deadlines at or before now are queued immediately, in the same
+// deadline-then-id order Advance uses; simulated downtime never moves now.
+func (v *VirtualClock) Restore(nowMs int64, pending map[string]int64) error {
+	if nowMs < 0 {
+		return fmt.Errorf("cannot restore virtual time to %d ms", nowMs)
+	}
+	type due struct {
+		id string
+		at int64
+	}
+	ready := make([]due, 0)
+	timers := make(map[string]int64, len(pending))
+	for id, deadline := range pending {
+		if id == "" || deadline <= 0 {
+			return fmt.Errorf("cannot restore timer %q at deadline %d", id, deadline)
+		}
+		if deadline <= nowMs {
+			ready = append(ready, due{id: id, at: deadline})
+		} else {
+			timers[id] = deadline
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].at != ready[j].at {
+			return ready[i].at < ready[j].at
+		}
+		return ready[i].id < ready[j].id
+	})
+	fired := make([]string, len(ready))
+	for i := range ready {
+		fired[i] = ready[i].id
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.nowMs, v.timers, v.fired = nowMs, timers, fired
+	return nil
+}
+
 // SetTimer arms a timer to fire afterMs milliseconds from the current virtual
 // instant.
 //
@@ -51,9 +91,9 @@ func NewVirtualClock() *VirtualClock {
 // timeout, and if the second arming were rejected the stage would still be
 // holding the deadline from its previous entry, expiring early for reasons
 // nobody could reconstruct from the log.
-func (v *VirtualClock) SetTimer(id string, afterMs int64) error {
+func (v *VirtualClock) SetTimer(id string, afterMs int64) (int64, error) {
 	if id == "" {
-		return fmt.Errorf("timer id is empty: an unnamed timer cannot be cancelled " +
+		return 0, fmt.Errorf("timer id is empty: an unnamed timer cannot be cancelled " +
 			"or matched to a stage, so it would fire with no way to trace why")
 	}
 	// A non-positive offset is refused rather than fired immediately. Firing it
@@ -61,15 +101,16 @@ func (v *VirtualClock) SetTimer(id string, afterMs int64) error {
 	// reducer would see a stage expire before it was ever entered; refusing
 	// points at the real bug, which is a timeout computed from stale values.
 	if afterMs <= 0 {
-		return fmt.Errorf("timer %s has a non-positive offset (%d ms): it would fire "+
+		return 0, fmt.Errorf("timer %s has a non-positive offset (%d ms): it would fire "+
 			"inside the step that armed it, making a stage expire before it was "+
 			"entered; the offset is being computed from a stale deadline", id, afterMs)
 	}
 
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.timers[id] = v.nowMs + afterMs
-	return nil
+	deadline := v.nowMs + afterMs
+	v.timers[id] = deadline
+	return deadline, nil
 }
 
 // CancelTimer disarms a timer.
@@ -234,6 +275,23 @@ func NewRealClock() *RealClock {
 	return &RealClock{timers: map[string]time.Time{}}
 }
 
+// Restore replaces the real clock with absolute Unix-millisecond deadlines
+// reconstructed from the log. Overdue timers remain armed: Due collects them
+// immediately, so downtime advances wall time without inventing a new deadline.
+func (r *RealClock) Restore(pending map[string]int64) error {
+	timers := make(map[string]time.Time, len(pending))
+	for id, deadline := range pending {
+		if id == "" || deadline <= 0 {
+			return fmt.Errorf("cannot restore timer %q at deadline %d", id, deadline)
+		}
+		timers[id] = time.UnixMilli(deadline)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.timers, r.fired = timers, nil
+	return nil
+}
+
 func (r *RealClock) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
@@ -244,21 +302,27 @@ func (r *RealClock) now() time.Time {
 // SetTimer arms a wall-clock deadline. Same validation as VirtualClock, for the
 // same reasons: the two must accept and reject exactly the same inputs, or a
 // blueprint that simulates cleanly could still fail on a real run.
-func (r *RealClock) SetTimer(id string, afterMs int64) error {
+func (r *RealClock) SetTimer(id string, afterMs int64) (int64, error) {
 	if id == "" {
-		return fmt.Errorf("timer id is empty: an unnamed timer cannot be cancelled " +
+		return 0, fmt.Errorf("timer id is empty: an unnamed timer cannot be cancelled " +
 			"or matched to a stage, so it would fire with no way to trace why")
 	}
 	if afterMs <= 0 {
-		return fmt.Errorf("timer %s has a non-positive offset (%d ms): it would fire "+
+		return 0, fmt.Errorf("timer %s has a non-positive offset (%d ms): it would fire "+
 			"inside the step that armed it, making a stage expire before it was "+
 			"entered; the offset is being computed from a stale deadline", id, afterMs)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.timers[id] = r.now().Add(time.Duration(afterMs) * time.Millisecond)
-	return nil
+	deadline := r.now().Add(time.Duration(afterMs) * time.Millisecond)
+	r.timers[id] = deadline
+	return deadline.UnixMilli(), nil
+}
+
+// NowMs is wall time as Unix milliseconds.
+func (r *RealClock) NowMs() int64 {
+	return r.now().UnixMilli()
 }
 
 // CancelTimer disarms a timer, tolerating unknown ids for the same reason as

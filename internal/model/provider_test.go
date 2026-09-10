@@ -9,16 +9,16 @@ import (
 // The §20.1 invocation: a known provider, no --base-url, no --api-key-env.
 // If this needs flags, the documented first command a user types does not work.
 func TestAKnownProviderNeedsNothingButItsName(t *testing.T) {
-	p, err := New("anthropic", "", "", "")
+	p, err := New("openai", "", "", "")
 	if err != nil {
-		t.Fatalf("provider add anthropic: %v", err)
+		t.Fatalf("provider add openai: %v", err)
 	}
 	if p.BaseURL == "" {
 		t.Error("no base URL was filled in, so there is nothing to call")
 	}
-	if p.APIKeyEnv != "ANTHROPIC_API_KEY" {
-		t.Errorf("api key env is %q, want ANTHROPIC_API_KEY: docs/design 20.1 prints "+
-			"exactly that variable", p.APIKeyEnv)
+	if p.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Errorf("api key env is %q, want OPENAI_API_KEY: the documented invocation relies "+
+			"on the preset supplying it", p.APIKeyEnv)
 	}
 	if len(p.Models) == 0 {
 		t.Fatal("no models: `model list` straight after `provider add` would be " +
@@ -27,11 +27,31 @@ func TestAKnownProviderNeedsNothingButItsName(t *testing.T) {
 	}
 }
 
+func TestTheNativeAnthropicPresetIsRefused(t *testing.T) {
+	_, err := New("anthropic", "", "", "")
+	if err == nil {
+		t.Fatal("native Anthropic endpoint was registered for an OpenAI-only executor")
+	}
+	if !strings.Contains(err.Error(), "native Anthropic Messages") || !strings.Contains(err.Error(), "no provider file was written") {
+		t.Errorf("error is not actionable: %v", err)
+	}
+}
+
+func TestAClaudeGatewayIsNotRejectedByModelOrLabel(t *testing.T) {
+	p, err := New("claude-gateway", "https://gateway.example/v1", "GATEWAY_KEY", "")
+	if err != nil {
+		t.Fatalf("OpenAI-compatible gateway refused: %v", err)
+	}
+	if p.Protocol != ProtocolOpenAIChatCompletions {
+		t.Errorf("protocol = %q", p.Protocol)
+	}
+}
+
 // Exactly one model is enabled on registration, and it is the first.
 // Enabling all of them would leave the most expensive model in the tree one
 // --model typo away from being billed.
 func TestOnlyOneModelIsEnabledOnRegistration(t *testing.T) {
-	p, err := New("anthropic", "", "", "")
+	p, err := New("openai", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +121,7 @@ func TestAKeyPassedWhereAVariableNameBelongsIsRefused(t *testing.T) {
 		"abcdefGHIJKLmnopqrSTUVwxyz0123456789abcdefghij",
 	}
 	for _, s := range secrets {
-		if _, err := New("anthropic", "", s, ""); err == nil {
+		if _, err := New("openai", "", s, ""); err == nil {
 			t.Errorf("--api-key-env %q was accepted: that secret would be written "+
 				"to providers/anthropic.json and committed", s)
 		} else if !strings.Contains(err.Error(), "looks like the key itself") &&
@@ -120,7 +140,7 @@ func TestARealVariableNameIsAccepted(t *testing.T) {
 		// not fire on it.
 		"VERY_LONG_BUT_ENTIRELY_LEGITIMATE_VARIABLE_NAME_HERE",
 	} {
-		if _, err := New("anthropic", "", env, ""); err != nil {
+		if _, err := New("openai", "", env, ""); err != nil {
 			t.Errorf("--api-key-env %q refused: %v", env, err)
 		}
 	}
@@ -180,7 +200,7 @@ func TestAProviderNameThatWouldEscapeTheStoreIsRefused(t *testing.T) {
 // SetEnabled reports whether it changed anything, so `model enable` can say
 // "already enabled" instead of printing a success that did nothing.
 func TestEnablingAnAlreadyEnabledModelReportsNoChange(t *testing.T) {
-	p, err := New("anthropic", "", "", "")
+	p, err := New("openai", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +230,7 @@ func TestEnablingAnAlreadyEnabledModelReportsNoChange(t *testing.T) {
 // A model that does not exist is an error, not a silent no-op, and the error
 // points at the command that lists the real ones.
 func TestEnablingAModelThatDoesNotExistIsAnError(t *testing.T) {
-	p, err := New("anthropic", "", "", "")
+	p, err := New("openai", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +260,7 @@ func TestADuplicateModelIDIsRefused(t *testing.T) {
 // The stored form must round-trip, because it is written by one command and
 // read by another. And api_key must not be a field, ever.
 func TestTheStoredFormRoundTripsAndHasNoKeyField(t *testing.T) {
-	p, err := New("anthropic", "", "", "2026-01-01T00:00:00Z")
+	p, err := New("openai", "", "", "2026-01-01T00:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,13 +354,13 @@ func TestAnExplicitKeyVariableIsHonouredEvenOnLoopback(t *testing.T) {
 // would move the failure from `provider add` (immediate, free) to the first turn
 // of a run (late, after a run directory exists).
 func TestARemoteProviderStillGetsADefaultKeyVariable(t *testing.T) {
-	p, err := New("anthropic", "", "", "")
+	p, err := New("openai", "", "", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if p.APIKeyEnv != "ANTHROPIC_API_KEY" {
-		t.Errorf("APIKeyEnv = %q, expected ANTHROPIC_API_KEY; a hosted provider needs a "+
-			"credential and the default is what makes `provider add anthropic` enough",
+	if p.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Errorf("APIKeyEnv = %q, expected OPENAI_API_KEY; a hosted provider needs a "+
+			"credential and the default is what makes `provider add openai` enough",
 			p.APIKeyEnv)
 	}
 }

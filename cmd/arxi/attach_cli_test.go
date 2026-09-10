@@ -627,6 +627,46 @@ func pendingCommitPath(dir, id string) string {
 	return filepath.Join(runDirOf(dir, id), "pending.commit")
 }
 
+func TestRunAttachInitialJoinExcludesThenPrintsAProvisionalCompleteEventOnce(t *testing.T) {
+	dir := t.TempDir()
+	const id = "rminitial7-1a2b3c4d"
+	runAt(t, dir, id, "feature-team", 1.0, "")
+	holdWriterLock(t, dir, id)
+
+	path := filepath.Join(runDirOf(dir, id), "events.ndjson")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pendingCommitPath(dir, id),
+		[]byte(strconv.FormatInt(info.Size(), 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appendToRunLog(t, dir, id, attachToolCall)
+
+	s := startAttach(t, dir, id)
+	s.waitForJoin()
+	if err := os.Remove(pendingCommitPath(dir, id)); err != nil {
+		t.Fatal(err)
+	}
+	appendToRunLog(t, dir, id, attachRunResult)
+
+	out, errb, code := s.finish()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	}
+	rows := attachRows(out)
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want 2 (the committed provisional event and result exactly once):\n%s", len(rows), out)
+	}
+	if rows[0] != "["+id+" seq 3] tool.call read src/auth.go" {
+		t.Fatalf("first row = %q, want the event that became confirmed after join", rows[0])
+	}
+	if !strings.HasPrefix(rows[1], "["+id+" seq 5] run.result") {
+		t.Fatalf("second row = %q, want run.result at seq 5", rows[1])
+	}
+}
+
 // TestRunAttachHoldsBackABatchThatWasNeverCommitted covers the writer dying mid-batch.
 //
 // This is the case the commit protocol exists for, seen from the reading side. Bytes
@@ -646,7 +686,11 @@ func TestRunAttachHoldsBackABatchThatWasNeverCommitted(t *testing.T) {
 	runAt(t, dir, id, "feature-team", 1.0, "")
 	holdWriterLock(t, dir, id)
 
-	if err := os.WriteFile(pendingCommitPath(dir, id), []byte("12\n"), 0o644); err != nil {
+	info, err := os.Stat(filepath.Join(runDirOf(dir, id), "events.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pendingCommitPath(dir, id), []byte(strconv.FormatInt(info.Size(), 10)+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if !logstore.BatchInFlight(runDirOf(dir, id)) {

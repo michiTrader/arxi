@@ -4,11 +4,18 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 // ------------------------------------------------------------------ helpers
+
+type longTimer struct{}
+
+func (longTimer) Due() []string                              { return nil }
+func (longTimer) NextDeadlineMs() (int64, bool)              { return 1_800_000, true }
+func (longTimer) Advance(ctx context.Context, _ int64) error { <-ctx.Done(); return ctx.Err() }
 
 // teamCfg is the blueprint the loop tests drive: two stages with different
 // advance rules, two working members and one advisory, and a watcher on
@@ -132,6 +139,58 @@ func asked(fake *Fake) bool {
 		}
 	}
 	return false
+}
+
+func TestRunUntilBoundaryWaitsForDispatchedCall(t *testing.T) {
+	c := kernel.Config{Blueprint: "test", Members: []kernel.MemberConfig{{Name: "worker"}}}.ResolveDefaults()
+	log := newMemLog()
+	clock := NewVirtualClock()
+	executor := &boundaryExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	runner := &Runner{Log: log, Clock: clock, Executor: executor, Config: c, RunID: "r1"}
+	loop := &Loop{Runner: runner, Log: log, Time: VirtualTime{C: clock}, Config: c}
+	seedRun(t, log, c, nil)
+	if _, err := log.Append([]kernel.Event{{ID: "prompt", Type: kernel.RunPrompt, Source: kernel.SourceHuman,
+		Payload: map[string]any{"text": "work"}}}); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan Outcome, 1)
+	go func() {
+		out, _ := loop.RunUntilBoundary(context.Background(), stop)
+		done <- out
+	}()
+	<-executor.started
+	close(stop)
+	select {
+	case <-done:
+		t.Fatal("boundary aborted an already-dispatched external call")
+	default:
+	}
+	close(executor.release)
+	out := <-done
+	if out.StoppedBy != StopWoken {
+		t.Fatalf("StoppedBy = %q, want %q", out.StoppedBy, StopWoken)
+	}
+	if !hasType(log, kernel.ExecWorkFinished) || !hasType(log, kernel.ExecStepCompleted) {
+		t.Fatalf("boundary returned before durable completion: %v", types(log))
+	}
+}
+
+type boundaryExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *boundaryExecutor) SpawnTurn(context.Context, kernel.SpawnTurn) ([]kernel.Event, error) {
+	close(b.started)
+	<-b.release
+	return []kernel.Event{{Type: kernel.AgentTurnDone, Source: kernel.SourceRuntime}}, nil
+}
+func (*boundaryExecutor) CallTool(context.Context, kernel.CallTool) ([]kernel.Event, error) {
+	return nil, nil
+}
+func (*boundaryExecutor) AskHuman(context.Context, kernel.AskHuman) ([]kernel.Event, error) {
+	return nil, nil
 }
 
 // ------------------------------------------------------------ the happy path
@@ -794,6 +853,32 @@ func TestLoopBudgetExhaustionBlocksAndAsks(t *testing.T) {
 			"  consequence: every surplus copy asks another human a question that "+
 			"fails the run on timeout, so one unanswered duplicate kills a run "+
 			"somebody already paid to continue.\n  the log was: %v", n, types(log))
+	}
+}
+
+func TestResidentBoundaryPublishesBlockedBeforeLongTimer(t *testing.T) {
+	c := teamCfg()
+	loop, log, fake, _ := newLoop(c)
+	fake.TurnCostUSD = 10
+	seedRun(t, log, c, map[string]any{"budget_usd": 5.0})
+	loop.Time = longTimer{}
+	done := make(chan Outcome, 1)
+	errs := make(chan error, 1)
+	go func() {
+		out, err := loop.RunUntilBoundary(context.Background(), make(chan struct{}))
+		done <- out
+		errs <- err
+	}()
+	select {
+	case out := <-done:
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		if out.State.Status != kernel.StatusBlocked || out.StoppedBy != StopIdle {
+			t.Fatalf("outcome = status %q stop %q, want blocked/%q", out.State.Status, out.StoppedBy, StopIdle)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resident pass waited on a long timer instead of publishing blocked standstill")
 	}
 }
 

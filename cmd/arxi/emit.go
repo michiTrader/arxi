@@ -134,11 +134,13 @@ func cmdEventEmit(args []string) {
 
 	// Folded before the append, because every refusal below is about what the run
 	// WAS, and afterwards the event is in the log for good.
-	pre, cfg, simulated, err := foldRunDir(dir)
+	pre, effective, _, err := preflightEffectiveRun(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi event emit: %v\n", err)
 		os.Exit(1)
 	}
+	cfg := effective.Config
+	simulated := effective.Mode == "sim"
 
 	// A terminal run is refused. This is not a formality: Decide's first line is
 	// `if s.Status.Terminal() { return out, nil }`, so the append would succeed,
@@ -248,7 +250,7 @@ func cmdEventEmit(args []string) {
 		fmt.Printf("  this run was started with --sim, so the turn is taken by the " +
 			"same fake executor: no model is called and no money is spent.\n")
 	}
-	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
+	driveEffectiveRun(dir, effective, store, pre.RunID)
 }
 
 // checkCustomType is the namespace gate, and the only validation in this binary

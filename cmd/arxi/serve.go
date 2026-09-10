@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +12,10 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
+	hostv1 "github.com/michiTrader/arxi/host/v1"
 	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/surface"
 )
@@ -71,9 +74,13 @@ type protoResponse struct {
 // of remedy `run why` prints, for the same reason: a diagnosis that does not say
 // what to do next makes the reader guess.
 type protoError struct {
-	Code    string   `json:"code"`
-	Message string   `json:"message"`
-	Fix     []string `json:"fix,omitempty"`
+	Code      string        `json:"code"`
+	Message   string        `json:"message"`
+	Fix       []string      `json:"fix,omitempty"`
+	Operation string        `json:"operation,omitempty"`
+	JobID     hostv1.JobID  `json:"job_id,omitempty"`
+	ItemID    hostv1.ItemID `json:"item_id,omitempty"`
+	AfterSeq  int64         `json:"after_seq,omitempty"`
 }
 
 // Error codes. These are a closed set on purpose: a client has to be able to tell
@@ -103,15 +110,100 @@ const (
 // discovers that one type at a time by sending a request and reading a failure,
 // which makes a permanent state look like a transient error.
 type helloMsg struct {
-	Type           string   `json:"type"`
-	Version        string   `json:"version"`
-	SurfaceVersion int      `json:"surface_version"`
-	Types          []string `json:"types"`
-	Implemented    []string `json:"implemented"`
+	Type           string              `json:"type"`
+	Version        string              `json:"version"`
+	SurfaceVersion int                 `json:"surface_version"`
+	Types          []string            `json:"types"`
+	Implemented    []string            `json:"implemented"`
+	Capabilities   []hostv1.Capability `json:"capabilities"`
 }
 
 // protoHandler runs one request. It returns a result to marshal, or an error.
 type protoHandler func(params map[string]any) (any, error)
+
+// lifecycleHost is the host/v1 lifecycle surface used by the transport adapter.
+// Keeping it as an interface makes connection identity and authorization behavior
+// testable without replacing or duplicating lifecycle services.
+type lifecycleHost interface {
+	Inspect(context.Context, hostv1.InspectRequest) (hostv1.Job, error)
+	Cancel(context.Context, hostv1.CancelRequest) (hostv1.Job, error)
+	Capabilities(context.Context, hostv1.CapabilitiesRequest) (hostv1.CapabilitySet, error)
+}
+
+// protoSession is immutable connection state. Principal comes from the trusted
+// listener, never from request parameters, and is copied into every host request.
+type protoSession struct {
+	principal         hostv1.Principal
+	host              lifecycleHost
+	capabilities      map[hostv1.Capability]bool
+	capabilitiesKnown bool
+}
+
+type lifecycleHandler struct {
+	protocolType string
+	capability   hostv1.Capability
+	dispatch     func(context.Context, lifecycleHost, hostv1.Principal, map[string]any) (any, error)
+}
+
+// lifecycleHandlers is the only mapping from the existing line-oriented
+// vocabulary to host/v1 lifecycle operations. Submit and wait stay absent because
+// host/v1 does not install them. Subscribe stays absent because its multi-response
+// stream cannot preserve this protocol's one-request/one-response framing without
+// subscription IDs, event messages, cancellation, and writer arbitration.
+//
+// The decision operations also stay absent for now: inbox.approve/reject/reply
+// carry only an item ID, while host/v1 deliberately requires both JobID and ItemID
+// for resource authorization. Guessing a job by searching every run in this
+// adapter would duplicate lifecycle/resource selection outside host dispatch and
+// make its reauthorization check run against an invented or ambiguous resource.
+var lifecycleHandlerDescriptors = []lifecycleHandler{
+	{
+		protocolType: "run.show",
+		capability:   hostv1.CapabilityInspect,
+		dispatch: func(ctx context.Context, host lifecycleHost, principal hostv1.Principal, params map[string]any) (any, error) {
+			return host.Inspect(ctx, hostv1.InspectRequest{
+				Principal: principal, JobID: hostv1.JobID(stringParam(params, "run")),
+			})
+		},
+	},
+	{
+		protocolType: "run.cancel",
+		capability:   hostv1.CapabilityCancel,
+		dispatch: func(ctx context.Context, host lifecycleHost, principal hostv1.Principal, params map[string]any) (any, error) {
+			return host.Cancel(ctx, hostv1.CancelRequest{
+				Principal: principal, JobID: hostv1.JobID(stringParam(params, "run")),
+				Reason: stringParam(params, "reason"),
+			})
+		},
+	},
+}
+
+var lifecycleHandlers = func() map[string]lifecycleHandler {
+	handlers := make(map[string]lifecycleHandler, len(lifecycleHandlerDescriptors))
+	for _, handler := range lifecycleHandlerDescriptors {
+		handlers[handler.protocolType] = handler
+	}
+	return handlers
+}()
+
+func newProtoSession(principal hostv1.Principal, host lifecycleHost) protoSession {
+	return protoSession{principal: cloneProtoPrincipal(principal), host: host}
+}
+
+func cloneProtoPrincipal(principal hostv1.Principal) hostv1.Principal {
+	out := hostv1.Principal{ID: principal.ID}
+	if principal.Attributes != nil {
+		out.Attributes = make(map[string]string, len(principal.Attributes))
+		for key, value := range principal.Attributes {
+			out.Attributes[key] = value
+		}
+	}
+	return out
+}
+
+func defaultProtoHost() *hostv1.Host {
+	return hostv1.New(hostv1.Options{Storage: newFilesystemJobStorage(runsDir)})
+}
 
 // protoHandlers holds the implementations that exist.
 //
@@ -143,9 +235,23 @@ var protoHandlers = map[string]protoHandler{
 // that wrote a value could read back the old one — a lost update produced by the
 // server, not by the race the CAS in ADR-0006 was built to catch.
 func serveConn(r io.Reader, w io.Writer) error {
+	host := defaultProtoHost()
+	defer host.Close()
+	return serveConnSession(r, w, newProtoSession(hostv1.Principal{ID: "local"}, host))
+}
+
+func serveConnSession(r io.Reader, w io.Writer, session protoSession) error {
+	return serveConnSessionContext(context.Background(), r, w, session)
+}
+
+func serveConnSessionContext(ctx context.Context, r io.Reader, w io.Writer, session protoSession) error {
 	enc := json.NewEncoder(w)
 
-	if err := enc.Encode(protoHello()); err != nil {
+	hello, err := protoHelloSession(ctx, &session)
+	if err != nil {
+		return fmt.Errorf("resolve effective capabilities: %w", err)
+	}
+	if err := enc.Encode(hello); err != nil {
 		// Failing to send the hello is fatal for this connection: the client is
 		// entitled to assume the first line tells it the surface version, and one
 		// that never arrives leaves it guessing which vocabulary it may use.
@@ -153,9 +259,16 @@ func serveConn(r io.Reader, w io.Writer) error {
 	}
 
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
+	// ScanLines needs room for the line ending in addition to the request. The
+	// explicit length check below keeps the content limit at exactly 1 MiB; two
+	// extra bytes admit either LF or CRLF without shifting that boundary.
+	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes+2)
 
 	for sc.Scan() {
+		if len(sc.Bytes()) > maxLineBytes {
+			writeLineTooLong(enc)
+			return fmt.Errorf("request line over %d bytes", maxLineBytes)
+		}
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			// Blank lines are skipped rather than reported. Plenty of clients emit
@@ -163,7 +276,7 @@ func serveConn(r io.Reader, w io.Writer) error {
 			// well-behaved client generate spurious failures in its own logs.
 			continue
 		}
-		if err := enc.Encode(handleLine(line)); err != nil {
+		if err := enc.Encode(handleLineSession(ctx, session, line)); err != nil {
 			// A write that fails means the client is gone or the pipe broke. There
 			// is nowhere to report it TO, so it ends the connection.
 			return fmt.Errorf("write a response: %w", err)
@@ -177,14 +290,7 @@ func serveConn(r io.Reader, w io.Writer) error {
 			// oversized request would be read as the next one and dispatched as
 			// whatever it happened to parse as. Continuing would turn one
 			// oversized request into an arbitrary command nobody sent.
-			_ = enc.Encode(protoResponse{OK: false, Error: &protoError{
-				Code: errLineTooLong,
-				Message: fmt.Sprintf("a request line exceeded %d bytes, so the "+
-					"connection is closing: after a truncated line the rest of it "+
-					"would be read as the next request and dispatched as whatever "+
-					"it parsed as", maxLineBytes),
-				Fix: []string{"send one JSON object per line and keep it under 1 MiB"},
-			}})
+			writeLineTooLong(enc)
 			return fmt.Errorf("request line over %d bytes", maxLineBytes)
 		}
 		return fmt.Errorf("read a request: %w", err)
@@ -192,11 +298,28 @@ func serveConn(r io.Reader, w io.Writer) error {
 	return nil
 }
 
+func writeLineTooLong(enc *json.Encoder) {
+	_ = enc.Encode(protoResponse{OK: false, Error: &protoError{
+		Code: errLineTooLong,
+		Message: fmt.Sprintf("a request line exceeded %d bytes, so the "+
+			"connection is closing: after a truncated line the rest of it "+
+			"would be read as the next request and dispatched as whatever "+
+			"it parsed as", maxLineBytes),
+		Fix: []string{"send one JSON object per line and keep it under or at 1 MiB"},
+	}})
+}
+
 // handleLine turns one line into one response and never returns an error, because
 // every failure below is the client's and belongs on the wire where the client
 // can read it. A protocol server that drops a connection over a bad request makes
 // one typo cost every other in-flight request on that connection.
 func handleLine(line string) protoResponse {
+	host := defaultProtoHost()
+	defer host.Close()
+	return handleLineSession(context.Background(), newProtoSession(hostv1.Principal{ID: "local"}, host), line)
+}
+
+func handleLineSession(ctx context.Context, session protoSession, line string) protoResponse {
 	var req protoRequest
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
 		// No id is available here — the line did not parse — so the response
@@ -222,15 +345,23 @@ func handleLine(line string) protoResponse {
 		}}
 	}
 
+	if handler, lifecycle := lifecycleHandlers[req.Type]; lifecycle {
+		if session.host == nil {
+			return notImplementedResponse(req.ID, *c)
+		}
+		if session.capabilitiesKnown && !session.capabilities[handler.capability] {
+			return notImplementedResponse(req.ID, *c)
+		}
+		res, err := handler.dispatch(ctx, session.host, cloneProtoPrincipal(session.principal), req.Params)
+		if err != nil {
+			return hostErrorResponse(req.ID, err)
+		}
+		return protoResponse{ID: req.ID, OK: true, Result: res}
+	}
+
 	h, ok := protoHandlers[req.Type]
 	if !ok {
-		return protoResponse{ID: req.ID, OK: false, Error: &protoError{
-			Code: errNotImplemented,
-			Message: fmt.Sprintf("%s is declared in surface v%d and this build has "+
-				"no executor for it. The request was well formed; retrying will not "+
-				"help until the capability lands.", c.CLI(), c.Since),
-			Fix: []string{"arxi surface"},
-		}}
+		return notImplementedResponse(req.ID, *c)
 	}
 
 	res, err := h(req.Params)
@@ -241,6 +372,34 @@ func handleLine(line string) protoResponse {
 		}}
 	}
 	return protoResponse{ID: req.ID, OK: true, Result: res}
+}
+
+func notImplementedResponse(id string, c surface.Cmd) protoResponse {
+	return protoResponse{ID: id, OK: false, Error: &protoError{
+		Code: errNotImplemented,
+		Message: fmt.Sprintf("%s is declared in surface v%d and this build has "+
+			"no executor for it. The request was well formed; retrying will not "+
+			"help until the capability lands.", c.CLI(), c.Since),
+		Fix: []string{"arxi surface"},
+	}}
+}
+
+func stringParam(params map[string]any, name string) string {
+	value, _ := params[name].(string)
+	return value
+}
+
+func hostErrorResponse(id string, err error) protoResponse {
+	wireErr := &protoError{Code: string(hostv1.ErrorCodeOf(err)), Message: err.Error()}
+	var hostErr *hostv1.Error
+	if errors.As(err, &hostErr) {
+		wireErr.Message = hostErr.Message
+		wireErr.Operation = hostErr.Operation
+		wireErr.JobID = hostErr.JobID
+		wireErr.ItemID = hostErr.ItemID
+		wireErr.AfterSeq = hostErr.AfterSeq
+	}
+	return protoResponse{ID: id, OK: false, Error: wireErr}
 }
 
 // unknownTypeError distinguishes a type that does not exist from one that exists
@@ -484,21 +643,30 @@ func cmdServe(args []string) {
 		os.Exit(2)
 	}
 
+	host := defaultProtoHost()
+	defer func() {
+		if err := host.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "arxi serve: close host: %v\n", err)
+		}
+	}()
+	session := newProtoSession(hostv1.Principal{ID: "local"}, host)
 	if listen == "" {
 		// stdio is the default because it needs no cleanup and no permissions
 		// decision: the parent process already owns both ends. A socket has a
 		// path, a mode and a stale-file problem, and none of that should be forced
 		// on the common case of a supervisor spawning one server.
-		if err := serveConn(os.Stdin, os.Stdout); err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := serveConnSessionContext(ctx, os.Stdin, os.Stdout, session); err != nil {
 			fatal(err)
 		}
 		return
 	}
-	serveSocket(strings.TrimPrefix(listen, "unix://"))
+	serveSocket(strings.TrimPrefix(listen, "unix://"), session)
 }
 
 // serveSocket listens on a unix socket until interrupted.
-func serveSocket(path string) {
+func serveSocket(path string, session protoSession) {
 	// A stale socket file is REFUSED, not removed.
 	//
 	// Unlinking it silently is the convenient behaviour and it steals the address
@@ -541,9 +709,21 @@ func serveSocket(path string) {
 	// of the above to diagnose it.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var connections sync.WaitGroup
+	var connectionMu sync.Mutex
+	activeConnections := map[net.Conn]struct{}{}
 	go func() {
 		<-stop
+		cancel()
 		_ = ln.Close()
+		connectionMu.Lock()
+		for connection := range activeConnections {
+			_ = connection.Close()
+		}
+		connectionMu.Unlock()
 		_ = os.Remove(path)
 	}()
 
@@ -557,20 +737,34 @@ func serveSocket(path string) {
 		conn, err := ln.Accept()
 		if err != nil {
 			// Accept failing means the listener is closed, which is the shutdown
-			// path above. Return quietly: a logged error here would make every
-			// clean Ctrl-C look like a crash.
+			// path above. Wait for connection-scoped host calls to observe the
+			// cancelled server context before the composition root closes the host.
+			connections.Wait()
 			return
 		}
 		// One goroutine per connection, and requests WITHIN a connection stay
 		// ordered (see serveConn). Serialising across connections instead would
 		// let one client blocked on a slow validate stall every other client, and
 		// the stall would look exactly like the quiescence ADR-0004 is about.
-		go func(c net.Conn) {
-			defer c.Close()
-			if err := serveConn(c, c); err != nil {
+		connectionSession := newProtoSession(session.principal, session.host)
+		connectionMu.Lock()
+		activeConnections[conn] = struct{}{}
+		connectionMu.Unlock()
+		connections.Add(1)
+		go func(c net.Conn, connectionSession protoSession) {
+			defer connections.Done()
+			defer func() {
+				connectionMu.Lock()
+				delete(activeConnections, c)
+				connectionMu.Unlock()
+				_ = c.Close()
+			}()
+			connectionCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if err := serveConnSessionContext(connectionCtx, c, c, connectionSession); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "arxi serve: connection ended: %v\n", err)
 			}
-		}(conn)
+		}(conn, connectionSession)
 	}
 }
 
@@ -665,6 +859,14 @@ func parseServeFlags(args []string) (string, error) {
 // freeze whatever the registry looked like at init and would keep working after
 // somebody changed it.
 func protoHello() helloMsg {
+	host := defaultProtoHost()
+	defer host.Close()
+	session := newProtoSession(hostv1.Principal{ID: "local"}, host)
+	hello, _ := protoHelloSession(context.Background(), &session)
+	return hello
+}
+
+func protoHelloSession(ctx context.Context, session *protoSession) (helloMsg, error) {
 	var types, impl []string
 	for _, c := range surface.ProtocolCommands() {
 		types = append(types, c.ProtocolType())
@@ -672,6 +874,35 @@ func protoHello() helloMsg {
 			impl = append(impl, c.ProtocolType())
 		}
 	}
+
+	capabilities := []hostv1.Capability{}
+	if session.host != nil {
+		set, err := session.host.Capabilities(ctx, hostv1.CapabilitiesRequest{Principal: cloneProtoPrincipal(session.principal)})
+		if err != nil {
+			return helloMsg{}, err
+		}
+		seenCapabilities := make(map[hostv1.Capability]bool, len(set.Capabilities))
+		for _, capability := range set.Capabilities {
+			seenCapabilities[capability] = true
+		}
+		advertised := make(map[hostv1.Capability]bool, len(lifecycleHandlerDescriptors))
+		for _, handler := range lifecycleHandlerDescriptors {
+			if advertised[handler.capability] || !seenCapabilities[handler.capability] {
+				continue
+			}
+			advertised[handler.capability] = true
+			capabilities = append(capabilities, handler.capability)
+		}
+		for _, handler := range lifecycleHandlerDescriptors {
+			if advertised[handler.capability] {
+				impl = append(impl, handler.protocolType)
+			}
+		}
+		session.capabilities = advertised
+		session.capabilitiesKnown = true
+	}
+	sort.Strings(impl)
+	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
 	// Non-nil so both marshal as [] rather than null, for the same reason as the
 	// blueprint result above: a client iterating `implemented` should not have to
 	// special-case a build that implements nothing.
@@ -687,5 +918,6 @@ func protoHello() helloMsg {
 		SurfaceVersion: surface.SurfaceVersion,
 		Types:          types,
 		Implemented:    impl,
-	}
+		Capabilities:   capabilities,
+	}, nil
 }

@@ -1,0 +1,558 @@
+// Package supervisor owns resident per-run execution workers.
+package supervisor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/logstore"
+	"github.com/michiTrader/arxi/internal/runconfig"
+)
+
+const DefaultCommandLimit = 32
+
+var (
+	ErrClosed    = errors.New("supervisor is closed")
+	ErrQueueFull = errors.New("supervisor command queue is full")
+	ErrUnknown   = errors.New("run contains external work with an unknown outcome")
+	ErrLegacy    = errors.New("run has no durable execution progress")
+)
+
+// Command runs one serialized mutation while the resident worker owns the Store.
+type Command func(*logstore.Store) error
+
+// Result describes one completed drive pass.
+type Result struct {
+	Outcome exec.Outcome
+	Err     error
+}
+
+// Build supplies the run-specific executor. Configuration is always loaded from
+// the immutable effective-config artifact before Build is called.
+type Build func(dir string, effective runconfig.Artifact) (exec.Executor, error)
+
+// Options are process-level dependencies; run state is never supplied here.
+type Options struct {
+	Build        Build
+	Now          func() time.Time
+	CommandLimit int
+}
+
+// Supervisor guarantees at most one resident worker for each run id.
+type Supervisor struct {
+	root    string
+	opts    Options
+	mu      sync.Mutex
+	workers map[string]*worker
+	closed  bool
+	closing bool
+}
+
+func New(root string, opts Options) *Supervisor {
+	if opts.CommandLimit <= 0 {
+		opts.CommandLimit = DefaultCommandLimit
+	}
+	return &Supervisor{root: root, opts: opts, workers: map[string]*worker{}}
+}
+
+// Open starts (or returns) the one worker for id under the configured root and
+// waits for restoration.
+func (s *Supervisor) Open(ctx context.Context, id string) (*Handle, error) {
+	return s.openAt(ctx, id, filepath.Join(s.root, id), false)
+}
+
+// OpenAt is Open for a privately selected run location. The location is part of
+// worker identity, so two equal ids at different locations never share a writer.
+func (s *Supervisor) OpenAt(ctx context.Context, id, dir string) (*Handle, error) {
+	return s.openAt(ctx, id, dir, false)
+}
+
+func (s *Supervisor) openAt(ctx context.Context, id, dir string, allowFresh bool) (*Handle, error) {
+	if err := validID(id); err != nil {
+		return nil, err
+	}
+	key, err := locationKey(dir)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return nil, ErrClosed
+		}
+		w := s.workers[key]
+		if w == nil {
+			w = newWorker(dir, id, s.opts)
+			w.allowFresh = allowFresh
+			s.workers[key] = w
+			go w.run()
+		}
+		s.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-w.ready:
+			if w.readyErr != nil {
+				s.drop(key, w)
+				return nil, w.readyErr
+			}
+		}
+		select {
+		case <-w.done:
+			s.drop(key, w)
+			continue
+		default:
+			return &Handle{w: w}, nil
+		}
+	}
+}
+
+// Resident returns the existing root-based worker for id without opening one.
+func (s *Supervisor) Resident(id string) (*Handle, bool) {
+	return s.residentAt(filepath.Join(s.root, id))
+}
+
+func (s *Supervisor) residentAt(dir string) (*Handle, bool) {
+	key, err := locationKey(dir)
+	if err != nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w := s.workers[key]
+	if w == nil {
+		return nil, false
+	}
+	select {
+	case <-w.done:
+		if s.workers[key] == w {
+			delete(s.workers, key)
+		}
+		return nil, false
+	default:
+		return &Handle{w: w}, true
+	}
+}
+
+// Launch implements the root-based durable-acceptance lifecycle handoff.
+func (s *Supervisor) Launch(ctx context.Context, id string) error {
+	return s.LaunchAt(ctx, id, filepath.Join(s.root, id))
+}
+
+// LaunchAt takes responsibility for a freshly accepted run at dir.
+func (s *Supervisor) LaunchAt(ctx context.Context, id, dir string) error {
+	_, err := s.openAt(ctx, id, dir, true)
+	return err
+}
+
+// Close stops every worker after its current external call reaches a safe boundary.
+func (s *Supervisor) Close(ctx context.Context) error {
+	s.mu.Lock()
+	if s.closed && !s.closing {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.closing = true
+	workers := make([]*worker, 0, len(s.workers))
+	for _, w := range s.workers {
+		workers = append(workers, w)
+	}
+	s.mu.Unlock()
+	for _, w := range workers {
+		w.close()
+	}
+	var closeErr error
+	for _, w := range workers {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-w.done:
+			if err := w.err(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		}
+	}
+	s.mu.Lock()
+	s.closing = false
+	s.mu.Unlock()
+	return closeErr
+}
+
+func (s *Supervisor) drop(id string, w *worker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.workers[id] == w {
+		delete(s.workers, id)
+	}
+}
+
+func locationKey(dir string) (string, error) {
+	if dir == "" {
+		return "", errors.New("empty run location")
+	}
+	key, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve run location: %w", err)
+	}
+	return filepath.Clean(key), nil
+}
+
+func validID(id string) error {
+	if id == "" || id == "." || id == ".." || filepath.Base(id) != id {
+		return fmt.Errorf("invalid run id %q", id)
+	}
+	return nil
+}
+
+// Handle is a bounded, serialized command and wake endpoint for one run.
+type Handle struct{ w *worker }
+
+func (h *Handle) Command(ctx context.Context, fn Command) error {
+	if fn == nil {
+		return errors.New("nil supervisor command")
+	}
+	reply := make(chan error, 1)
+	request := request{fn: fn, reply: reply}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.w.done:
+		return ErrClosed
+	case h.w.commands <- request:
+		h.w.signal()
+	default:
+		return ErrQueueFull
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.w.done:
+		return ErrClosed
+	case err := <-reply:
+		return err
+	}
+}
+
+// Wake asks the worker to re-read decisions or other externally appended input.
+func (h *Handle) Wake() { h.w.signal() }
+
+// Completion returns the latest completed generation without consuming it. A
+// caller can retain the generation and wait for a strictly later pass.
+func (h *Handle) Completion() (uint64, Result, bool) {
+	return h.w.completion()
+}
+
+// WaitCompletion waits for a completion generation newer than after. Completed
+// generations are retained, so subscribing after a fast pass cannot miss it and
+// any number of observers can independently wait on the same worker.
+func (h *Handle) WaitCompletion(ctx context.Context, after uint64) (uint64, Result, error) {
+	for {
+		generation, result, ok, changed := h.w.completionState()
+		if ok && generation > after {
+			return generation, result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, Result{}, ctx.Err()
+		case <-h.w.done:
+			generation, result, ok := h.w.completion()
+			if ok && generation > after {
+				return generation, result, nil
+			}
+			return 0, Result{}, ErrClosed
+		case <-changed:
+		}
+	}
+}
+
+// Completions is the legacy lossy observation stream. New code should use
+// WaitCompletion, which is retained and supports multiple observers.
+func (h *Handle) Completions() <-chan Result { return h.w.results }
+
+// Close releases this worker's long-held writer ownership at a safe boundary.
+func (h *Handle) Close(ctx context.Context) error {
+	h.w.close()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.w.done:
+		return h.w.err()
+	}
+}
+
+type request struct {
+	fn    Command
+	reply chan error
+}
+
+type worker struct {
+	dir, id      string
+	opts         Options
+	allowFresh   bool
+	commands     chan request
+	wake         chan struct{}
+	stop         chan struct{}
+	done         chan struct{}
+	ready        chan struct{}
+	readyErr     error
+	results      chan Result
+	completionMu sync.Mutex
+	generation   uint64
+	latest       Result
+	hasLatest    bool
+	changed      chan struct{}
+	stopOnce     sync.Once
+	errMu        sync.Mutex
+	closeErr     error
+}
+
+func newWorker(dir, id string, opts Options) *worker {
+	return &worker{
+		dir: dir, id: id, opts: opts,
+		commands: make(chan request, opts.CommandLimit), wake: make(chan struct{}, 1),
+		stop: make(chan struct{}), done: make(chan struct{}), ready: make(chan struct{}),
+		results: make(chan Result, 1), changed: make(chan struct{}),
+	}
+}
+
+func (w *worker) signal() {
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (w *worker) close() {
+	w.stopOnce.Do(func() { close(w.stop) })
+	w.signal()
+}
+
+func (w *worker) run() {
+	defer close(w.done)
+	defer close(w.results)
+	store, effective, loop, err := w.restore()
+	w.readyErr = err
+	close(w.ready)
+	if err != nil {
+		return
+	}
+	defer func() { w.setErr(store.Close()) }()
+
+	for {
+		if w.stopping() {
+			w.rejectPending()
+			return
+		}
+		w.drain(store)
+		if w.stopping() {
+			w.rejectPending()
+			return
+		}
+
+		boundary := make(chan struct{})
+		passDone := make(chan struct{})
+		var once sync.Once
+		wakeDone := make(chan struct{})
+		go func() {
+			defer close(wakeDone)
+			select {
+			case <-w.stop:
+				once.Do(func() { close(boundary) })
+			case <-w.wake:
+				once.Do(func() { close(boundary) })
+			case <-passDone:
+			}
+		}()
+		out, runErr := loop.RunUntilBoundary(context.Background(), boundary)
+		close(passDone)
+		once.Do(func() { close(boundary) })
+		<-wakeDone
+		loop.Cursor = out.Cursor
+		w.publish(Result{Outcome: out, Err: runErr})
+		drained := w.drain(store)
+		if w.stopping() {
+			w.rejectPending()
+			return
+		}
+		if drained {
+			continue
+		}
+		if runErr != nil || out.StoppedBy == exec.StopTerminal {
+			w.wait()
+			continue
+		}
+		if out.StoppedBy == exec.StopIdle && out.State.Status != kernel.StatusBlocked {
+			w.wait()
+		}
+		_ = effective // retained by restored runtime for its immutable lifetime
+	}
+}
+
+func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, error) {
+	store, err := logstore.Open(w.dir)
+	if err != nil {
+		return nil, runconfig.Artifact{}, nil, err
+	}
+	var effective runconfig.Artifact
+	fail := func(err error) (*logstore.Store, runconfig.Artifact, *exec.Loop, error) {
+		_ = store.Close()
+		return nil, effective, nil, err
+	}
+	events, err := store.Read(1, 0)
+	if err != nil {
+		return fail(fmt.Errorf("read durable execution progress: %w", err))
+	}
+	effective, err = runconfig.VerifyBinding(w.dir, w.id, events)
+	if err != nil {
+		return fail(fmt.Errorf("verify immutable execution config: %w", err))
+	}
+	recovery, err := exec.Recover(events)
+	if err != nil {
+		return fail(fmt.Errorf("recover durable execution progress: %w", err))
+	}
+	if !recovery.HasProgress && !w.allowFresh {
+		return fail(ErrLegacy)
+	}
+	if len(recovery.Unknown) > 0 {
+		return fail(fmt.Errorf("%w: %s", ErrUnknown, recovery.Unknown[0]))
+	}
+	timers, err := exec.RecoverTimers(events)
+	if err != nil {
+		return fail(fmt.Errorf("restore durable timers: %w", err))
+	}
+	executor, err := w.opts.Build(w.dir, effective)
+	if err != nil {
+		return fail(fmt.Errorf("build executor: %w", err))
+	}
+
+	var clock exec.Clock
+	var timekeeper exec.Timekeeper
+	var now func() string
+	if effective.Mode == "sim" {
+		vc := exec.NewVirtualClock()
+		if err := vc.Restore(timers.NowMs, timers.Pending); err != nil {
+			return fail(err)
+		}
+		clock, timekeeper = vc, exec.VirtualTime{C: vc}
+		now = func() string { return time.UnixMilli(vc.NowMs()).UTC().Format(time.RFC3339Nano) }
+	} else {
+		rc := exec.NewRealClock()
+		if w.opts.Now != nil {
+			rc.Now = w.opts.Now
+		}
+		if err := rc.Restore(timers.Pending); err != nil {
+			return fail(err)
+		}
+		clock, timekeeper = rc, exec.RealTime{C: rc}
+		now = func() string {
+			if w.opts.Now != nil {
+				return w.opts.Now().UTC().Format(time.RFC3339Nano)
+			}
+			return time.Now().UTC().Format(time.RFC3339Nano)
+		}
+	}
+	runner := &exec.Runner{Log: store, Clock: clock, Executor: executor,
+		Config: effective.Config, RunID: w.id, Now: now}
+	loop := &exec.Loop{Runner: runner, Log: store, Time: timekeeper,
+		Config: effective.Config, Cursor: recovery.Cursor}
+	return store, effective, loop, nil
+}
+
+func (w *worker) stopping() bool {
+	select {
+	case <-w.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (w *worker) drain(store *logstore.Store) bool {
+	drained := false
+	for {
+		select {
+		case req := <-w.commands:
+			drained = true
+			req.reply <- req.fn(store)
+		default:
+			return drained
+		}
+	}
+}
+
+func (w *worker) wait() {
+	select {
+	case <-w.stop:
+	case <-w.wake:
+	}
+}
+
+func (w *worker) rejectPending() {
+	for {
+		select {
+		case req := <-w.commands:
+			req.reply <- ErrClosed
+		default:
+			return
+		}
+	}
+}
+
+func (w *worker) setErr(err error) {
+	if err == nil {
+		return
+	}
+	w.errMu.Lock()
+	if w.closeErr == nil {
+		w.closeErr = fmt.Errorf("close worker store: %w", err)
+	}
+	w.errMu.Unlock()
+}
+
+func (w *worker) err() error {
+	w.errMu.Lock()
+	defer w.errMu.Unlock()
+	return w.closeErr
+}
+
+func (w *worker) completion() (uint64, Result, bool) {
+	w.completionMu.Lock()
+	defer w.completionMu.Unlock()
+	return w.generation, w.latest, w.hasLatest
+}
+
+func (w *worker) completionState() (uint64, Result, bool, <-chan struct{}) {
+	w.completionMu.Lock()
+	defer w.completionMu.Unlock()
+	return w.generation, w.latest, w.hasLatest, w.changed
+}
+
+func (w *worker) publish(result Result) {
+	w.completionMu.Lock()
+	w.generation++
+	w.latest = result
+	w.hasLatest = true
+	changed := w.changed
+	w.changed = make(chan struct{})
+	close(changed)
+	w.completionMu.Unlock()
+
+	select {
+	case w.results <- result:
+	default:
+		select {
+		case <-w.results:
+		default:
+		}
+		w.results <- result
+	}
+}

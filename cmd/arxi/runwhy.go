@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/surface"
 )
@@ -46,6 +47,11 @@ import (
 // a file" means a user never has to know which form a command wants. It is the
 // same judgement resolveRunDir already makes for paths versus ids.
 
+type whyView struct {
+	kernel.Why
+	UnknownWork []string `json:"unknown_work,omitempty"`
+}
+
 func cmdRunWhy(args []string) {
 	c := surface.Lookup("run", "why")
 	vals, err := parseInvocation(c, args)
@@ -63,13 +69,13 @@ func cmdRunWhy(args []string) {
 		os.Exit(2)
 	}
 
-	st, cfg, err := whySubject(arg)
+	st, cfg, unknown, err := whySubject(arg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi run why: %v\n", err)
 		os.Exit(1)
 	}
 
-	emitWhy(kernel.Explain(st, cfg), vals["json"] == "true")
+	emitWhy(whyView{Why: kernel.Explain(st, cfg), UnknownWork: unknown}, vals["json"] == "true")
 }
 
 // whySubject resolves the argument to a state, from a run or from a file.
@@ -80,11 +86,18 @@ func cmdRunWhy(args []string) {
 // mentions `run why` prints a run id after it. Getting that order wrong is what
 // `arxi why <id>` already does today, and its answer -- "open <id>: no such
 // file or directory" -- describes the user's run as a missing file.
-func whySubject(arg string) (kernel.State, kernel.Config, error) {
+func whySubject(arg string) (kernel.State, kernel.Config, []string, error) {
 	dir := resolveRunDir(arg)
 	if _, err := os.Stat(dir); err == nil {
-		st, cfg, _, ferr := foldRunDir(dir)
-		return st, cfg, ferr
+		st, cfg, _, events, ferr := foldRunDirEvents(dir)
+		if ferr != nil {
+			return st, cfg, nil, ferr
+		}
+		recovery, rerr := exec.Recover(events)
+		if rerr != nil {
+			return st, cfg, nil, fmt.Errorf("invalid durable execution progress: %w", rerr)
+		}
+		return st, cfg, recovery.Unknown, nil
 	}
 
 	st, cfg, err := readStateFile(arg)
@@ -94,13 +107,13 @@ func whySubject(arg string) (kernel.State, kernel.Config, error) {
 		// they never meant to name; saying only "no such run" to somebody who
 		// passed a typo'd path hides the spelling mistake. The user knows which
 		// of the two they meant, and this is the one place that does not.
-		return kernel.State{}, kernel.Config{}, fmt.Errorf(
+		return kernel.State{}, kernel.Config{}, nil, fmt.Errorf(
 			"%q is neither a run nor a state file.\n"+
 				"  as a run:  %s does not exist\n"+
 				"  as a file: %v\n"+
 				"  see what exists: arxi run list", arg, dir, err)
 	}
-	return st, cfg, nil
+	return st, cfg, nil, nil
 }
 
 // readStateFile reads the {"state":...,"config":...} or bare-State form.
@@ -139,16 +152,23 @@ func readStateFile(path string) (kernel.State, kernel.Config, error) {
 // Shared with `arxi why` so the two spellings produce identical output. A
 // second renderer would drift, and the first thing to drift would be the
 // remedies -- the part a user copies and runs.
-func emitWhy(w kernel.Why, asJSON bool) {
+func emitWhy(view whyView, asJSON bool) {
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(w); err != nil {
+		if err := enc.Encode(view); err != nil {
 			fatal(err)
 		}
 		return
 	}
 
+	if len(view.UnknownWork) > 0 {
+		fmt.Printf("execution is blocked: %d external work item(s) have unknown outcomes; automatic redispatch is disabled\n", len(view.UnknownWork))
+		for _, id := range view.UnknownWork {
+			fmt.Printf("  %s\n", id)
+		}
+	}
+	w := view.Why
 	for _, l := range w.Lines {
 		if l.Depth == 0 {
 			fmt.Println(l.Text)

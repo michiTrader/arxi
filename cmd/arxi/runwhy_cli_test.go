@@ -2,11 +2,27 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func addUnknownWork(t *testing.T, dir, runID, workID string) {
+	t.Helper()
+	path := filepath.Join(dir, "runs", runID, "events.ndjson")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, `{"id":"prepared-unknown","seq":8,"type":"exec.work_prepared","source":"runtime","payload":{"work_id":%q,"source_seq":1}}
+{"id":"finished-unknown","seq":9,"type":"exec.work_finished","source":"runtime","payload":{"work_id":%q,"status":"unknown"}}
+`, workID, workID); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Process-level guards for `arxi run why`.
 //
@@ -167,6 +183,7 @@ func TestRunWhyOffersALockRemedyTheBinaryActuallyRuns(t *testing.T) {
 		`{"id":"e3","seq":3,"type":"lock.acquired","source":"human","payload":{"key":"migrations/"}}
 {"id":"e4","seq":4,"type":"agent.blocked","actor":"backend","payload":{"blocked_on":"lock","blocked_ref":{"key":"migrations/","holder":"human"}}}
 `)
+	upgradeFixtureRun(t, dir, "lock-blocked-0001")
 
 	why := arxi(t, dir, "run", "why", "lock-blocked-0001")
 
@@ -384,6 +401,33 @@ func TestRunWhyDoesNotDiagnoseAFinishedRun(t *testing.T) {
 	if strings.Contains(got.out, "possible remedies:") {
 		t.Errorf("a run that completed is offered remedies, which invents a "+
 			"problem it does not have:\n%s", got.out)
+	}
+}
+
+func TestRunWhyReportsUnknownExternalWork(t *testing.T) {
+	dir := workdir(t)
+	showBlocked(t, dir, "unknown-000000001")
+	addUnknownWork(t, dir, "unknown-000000001", "work-ambiguous")
+
+	got := arxi(t, dir, "run", "why", "unknown-000000001", "--json")
+	if got.code != 0 {
+		t.Fatalf("exit %d\n%s", got.code, got.out)
+	}
+	var view struct {
+		Unknown []string `json:"unknown_work"`
+	}
+	if err := json.Unmarshal([]byte(got.out), &view); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, got.out)
+	}
+	if len(view.Unknown) != 1 || view.Unknown[0] != "work-ambiguous" {
+		t.Fatalf("unknown_work = %v", view.Unknown)
+	}
+
+	text := arxi(t, dir, "run", "why", "unknown-000000001")
+	for _, want := range []string{"unknown outcomes", "automatic redispatch is disabled", "work-ambiguous"} {
+		if !strings.Contains(text.out, want) {
+			t.Errorf("missing %q:\n%s", want, text.out)
+		}
 	}
 }
 

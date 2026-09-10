@@ -157,9 +157,9 @@ func TestTheCeilingIsReadFromTheEnvironment(t *testing.T) {
 			askBudgetEnv, errs)
 	}
 
-	// A ceiling it cannot read stops the run before the run exists, which is the only
-	// useful moment to stop it: after executeRun the first turn may already have been
-	// taken and paid for.
+	// A ceiling it cannot read stops the run before durable acceptance, which is the
+	// only useful moment to stop it: after acceptance the resident worker may already
+	// have taken and paid for the first turn.
 	t.Setenv(askBudgetEnv, "0,50")
 	dir := workdir(t)
 	out, errs, code := arxiStreams(t, dir, "-p", "hola", "-m", "p/m", "--sim")

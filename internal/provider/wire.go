@@ -17,6 +17,7 @@
 package provider
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -55,6 +56,19 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
+// chatResponseMessage differs from a request message because providers may
+// return content:null alongside a tool call.
+type chatResponseMessage struct {
+	Role    string  `json:"role"`
+	Content *string `json:"content"`
+
+	// ToolCalls and FunctionCall are retained only to reject a capability this
+	// executor does not implement. RawMessage preserves presence without claiming
+	// to understand a provider-specific tool schema.
+	ToolCalls    json.RawMessage `json:"tool_calls"`
+	FunctionCall json.RawMessage `json:"function_call"`
+}
+
 // chatResponse is the part of the response this executor reads.
 //
 // Unknown fields are IGNORED here, which is the opposite of the rule the
@@ -79,9 +93,9 @@ type chatResponse struct {
 }
 
 type chatChoice struct {
-	Index        int         `json:"index"`
-	Message      chatMessage `json:"message"`
-	FinishReason string      `json:"finish_reason"`
+	Index        int                 `json:"index"`
+	Message      chatResponseMessage `json:"message"`
+	FinishReason string              `json:"finish_reason"`
 }
 
 // usage is the token count the bill is computed from.
@@ -117,10 +131,28 @@ func (e *wireError) String() string {
 // and the log should say so, while an empty string is a model that chose to say
 // nothing. Only the first choice is read because only one is ever requested.
 func (r *chatResponse) text() (string, bool) {
-	if len(r.Choices) == 0 {
+	if len(r.Choices) == 0 || r.Choices[0].Message.Content == nil {
 		return "", false
 	}
-	return r.Choices[0].Message.Content, true
+	return *r.Choices[0].Message.Content, true
+}
+
+// requestsTools reports a modern or legacy provider-native tool request.
+// Every choice is inspected: silently ignoring a tool request in choice 1 while
+// recording choice 0 as success would still misrepresent what the provider did.
+func (r *chatResponse) requestsTools() bool {
+	for _, choice := range r.Choices {
+		if choice.FinishReason == "tool_calls" || choice.FinishReason == "function_call" ||
+			presentJSON(choice.Message.ToolCalls) || presentJSON(choice.Message.FunctionCall) {
+			return true
+		}
+	}
+	return false
+}
+
+func presentJSON(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && !bytes.Equal(raw, []byte("null"))
 }
 
 // finishReason reports why generation stopped, or "" when the provider did not

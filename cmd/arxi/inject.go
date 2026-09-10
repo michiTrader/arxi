@@ -138,11 +138,13 @@ func injectCause(in injection, args []string) {
 
 	// The state is read BEFORE the append, because every refusal below depends
 	// on what the run was, and afterwards it has already been told something.
-	pre, cfg, simulated, err := foldRunDir(dir)
+	pre, effective, _, err := preflightEffectiveRun(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi run %s: %v\n", in.verb, err)
 		os.Exit(1)
 	}
+	cfg := effective.Config
+	simulated := effective.Mode == "sim"
 
 	// A finished run is refused. The reducer would accept the event and
 	// applyInjection would even spawn a turn, because it does not consult
@@ -342,7 +344,7 @@ func injectCause(in injection, args []string) {
 		fmt.Printf("  this run was started with --sim, so the turn is taken by the " +
 			"same fake executor: no model is called and no money is spent.\n")
 	}
-	driveResumedRun(dir, cfg, store, pre.RunID, simulated)
+	driveEffectiveRun(dir, effective, store, pre.RunID)
 }
 
 // refuseStaleCAS reports a rejected --if-seq and exits 1. It never returns.

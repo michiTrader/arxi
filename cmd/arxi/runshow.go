@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/app"
 	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/runread"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -63,23 +67,67 @@ func cmdRunShow(args []string) {
 	}
 
 	dir := resolveRunDir(runArg)
-	st, cfg, simulated, err := foldRunDir(dir)
+	projection, err := inspectRunForCLI(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "arxi run show: %v\n", err)
 		os.Exit(1)
 	}
 
-	id := st.RunID
+	// Inspect owns the lifecycle projection. This supplemental read is limited to
+	// display details the common DTO intentionally omits: historical questions,
+	// locks, pending causes, parentage, timers, and blueprint metadata/config.
+	detail, err := runread.Open(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "arxi run show: read projection details: %v\n", err)
+		os.Exit(1)
+	}
+	st := mergeInspectedLifecycle(detail.State, projection)
+
+	id := projection.ID
 	if id == "" {
 		id = filepath.Base(dir)
 	}
 
 	if vals["json"] == "true" {
-		emitJSON(runShowPayload(id, dir, st, cfg, simulated))
+		payload := runShowPayload(id, dir, st, detail.Config, projection.Simulated)
+		payload["unknown_work"] = projection.UnknownWork
+		emitJSON(payload)
 		return
 	}
 
-	printRunShow(id, dir, st, simulated)
+	printRunShow(id, dir, st, projection.Simulated, projection.UnknownWork)
+}
+
+// inspectRunForCLI keeps custom --dir runs addressable while routing every
+// lifecycle projection through the common application Inspect service.
+func inspectRunForCLI(dir string) (app.Projection, error) {
+	root, id := filepath.Dir(dir), filepath.Base(filepath.Clean(dir))
+	projection, err := app.NewReadService(root).Inspect(context.Background(), id)
+	if errors.Is(err, app.ErrNotFound) {
+		return app.Projection{}, fmt.Errorf(
+			"%s holds no event log, so it is not a run directory.\n"+
+				"  runs live under ./%s/<run-id> unless --dir said otherwise\n"+
+				"  see what is waiting: arxi inbox", dir, runsDir)
+	}
+	return projection, err
+}
+
+// mergeInspectedLifecycle overlays the application-owned lifecycle fields onto
+// the richer reducer state used only by this CLI's detail renderers.
+func mergeInspectedLifecycle(st kernel.State, projection app.Projection) kernel.State {
+	st.RunID = projection.ID
+	st.Actor = projection.Actor
+	st.Status = kernel.RunStatus(projection.Status)
+	st.Seq = projection.Sequence
+	st.Stage = projection.Stage
+	st.StageIndex = projection.StageIndex
+	st.Turns = projection.Turns
+	st.MaxTurns = projection.MaxTurns
+	st.SpentUSD = projection.SpentUSD
+	st.TreeSpentUSD = projection.TreeSpentUSD
+	st.BudgetUSD = projection.BudgetUSD
+	st.Result = projection.Result
+	return st
 }
 
 // runShowPayload is the machine reading.
@@ -181,7 +229,7 @@ func runShowPayload(id, dir string, st kernel.State, cfg kernel.Config, simulate
 	return out
 }
 
-func printRunShow(id, dir string, st kernel.State, simulated bool) {
+func printRunShow(id, dir string, st kernel.State, simulated bool, unknown []string) {
 	// The simulated marker rides on the headline rather than sitting in a
 	// footnote, because every money figure below it is fake and a reader who
 	// misses that fact misreads all of them. It is the one qualifier that
@@ -218,6 +266,12 @@ func printRunShow(id, dir string, st kernel.State, simulated bool) {
 	printShowMembers(st)
 	printShowLocks(st)
 	printShowAsks(st)
+	if len(unknown) > 0 {
+		fmt.Printf("\nexecution warning:\n  %d external work item(s) have unknown outcomes; automatic redispatch is disabled\n", len(unknown))
+		for _, id := range unknown {
+			fmt.Printf("  %s\n", id)
+		}
+	}
 
 	if st.Result != "" {
 		fmt.Printf("\nresult:\n  %s\n", st.Result)
