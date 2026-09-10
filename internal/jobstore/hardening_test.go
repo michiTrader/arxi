@@ -1,14 +1,58 @@
 package jobstore
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/job"
 )
+
+func TestFilesystemRecoversPendingMarkerAfterProcessExit(t *testing.T) {
+	if os.Getenv("ARXI_JOBSTORE_CRASH_HELPER") == "1" {
+		dir := os.Getenv("ARXI_JOBSTORE_CRASH_DIR")
+		store, err := Open(dir, time.Now)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if _, _, err := store.Admit(0, admission("crash", "job-crash", 100)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		info, _ := os.Stat(filepath.Join(dir, journalFile))
+		ghost := record{Revision: 3, Kind: kindSubmission, Data: encodeData(Submission{Key: "ghost", RequestDigest: "digest", JobID: "ghost-job"})}
+		line, _ := json.Marshal(ghost)
+		journal, _ := os.OpenFile(filepath.Join(dir, journalFile), os.O_APPEND|os.O_WRONLY, 0o600)
+		_, _ = journal.Write(append(line, '\n'))
+		_ = journal.Close()
+		marker, _ := json.Marshal(pendingMarker{Version: 1, PriorOffset: info.Size()})
+		_ = os.WriteFile(filepath.Join(dir, pendingFile), marker, 0o600)
+		os.Exit(0)
+	}
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestFilesystemRecoversPendingMarkerAfterProcessExit$")
+	cmd.Env = append(os.Environ(), "ARXI_JOBSTORE_CRASH_HELPER=1", "ARXI_JOBSTORE_CRASH_DIR="+dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("crash helper failed: %v\n%s", err, output)
+	}
+	store, err := Open(dir, time.Now)
+	if err != nil {
+		t.Fatalf("reopen after helper exited without Close: %v", err)
+	}
+	defer store.Close()
+	if _, err := os.Stat(filepath.Join(dir, pendingFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending marker survived recovery: %v", err)
+	}
+	if view := store.View(); view.Revision != 2 || len(view.Submissions) != 0 {
+		t.Fatalf("recovered revision = %d with submissions %#v, want revision 2 without ghost: pending bytes from a dead process must be rolled back", view.Revision, view.Submissions)
+	}
+}
 
 func TestFilesystemAllowsIndependentClientsAndSerializesTheirCAS(t *testing.T) {
 	dir := t.TempDir()
