@@ -57,6 +57,98 @@ func (quietExecutor) AskHuman(context.Context, kernel.AskHuman) ([]kernel.Event,
 	return nil, nil
 }
 
+type claimStub struct {
+	mu            sync.Mutex
+	checkpoints   [][2]int64
+	heartbeats    int
+	finishes      int
+	checkpointErr error
+}
+
+func (c *claimStub) Checkpoint(cursor, revision int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.checkpoints = append(c.checkpoints, [2]int64{cursor, revision})
+	return c.checkpointErr
+}
+func (c *claimStub) Heartbeat() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.heartbeats++
+	return nil
+}
+func (c *claimStub) Finish(exec.Outcome, error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.finishes++
+	return nil
+}
+
+func TestClaimCheckpointsConfirmedFrontierAndStopsAfterFenceLoss(t *testing.T) {
+	_, root := seedRun(t, "r1", "live", []kernel.Event{{ID: "step", Type: kernel.ExecStepCompleted,
+		Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(1)}}, {ID: "cancel", Type: kernel.RunCancelled, Source: kernel.SourceHuman}})
+	claim := &claimStub{checkpointErr: errors.New("stale fence")}
+	s := New(root, Options{Build: func(string, runconfig.Artifact) (exec.Executor, error) { return quietExecutor{}, nil }, Claim: claim})
+	h, err := s.Open(context.Background(), "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close(context.Background())
+	_, result, err := h.WaitCompletion(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "stale fence") {
+		t.Fatalf("worker result error = %v, want checkpoint fence loss", result.Err)
+	}
+	claim.mu.Lock()
+	defer claim.mu.Unlock()
+	if len(claim.checkpoints) != 1 || claim.checkpoints[0][0] != 3 || claim.checkpoints[0][1] < 4 {
+		t.Fatalf("checkpoints = %#v: the coordinator must receive the confirmed completed frontier and run revision", claim.checkpoints)
+	}
+	if claim.finishes != 1 {
+		t.Fatalf("terminal finish calls = %d, want one fenced terminal attempt", claim.finishes)
+	}
+}
+
+func TestShutdownStopsHeartbeatWithoutFinishingIdleJob(t *testing.T) {
+	_, root := seedRun(t, "r1", "live", nil)
+	claim := &claimStub{}
+	s := New(root, Options{Build: func(string, runconfig.Artifact) (exec.Executor, error) { return quietExecutor{}, nil }, Claim: claim, Heartbeat: time.Millisecond})
+	h, err := s.Open(context.Background(), "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		claim.mu.Lock()
+		beats := claim.heartbeats
+		claim.mu.Unlock()
+		if beats > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("heartbeat never renewed the active claim")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := h.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	claim.mu.Lock()
+	beats, finishes := claim.heartbeats, claim.finishes
+	claim.mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	claim.mu.Lock()
+	defer claim.mu.Unlock()
+	if claim.heartbeats != beats {
+		t.Fatalf("heartbeats advanced from %d to %d after shutdown: a stopped process must relinquish by expiry", beats, claim.heartbeats)
+	}
+	if finishes != 0 || claim.finishes != 0 {
+		t.Fatalf("shutdown recorded %d terminal outcomes: stopping heartbeat is not terminal evidence", claim.finishes)
+	}
+}
+
 func TestWaitCompletionRetainsFastPassForMultipleObservers(t *testing.T) {
 	_, root := seedRun(t, "r1", "live", nil)
 	s := New(root, Options{Build: func(string, runconfig.Artifact) (exec.Executor, error) { return quietExecutor{}, nil }})

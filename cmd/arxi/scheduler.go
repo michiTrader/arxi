@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ import (
 	"github.com/michiTrader/arxi/internal/jobstore"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
+	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/runread"
 	"github.com/michiTrader/arxi/internal/scheduler"
 	"github.com/michiTrader/arxi/internal/supervisor"
 	"github.com/michiTrader/arxi/internal/surface"
@@ -360,6 +363,74 @@ func newSelfRunner(self string) *selfRunner {
 			})
 		},
 	}
+}
+
+func (r *selfRunner) RecoverAccepted() error {
+	if r.coordinator == nil {
+		return nil
+	}
+	view := r.coordinator.View()
+	ids := make([]job.JobID, 0, len(view.Jobs))
+	for id, stored := range view.Jobs {
+		if !job.JobTerminal(stored.State) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		occurrence, ok := occurrenceForJob(view.Occurrences, id)
+		if !ok {
+			continue
+		}
+		if claim, active := view.Claims[id]; active && nowFunc().Before(claim.ExpiresAt) {
+			continue
+		}
+		run, err := runread.Open(filepath.Join("runs", string(id)))
+		if err != nil || len(run.Events) == 0 {
+			continue
+		}
+		if _, err := r.resumeAccepted(id, occurrence); err != nil && !errors.Is(err, jobstore.ErrConflict) {
+			return err
+		}
+	}
+	return nil
+}
+
+func occurrenceForJob(values map[job.OccurrenceID]job.Occurrence, id job.JobID) (job.Occurrence, bool) {
+	for _, occurrence := range values {
+		if occurrence.JobID == id && occurrence.State == job.OccurrenceAdmitted {
+			return occurrence, true
+		}
+	}
+	return job.Occurrence{}, false
+}
+
+func (r *selfRunner) resumeAccepted(id job.JobID, occurrence job.Occurrence) (scheduler.Execution, error) {
+	dir := filepath.Join("runs", string(id))
+	sup := supervisor.New("runs", supervisor.Options{Now: nowFunc, Build: func(dir string, effective runconfig.Artifact) (arxiexec.Executor, error) {
+		return runtimeExecutor(dir, effective), nil
+	}})
+	claim, err := claimScheduledJob(r.coordinator, id, r.owner)
+	if err != nil {
+		return nil, err
+	}
+	coordination := &scheduledClaim{store: r.coordinator, claim: claim, occurrence: occurrence.ID, reservation: occurrence.ReservationID}
+	if err := sup.ConfigureClaim(coordination, scheduledHeartbeatCadence); err != nil {
+		return nil, err
+	}
+	h, err := sup.Open(context.Background(), string(id))
+	if err != nil {
+		_ = sup.Close(context.Background())
+		return nil, err
+	}
+	submission := app.Submission{Result: app.SubmitResult{JobID: string(id)}, Dir: dir, Handle: h}
+	ex := &runExec{jobID: string(id), dir: dir, supervisor: sup, submission: submission,
+		done: make(chan struct{}), onDone: r.resident.Done, externalStop: make(chan struct{})}
+	ex.unregister = nativeLifecycles.register(dir, h)
+	go watchExternalDecisions(dir, h, ex.externalStop)
+	r.resident.Add(1)
+	go ex.observe()
+	return ex, nil
 }
 
 // How children agree with the parent about where triggers live
@@ -870,6 +941,10 @@ func cmdTriggerRun(args []string) {
 		defer coordination.Close()
 		resident = newSelfRunner(self)
 		resident.coordinator = coordination
+		if err := resident.RecoverAccepted(); err != nil {
+			fmt.Fprintf(os.Stderr, "arxi trigger run: recover accepted jobs: %v\n", err)
+			os.Exit(1)
+		}
 		runner = resident
 		schedulerCoordinator = schedulerCoordinatorAdapter{store: coordination}
 	}
