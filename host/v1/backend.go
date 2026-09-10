@@ -339,7 +339,7 @@ func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error)
 				}
 				continue
 			}
-			if errors.Is(claimErr, ErrStorageConflict) {
+			if isCoordinationConflict(claimErr) {
 				timer := time.NewTimer(25 * time.Millisecond)
 				select {
 				case <-ctx.Done():
@@ -612,6 +612,14 @@ func canonicalSubmitDigest(req SubmitRequest, actor, blueprintSHA string) (strin
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func isCoordinationConflict(err error) bool {
+	if errors.Is(err, ErrStorageConflict) {
+		return true
+	}
+	var hostErr *Error
+	return errors.As(err, &hostErr) && hostErr.Code == CodeConflict
 }
 
 func adaptCoordinationError(op Capability, id JobID, err error) error {
