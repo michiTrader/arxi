@@ -21,6 +21,7 @@ import (
 
 type storageBackend struct {
 	storage      JobStorage
+	coordination Coordination
 	provider     TextProvider
 	now          func() time.Time
 	capabilities *capabilityResolver
@@ -46,14 +47,18 @@ func newBackend(options Options) backend {
 		}
 		if options.Provider != nil {
 			installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
+			if options.Coordination != nil {
+				if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
+					installed[CapabilityRecover] = CapabilityRecover
+				}
+			}
 		}
-	}
 	resolver, err := newCapabilityResolver(installed, options.Authorizer)
 	if err != nil {
 		panic(err)
 	}
 	return &storageBackend{
-		storage: options.Storage, provider: options.Provider, now: options.Now,
+		storage: options.Storage, coordination: options.Coordination, provider: options.Provider, now: options.Now,
 		capabilities: resolver, workers: map[JobID]*storageWorker{},
 	}
 }

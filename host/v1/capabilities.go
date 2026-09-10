@@ -12,6 +12,7 @@ const (
 	CapabilityAnswer    Capability = "decision.answer"
 	CapabilityWait      Capability = "job.wait"
 	CapabilitySubscribe Capability = "event.subscribe"
+	CapabilityRecover   Capability = "job.recover"
 )
 
 // CapabilitySet is an immutable-by-convention effective capability snapshot.
