@@ -213,6 +213,7 @@ const (
 type Coordination interface {
 	BindSubmission(context.Context, SubmissionBinding) (SubmissionBinding, error)
 	Claim(context.Context, JobID) (ExecutionClaim, error)
+	Validate(context.Context, ExecutionClaim) error
 	Heartbeat(context.Context, ExecutionClaim) error
 	Checkpoint(context.Context, ExecutionCheckpoint) error
 	Complete(context.Context, ExecutionClaim, ExecutionOutcome) error
