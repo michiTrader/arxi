@@ -146,7 +146,29 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	if created.Writer == nil {
 		return out, adaptStorageError(CapabilitySubmit, id, 0, errors.New("storage returned no exclusive writer"))
 	}
+	var executionClaim ExecutionClaim
+	if b.coordination != nil {
+		_ = created.Writer.Close()
+		claim, claimErr := b.coordination.Claim(ctx, id)
+		if claimErr != nil {
+			return out, adaptCoordinationError(CapabilitySubmit, id, claimErr)
+		}
+		storage, safe := b.storage.(CoordinatedJobStorageV1)
+		if !safe {
+			return out, adaptCoordinationError(CapabilitySubmit, id, errors.New("job storage cannot fence claimed writers"))
+		}
+		writer, openErr := storage.OpenClaimedWriter(ctx, claim)
+		if openErr != nil {
+			return out, adaptStorageError(CapabilitySubmit, id, 0, openErr)
+		}
+		executionClaim = claim
+		created.Writer = writer
+	}
 	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.now, start)
+	if b.coordination != nil {
+		worker.coordination = &workerCoordination{port: b.coordination, claim: executionClaim}
+		worker.heartbeat = b.heartbeat
+	}
 	if err := b.installWorker(worker); err != nil {
 		_ = created.Writer.Close()
 		return out, adaptStorageError(CapabilitySubmit, id, 0, err)
