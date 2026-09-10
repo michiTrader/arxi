@@ -15,10 +15,10 @@ import (
 // boundary: when present, all acceptance, reads, mutations, waits, and
 // subscriptions use it.
 type Options struct {
-	Provider   TextProvider
-	Tools      ToolExecutor
-	Workspaces WorkspaceProvisioner
-	Storage      JobStorage
+	Provider              TextProvider
+	Tools                 ToolExecutor
+	Workspaces            WorkspaceProvisioner
+	Storage               JobStorage
 	Coordination          Coordination
 	CoordinationHeartbeat time.Duration
 	Authorizer            Authorizer

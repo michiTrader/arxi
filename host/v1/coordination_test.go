@@ -145,7 +145,9 @@ func TestRecoveryCapabilityRequiresCoordinationAndFencedStorage(t *testing.T) {
 func TestWaitWithCoordinationWaitsForActiveClaimInsteadOfReportingNotResident(t *testing.T) {
 	coordination := newMemoryCoordination()
 	storage := &coordinatedMemoryStorage{memoryStorage: newMemoryStorage(), coordination: coordination}
-	creator := New(Options{Storage: storage, Coordination: coordination, Provider: textProviderStub{}, CoordinationHeartbeat: time.Hour})
+	provider := &blockingTextProvider{started: make(chan struct{}), release: make(chan struct{})}
+	creator := New(Options{Storage: storage, Coordination: coordination,
+		Provider: provider, CoordinationHeartbeat: time.Hour})
 	result, err := creator.Submit(context.Background(), SubmitRequest{Blueprint: testBlueprint, Prompt: "work", BudgetUSD: 1, Simulated: true})
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +159,7 @@ func TestWaitWithCoordinationWaitsForActiveClaimInsteadOfReportingNotResident(t 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("wait behind active claim returned %v: coordinated hosts must wait, not report a nonresident job", err)
 	}
+	close(provider.release)
 	_ = waiter.Close()
 	_ = creator.Close()
 }
