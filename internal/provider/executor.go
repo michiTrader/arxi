@@ -63,13 +63,9 @@ type ToolRunner interface {
 	RunTool(ctx context.Context, member, name string, args map[string]any) (string, error)
 }
 
-// Executor is the live executor. It satisfies exec.Executor structurally.
-//
-// SpawnTurn calls a model. CallTool and AskHuman deliberately do not do their
-// real work yet, and they say so rather than pretending -- see their comments.
-// Shipping a CallTool that silently succeeded would be worse than one that
-// refuses: the reducer would advance a stage on the strength of a tool result
-// that never happened.
+// Executor is the live executor. It implements the text-only effect surface and
+// the provider-neutral native turn seam; policy-gated tools and human questions
+// are projected through the same domain events as their legacy effect paths.
 type Executor struct {
 	// Resolver maps a member's model ref to an endpoint and a key variable.
 	Resolver Resolver

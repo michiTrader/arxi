@@ -105,19 +105,24 @@ it explicitly instead of showing an empty line:
 
 | type | payload |
 |---|---|
-| `tool.call` | `tool`, `args?` |
-| `tool.call_completed` | `tool`, `result?` |
-| `tool.call_denied` | `tool`, `policy` |
+| `tool.call` | `tool`, `call_id`, `args?` |
+| `tool.call_completed` | `tool`, `call_id`, `result?` |
+| `tool.call_denied` | `tool`, `call_id`, `policy` |
 | `llm.response` | `cost_usd`, `tokens_in?`, `tokens_out?`, `model?`, `ok?`, `error?`, `status?`, `code?`, `retryable?`, `response_id?`, `finish_reason?`, `text?`, `coalesced?` |
 
-A provider-native tool request that the active executor cannot perform is a
-completed turn with a known outcome, not a transport failure. It records
-`ok: false`, `code: "unsupported_tool_calls"`, and `retryable: false`, preserves
-usage/cost and provider response identifiers when available, and is followed by
-`agent.turn_done`. It does not emit `tool.call` or execute a tool.
+A provider-native tool request enters the durable canonical turn loop. Each call
+emits `tool.call` with the provider-issued `call_id` and canonical `args`. An
+allowed call then emits `tool.call_completed` with the same `call_id` and its
+exact text result; that exact result is reinjected under the same ID before the
+next model request. Calls from one response and their results preserve provider
+order. The final `llm.response` aggregates input and output tokens across every
+model round and carries the final response ID, finish reason, refusal and text.
 
-`tool.call_denied` with `policy: "ask"` is **not an error**: it is a question. It
-creates an inbox item and leaves `blocked_ref` so the remedy is automatic.
+Policy is resolved before the tool runner. `tool.call_denied` with
+`policy: "ask"` is **not an error**: it is a question. It creates an inbox item
+and leaves `blocked_ref` so the remedy is automatic. `deny` is recorded without
+running the tool; neither outcome is reinjected because both stop the native
+loop at that known boundary.
 
 ## Durable execution progress
 
@@ -127,17 +132,19 @@ continuation boundaries, but do not themselves cause more effects.
 
 | type | payload | notes |
 |---|---|---|
-| `exec.work_prepared` | `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest` | The full manifest for a source event is committed before any external dispatch. IDs and digests use `canonical-effect-v1`. |
-| `exec.work_started` | `work_id` | Durable boundary immediately before an independent external dispatch. Local control effects do not cross this boundary. |
-| `exec.work_finished` | `work_id`, `status`, `error?` | `status` is exactly `completed`, `failed`, or `unknown`. Outcome domain events and this record are one append batch. |
+| `exec.work_prepared` | Top-level: `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest`. Native child: `work_id`, `parent_work_id`, `work_scope: "turn_child"`, `source_seq`, `child_kind`, `child_slot`, `request_json`. | The full top-level manifest is committed before external dispatch. Child request JSON is the exact provider-neutral model request or tool call that may dispatch. |
+| `exec.work_started` | `work_id`; native children also carry `parent_work_id`, `work_scope: "turn_child"` | Durable boundary immediately before an independent external dispatch. A native parent marker starts coordination; ambiguity is tracked by its model and tool children. |
+| `exec.work_finished` | `work_id`, `status`, `error?`; native children also carry `parent_work_id`, `work_scope: "turn_child"`, `result_json?` | `status` is exactly `completed`, `failed`, or `unknown`. A completed native child stores the exact canonical outcome used by recovery. |
 | `exec.step_completed` | `source_seq`, `source_event_id`, `work_ids` | Commits that every effect of the source event has a durable terminal outcome. `work_ids` preserves effect-list order. |
 
-A prepared work item may be dispatched after restart. A started item without a
-terminal record is materialized as `unknown` and is never automatically
-redispatched. A durable `unknown` blocks continuation until a later reconciliation
-facility can establish the external outcome. Finished work is not repeated, even
-when the process stopped before `exec.step_completed`; recovery closes the source
-step after validating its deterministic manifest.
+A prepared work item may be dispatched after restart. A started top-level native
+turn with no child may resume because its parent marker performs no external work;
+model and tool children each carry their own started boundary. Any other started
+item without a terminal record is materialized as `unknown` and is never
+automatically redispatched. A durable `unknown` blocks continuation until a later
+reconciliation facility can establish the external outcome. Finished work is not
+repeated, even when the process stopped before `exec.step_completed`; recovery
+closes the source step after validating its deterministic manifest.
 
 The resume cursor is the greatest contiguous source-event frontier proven by
 `exec.step_completed`. The physical log head is not a cursor: domain outcomes and

@@ -258,7 +258,7 @@ turn generated prose into trusted user truth.
 |---|---|---|
 | Runtime modularity | Internal packages have strong boundaries, but the runtime is compile-time closed | A small public embedding surface and governed capability adapters |
 | SDK and plugins | No supported in-process SDK or dynamic plugin contract | Versioned host, provider, tool and storage contracts |
-| Model tool use | Effects and tool runners exist, but the current provider request/response path does not complete a native tool loop | Provider-neutral tool calls with causal result reinjection |
+| Model tool use | OpenAI Chat Completions and Anthropic Messages share a durable provider-neutral loop with exact call-ID/result reinjection | Extend canonical content support and expose a separate versioned public turn contract only when external native providers require it |
 | Prompt memory | `ContextSpec.Memory` is frozen blueprint text | Optional scoped cross-run memory with provenance and user control |
 | Context overflow | `on_overflow: summarize` is declared but not executed | Tested compaction with an intact source transcript |
 | Scheduling | Temporal triggers exist, while in-flight execution state is process-local | Recoverable, idempotent scheduled and background work |

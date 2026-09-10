@@ -228,7 +228,8 @@ same time**. The two are different facts:
 |---|---|---|
 | Tool ran, exited non-zero | `tool.call_completed`, the exit status in `result` | no |
 | Provider refused the prompt | `llm.response` with `ok: false`, then `agent.turn_done` | no |
-| Provider requested native tool calls the executor does not implement | `llm.response` with `ok: false`, `code: unsupported_tool_calls`, then `agent.turn_done` | no |
+| Provider requested an allowed native tool call | `tool.call`, exact `tool.call_completed`, then the final `llm.response` and `agent.turn_done` | no |
+| Provider requested a native tool call stopped by `ask` or `deny` | `tool.call`, `tool.call_denied`, then `llm.response` and `agent.turn_done` | no |
 | Connection reset before the turn landed | `agent.failed`, the provider's message in `error` | yes |
 | Context cancelled mid-turn | `agent.failed`, the cancellation in `error` | yes |
 | A tool call could not be delivered | none | yes |
