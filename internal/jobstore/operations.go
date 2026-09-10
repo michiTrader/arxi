@@ -43,8 +43,14 @@ func (s *state) admit(expected Revision, value Admission) ([]record, job.Occurre
 		return nil, job.Occurrence{}, err
 	}
 	o := value.Occurrence
-	if o.ID == "" || o.JobID == "" || o.ReservationID == "" || o.State != job.OccurrenceAdmitted || value.Reserved.Coefficient == 0 {
-		return nil, job.Occurrence{}, ErrNotFound
+	if o.ID == "" || o.TriggerID == "" || o.JobID == "" || o.ReservationID == "" ||
+		o.NominalAt.IsZero() || o.State != job.OccurrenceAdmitted ||
+		value.Window.TriggerID == "" || value.Window.Period == "" || value.Window.StartsAt.IsZero() ||
+		value.Window.TriggerID != o.TriggerID || !validPeriod(value.Window.Period) ||
+		o.ID != job.OccurrenceIdentity(o.TriggerID, o.NominalAt) ||
+		!value.Ceiling.Canonical() || value.Ceiling.Coefficient == 0 ||
+		!value.Reserved.Canonical() || value.Reserved.Coefficient == 0 {
+		return nil, job.Occurrence{}, ErrConflict
 	}
 	if old, ok := s.view.Occurrences[o.ID]; ok {
 		if old == o {
@@ -129,6 +135,15 @@ func (s *state) heartbeat(expected Revision, jobID job.JobID, attemptID job.Atte
 	}
 	claim.ExpiresAt = now.Add(duration).UTC()
 	return []record{{Kind: kindHeartbeat, Data: encodeData(claim)}}, claim, nil
+}
+
+func validPeriod(period job.PeriodKind) bool {
+	switch period {
+	case job.PeriodHour, job.PeriodDay, job.PeriodWeek, job.PeriodMonth:
+		return true
+	default:
+		return false
+	}
 }
 
 func encodeData(value any) json.RawMessage {

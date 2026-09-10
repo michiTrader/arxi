@@ -57,6 +57,10 @@ func (s *state) active(jobID job.JobID, attemptID job.AttemptID, fence job.Fence
 	return j, a, claim, nil
 }
 
+func cloneState(in *state) *state {
+	return &state{view: cloneView(in.view)}
+}
+
 func cloneView(in View) View {
 	out := newState().view
 	out.Revision = in.Revision

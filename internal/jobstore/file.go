@@ -18,6 +18,7 @@ import (
 
 const journalFile = "coordination.ndjson"
 const pendingFile = "pending.commit"
+const lockFile = "writer.lock"
 
 type pendingMarker struct {
 	Version     int   `json:"version"`
@@ -30,15 +31,29 @@ type File struct {
 	clock   Clock
 	state   *state
 	journal *os.File
+	lock    *os.File
 	size    int64
 	closed  bool
 }
 
 func Open(dir string, clock Clock) (*File, error) {
+	if clock == nil {
+		return nil, ErrClockRequired
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("jobstore: create directory: %w", err)
 	}
-	file := &File{dir: dir, clock: clock, state: newState()}
+	lock, err := acquireLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	file := &File{dir: dir, clock: clock, state: newState(), lock: lock}
+	failed := true
+	defer func() {
+		if failed {
+			_ = file.releaseLock()
+		}
+	}()
 	if err := file.rollback(); err != nil {
 		return nil, err
 	}
@@ -54,11 +69,13 @@ func Open(dir string, clock Clock) (*File, error) {
 		journal.Close()
 		return nil, err
 	}
+	failed = false
 	return file, nil
 }
 
 func (f *File) journalPath() string { return filepath.Join(f.dir, journalFile) }
 func (f *File) pendingPath() string { return filepath.Join(f.dir, pendingFile) }
+func (f *File) lockPath() string    { return filepath.Join(f.dir, lockFile) }
 
 func (f *File) scan() error {
 	journal, err := os.Open(f.journalPath())
@@ -124,6 +141,10 @@ func (f *File) commit(records []record) (Revision, error) {
 		return f.state.view.Revision, nil
 	}
 	records = numbered(records, f.state.view.Revision)
+	candidate := cloneState(f.state)
+	if err := candidate.apply(records); err != nil {
+		return f.state.view.Revision, err
+	}
 	var body []byte
 	for _, entry := range records {
 		encoded, err := json.Marshal(entry)
@@ -148,9 +169,7 @@ func (f *File) commit(records []record) (Revision, error) {
 	if err := syncDir(f.dir); err != nil {
 		return f.state.view.Revision, err
 	}
-	if err := f.state.apply(records); err != nil {
-		return f.state.view.Revision, err
-	}
+	f.state = candidate
 	f.size += int64(len(body))
 	return f.state.view.Revision, nil
 }
@@ -197,6 +216,44 @@ func (f *File) rollback() error {
 		return fmt.Errorf("jobstore: remove pending marker: %w", err)
 	}
 	return syncDir(f.dir)
+}
+
+func acquireLock(dir string) (*os.File, error) {
+	path := filepath.Join(dir, lockFile)
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		owner := "an unknown process"
+		if body, readErr := os.ReadFile(path); readErr == nil && len(bytes.TrimSpace(body)) > 0 {
+			owner = string(bytes.TrimSpace(body))
+		}
+		return nil, &LockedError{Dir: dir, Owner: owner}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("jobstore: acquire coordination writer lock: %w", err)
+	}
+	if _, err := fmt.Fprintf(lock, "pid %d\n", os.Getpid()); err != nil {
+		lock.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("jobstore: record coordination lock owner: %w", err)
+	}
+	if err := lock.Sync(); err != nil {
+		lock.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("jobstore: sync coordination writer lock: %w", err)
+	}
+	return lock, nil
+}
+
+func (f *File) releaseLock() error {
+	if f.lock == nil {
+		return nil
+	}
+	err := f.lock.Close()
+	f.lock = nil
+	if removeErr := os.Remove(f.lockPath()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && err == nil {
+		err = fmt.Errorf("jobstore: remove coordination writer lock: %w", removeErr)
+	}
+	return err
 }
 
 func truncateSync(path string, size int64) error {
@@ -322,7 +379,14 @@ func (f *File) Close() error {
 		return nil
 	}
 	f.closed = true
-	return f.journal.Close()
+	var firstErr error
+	if f.journal != nil {
+		firstErr = f.journal.Close()
+	}
+	if err := f.releaseLock(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 var _ Store = (*File)(nil)

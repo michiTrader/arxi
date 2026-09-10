@@ -18,8 +18,20 @@ var (
 	ErrNotFound       = errors.New("coordination record does not exist")
 	ErrBudgetExceeded = errors.New("periodic budget ceiling exceeded")
 	ErrAmountOverflow = errors.New("amount arithmetic overflow")
+	ErrClockRequired  = errors.New("coordination store requires a clock")
 	ErrClosed         = errors.New("coordination store is closed")
 )
+
+type LockedError struct {
+	Dir   string
+	Owner string
+}
+
+func (e *LockedError) Error() string {
+	return "coordination directory " + e.Dir + " is already open for writing by " + e.Owner +
+		": exactly one writer may assign journal revisions; if that writer is certainly dead, remove " +
+		e.Dir + "/writer.lock after confirming no process is running"
+}
 
 type RevisionError struct {
 	Expected Revision

@@ -18,6 +18,13 @@ func NewMemory(clock Clock) *Memory {
 	return &Memory{clock: clock, state: newState()}
 }
 
+func (m *Memory) now() (time.Time, error) {
+	if m.clock == nil {
+		return time.Time{}, ErrClockRequired
+	}
+	return m.clock(), nil
+}
+
 func (m *Memory) View() View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -32,9 +39,11 @@ func (m *Memory) commit(records []record) (Revision, error) {
 		return m.state.view.Revision, nil
 	}
 	records = numbered(records, m.state.view.Revision)
-	if err := m.state.apply(records); err != nil {
+	candidate := cloneState(m.state)
+	if err := candidate.apply(records); err != nil {
 		return m.state.view.Revision, err
 	}
+	m.state = candidate
 	return m.state.view.Revision, nil
 }
 
@@ -61,7 +70,11 @@ func (m *Memory) Admit(expected Revision, value Admission) (job.Occurrence, Revi
 func (m *Memory) Claim(expected Revision, id job.JobID, owner string, duration time.Duration) (job.Claim, Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	records, result, err := m.state.claim(expected, id, owner, duration, m.clock())
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return job.Claim{}, m.state.view.Revision, clockErr
+	}
+	records, result, err := m.state.claim(expected, id, owner, duration, now)
 	if err != nil {
 		return job.Claim{}, m.state.view.Revision, err
 	}
@@ -71,7 +84,11 @@ func (m *Memory) Claim(expected Revision, id job.JobID, owner string, duration t
 func (m *Memory) Heartbeat(expected Revision, id job.JobID, attempt job.AttemptID, fence job.Fence, duration time.Duration) (job.Claim, Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	records, result, err := m.state.heartbeat(expected, id, attempt, fence, duration, m.clock())
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return job.Claim{}, m.state.view.Revision, clockErr
+	}
+	records, result, err := m.state.heartbeat(expected, id, attempt, fence, duration, now)
 	if err != nil {
 		return job.Claim{}, m.state.view.Revision, err
 	}
@@ -81,7 +98,11 @@ func (m *Memory) Heartbeat(expected Revision, id job.JobID, attempt job.AttemptI
 func (m *Memory) Checkpoint(expected Revision, value job.Checkpoint) (Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	records, err := m.state.checkpoint(expected, value, m.clock())
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return m.state.view.Revision, clockErr
+	}
+	records, err := m.state.checkpoint(expected, value, now)
 	if err != nil {
 		return m.state.view.Revision, err
 	}
@@ -90,7 +111,11 @@ func (m *Memory) Checkpoint(expected Revision, value job.Checkpoint) (Revision, 
 func (m *Memory) RecordReceipt(expected Revision, value job.Receipt) (Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	records, err := m.state.receipt(expected, value, m.clock())
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return m.state.view.Revision, clockErr
+	}
+	records, err := m.state.receipt(expected, value, now)
 	if err != nil {
 		return m.state.view.Revision, err
 	}
@@ -108,7 +133,11 @@ func (m *Memory) Cancel(expected Revision, value Cancellation) (Revision, error)
 func (m *Memory) Settle(expected Revision, value Settlement) (Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	records, err := m.state.settle(expected, value, m.clock())
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return m.state.view.Revision, clockErr
+	}
+	records, err := m.state.settle(expected, value, now)
 	if err != nil {
 		return m.state.view.Revision, err
 	}
@@ -117,7 +146,11 @@ func (m *Memory) Settle(expected Revision, value Settlement) (Revision, error) {
 func (m *Memory) Complete(expected Revision, value Completion) (Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	records, err := m.state.complete(expected, value, m.clock())
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return m.state.view.Revision, clockErr
+	}
+	records, err := m.state.complete(expected, value, now)
 	if err != nil {
 		return m.state.view.Revision, err
 	}

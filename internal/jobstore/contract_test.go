@@ -32,10 +32,16 @@ func factories() []storeFactory {
 }
 
 func admission(id, jobID string, amount uint64) Admission {
-	nominal := time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC)
+	windowStart := time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC)
+	var slotOffset int
+	for _, value := range []byte(id) {
+		slotOffset += int(value)
+	}
+	nominal := windowStart.Add(time.Duration(slotOffset) * time.Second)
+	occurrenceID := job.OccurrenceIdentity("trigger", nominal)
 	return Admission{
-		Occurrence: job.Occurrence{ID: job.OccurrenceID(id), TriggerID: "trigger", NominalAt: nominal, State: job.OccurrenceAdmitted, JobID: job.JobID(jobID), ReservationID: "reservation-" + id},
-		Window:     job.LedgerWindow{TriggerID: "trigger", Period: job.PeriodDay, StartsAt: nominal},
+		Occurrence: job.Occurrence{ID: occurrenceID, TriggerID: "trigger", NominalAt: nominal, State: job.OccurrenceAdmitted, JobID: job.JobID(jobID), ReservationID: "reservation-" + id},
+		Window:     job.LedgerWindow{TriggerID: "trigger", Period: job.PeriodDay, StartsAt: windowStart},
 		Ceiling:    job.NewAmount(1000, 2), Reserved: job.NewAmount(amount, 2),
 	}
 }
