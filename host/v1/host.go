@@ -19,8 +19,9 @@ type Options struct {
 	Tools      ToolExecutor
 	Workspaces WorkspaceProvisioner
 	Storage      JobStorage
-	Coordination Coordination
-	Authorizer   Authorizer
+	Coordination          Coordination
+	CoordinationHeartbeat time.Duration
+	Authorizer            Authorizer
 	// Now supplies the lifecycle event clock. It is primarily useful to composition
 	// roots that already expose a deterministic clock; nil uses time.Now.
 	Now func() time.Time
