@@ -104,6 +104,32 @@ func TestKernelDoesNotImportOtherLayers(t *testing.T) {
 	}
 }
 
+// TestJobCoordinationIsPureAndIndependent keeps lease judgments reproducible.
+//
+// The model may represent instants with time.Time, but it must never acquire an
+// instant or perform coordination itself. If a claim check reads a clock, the
+// same claim can be accepted during replay and rejected during the original
+// fold. Storage, locks and external dispatch belong to later adapter packages.
+func TestJobCoordinationIsPureAndIndependent(t *testing.T) {
+	permitted := map[string]bool{"time": true}
+	for _, p := range ownClosure(t, mod+"internal/job") {
+		for _, imp := range p.Imports {
+			if permitted[imp] {
+				continue
+			}
+			if why, bad := forbidden[imp]; bad {
+				t.Errorf("%s imports %q.\n  why this is wrong: %s. Job coordination must be a function of records and explicitly supplied instants, or replay can disagree with the original decision.\n  what to do: pass the instant or evidence into internal/job and perform clocks, storage, dispatch and I/O in an adapter.", p.ImportPath, imp, why)
+			}
+		}
+	}
+
+	for _, d := range list(t, mod+"internal/job").Deps {
+		if strings.HasPrefix(d, mod) {
+			t.Errorf("internal/job depends on %s.\n  why this is wrong: the coordination vocabulary is a pure leaf shared by stores, schedulers and executors; importing one of those layers would make the model perform the work it only describes.\n  what to do: keep records and validation in internal/job and let the caller join them to runtime adapters.", d)
+		}
+	}
+}
+
 // TestBlueprintDependsOnlyOnTheKernel keeps blueprint loading a leaf.
 //
 // The temptation as the run loop lands will be to have the loader open the log
