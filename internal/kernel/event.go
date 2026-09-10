@@ -81,8 +81,19 @@ const (
 	InboxReplied EventType = "inbox.replied"
 	InboxTimeout EventType = "inbox.timeout"
 
+	// --- durable execution progress ---
+	// These records are operational facts. They never wake watchers or cause
+	// quiescence decisions; the executor uses them to recover effect boundaries.
+	ExecWorkPrepared  EventType = "exec.work_prepared"
+	ExecWorkStarted   EventType = "exec.work_started"
+	ExecWorkFinished  EventType = "exec.work_finished"
+	ExecStepCompleted EventType = "exec.step_completed"
+
 	// --- clock ---
-	TimerTick EventType = "timer.tick"
+	TimerScheduled EventType = "timer.scheduled"
+	TimerCancelled EventType = "timer.cancelled"
+	TimerFired     EventType = "timer.fired"
+	TimerTick      EventType = "timer.tick"
 )
 
 // Source says who produced the event.

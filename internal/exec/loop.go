@@ -105,6 +105,10 @@ type Loop struct {
 	// Zero means DefaultMaxSteps. It is deliberately high: reaching it is a bug
 	// report, not a limit users should tune.
 	MaxSteps int
+
+	// blockedPublished prevents a resident worker from repeatedly publishing the
+	// same blocked standstill while it continues waiting for an armed timer.
+	blockedPublished bool
 }
 
 // DefaultMaxSteps is the fold ceiling when Loop.MaxSteps is unset.
@@ -161,34 +165,27 @@ type Outcome struct {
 // world, and Cancelled is the caller giving up.
 const (
 	StopTerminal  = "terminal"  // the run reached a terminal status
-	StopIdle      = "idle"      // no unread events and no armed timer
+	StopIdle      = "idle"      // no runnable work at this standstill
 	StopCancelled = "cancelled" // the context was cancelled
+	StopWoken     = "woken"     // a caller requested the next safe execution boundary
 )
 
 // Run folds the log forward, executing effects, until the run reaches a
 // standstill.
-//
-// THE SHAPE OF THE LOOP, and why it is a fold rather than a work queue:
-//
-//	read the events after the cursor
-//	  none? deliver due timers; still none? advance to the next deadline;
-//	        no deadline either? the run is idle, stop
-//	  for each event: state, effects = Decide(state, event, config)
-//	                  the runner executes them, which appends MORE events
-//	  repeat
-//
-// The Runner's appends are what feed the next read, so this function contains no
-// queue and has nothing to keep in sync. An Emit becomes an event that is folded
-// exactly like an event from a provider, which is why a derived stage.entered
-// drives the run identically whether the reducer produced it or a human typed
-// `arxi run steer`.
-//
-// The cursor advances only after an event is folded, and the state is carried
-// across iterations rather than re-folded from seq 1 each time. Re-folding would
-// be equally correct and quadratic; carrying it is safe because events are read
-// in seq order and folded exactly once, which is the same sequence kernel.Fold
-// performs.
 func (l *Loop) Run(ctx context.Context) (Outcome, error) {
+	return l.run(ctx, nil)
+}
+
+// RunUntilBoundary is the resident-worker entry point. stop is sampled only
+// between completed source events. In particular it is never passed to Runner,
+// so requesting a boundary cannot cancel an external call that was already
+// dispatched; that call first commits its terminal work record, then the loop
+// returns StopWoken before starting another source event.
+func (l *Loop) RunUntilBoundary(ctx context.Context, stop <-chan struct{}) (Outcome, error) {
+	return l.run(ctx, stop)
+}
+
+func (l *Loop) run(ctx context.Context, stop <-chan struct{}) (Outcome, error) {
 	var out Outcome
 
 	limit := l.MaxSteps
@@ -235,6 +232,10 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 	l.Runner.SeedIDs(l.Log.Head())
 
 	for {
+		if boundaryRequested(stop) {
+			out.StoppedBy = StopWoken
+			return out, nil
+		}
 		if err := ctx.Err(); err != nil {
 			out.StoppedBy = StopCancelled
 			return out, nil
@@ -250,21 +251,49 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 		}
 
 		if len(events) == 0 {
+			// A blocked state is a private standstill even when a decision timeout
+			// remains armed. Publish it once; the resident worker then continues
+			// waiting for the timer without repeatedly publishing the same state.
+			if out.State.Status == kernel.StatusBlocked && stop != nil && !l.blockedPublished {
+				l.blockedPublished = true
+				out.StoppedBy = StopIdle
+				return out, nil
+			}
 			// Nothing new to fold. Before concluding the run is idle, give the
 			// clock a chance: a stage waiting on its timeout has no unread
 			// events and is very much not finished.
-			moved, err := l.tick(ctx)
+			moved, err := l.tick(ctx, stop)
 			if err != nil {
 				return out, err
 			}
 			if moved {
 				continue
 			}
+			if boundaryRequested(stop) {
+				out.StoppedBy = StopWoken
+				return out, nil
+			}
 			out.StoppedBy = StopIdle
 			return out, nil
 		}
 
 		for _, e := range events {
+			if boundaryRequested(stop) {
+				out.StoppedBy = StopWoken
+				return out, nil
+			}
+			// Progress records are bookkeeping for the source step, not new steps.
+			// Deciding one again would create an infinite chain of step-completed
+			// records about step-completed records.
+			if isProgressEvent(e.Type) {
+				out.State, _ = kernel.Decide(out.State, e, l.Config)
+				if out.State.Status != kernel.StatusBlocked {
+					l.blockedPublished = false
+				}
+				cursor = e.Seq
+				out.Cursor = cursor
+				continue
+			}
 			if out.Steps >= limit {
 				return out, fmt.Errorf("%w (%d events): the reducer keeps deriving "+
 					"events without the run reaching a standstill, which is a cycle in "+
@@ -277,10 +306,13 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 
 			var fx []kernel.Effect
 			out.State, fx = kernel.Decide(out.State, e, l.Config)
+			if out.State.Status != kernel.StatusBlocked {
+				l.blockedPublished = false
+			}
 			cursor = e.Seq
 			out.Steps++
 
-			res, err := l.Runner.Run(ctx, fx)
+			res, err := l.Runner.RunStep(ctx, e, fx)
 			out.Errs = append(out.Errs, res.Errs...)
 			out.SnapshotSkipped += res.SnapshotSkipped
 			if err != nil {
@@ -306,6 +338,28 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 	}
 }
 
+func boundaryRequested(stop <-chan struct{}) bool {
+	if stop == nil {
+		return false
+	}
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func isProgressEvent(t kernel.EventType) bool {
+	switch t {
+	case kernel.ExecWorkPrepared, kernel.ExecWorkStarted, kernel.ExecWorkFinished,
+		kernel.ExecStepCompleted, kernel.TimerScheduled, kernel.TimerCancelled,
+		kernel.TimerFired:
+		return true
+	}
+	return false
+}
+
 // tick delivers fired timers as events, advancing time if nothing has fired yet.
 //
 // It reports whether it made progress. False means no timer is armed at all,
@@ -317,7 +371,7 @@ func (l *Loop) Run(ctx context.Context) (Outcome, error) {
 // what it means for the run is a decision. If this function emitted stage.timeout
 // directly, `run`, `--sim` and resume would each carry a copy of that mapping,
 // and `replay` — which appends nothing — could not agree with any of them.
-func (l *Loop) tick(ctx context.Context) (bool, error) {
+func (l *Loop) tick(ctx context.Context, stop <-chan struct{}) (bool, error) {
 	if fired := l.Time.Due(); len(fired) > 0 {
 		return true, l.appendTicks(fired)
 	}
@@ -326,7 +380,23 @@ func (l *Loop) tick(ctx context.Context) (bool, error) {
 	if !armed {
 		return false, nil
 	}
-	if err := l.Time.Advance(ctx, delta); err != nil {
+	advanceCtx := ctx
+	var cancel context.CancelFunc
+	if stop != nil {
+		advanceCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-advanceCtx.Done():
+			}
+		}()
+	}
+	if err := l.Time.Advance(advanceCtx, delta); err != nil {
+		if boundaryRequested(stop) {
+			return false, nil
+		}
 		return false, fmt.Errorf("run loop: advance time by %d ms: %w", delta, err)
 	}
 
@@ -342,7 +412,10 @@ func (l *Loop) tick(ctx context.Context) (bool, error) {
 	return true, l.appendTicks(fired)
 }
 
-// appendTicks writes one timer.tick per fired id.
+// appendTicks atomically records each timer firing and its reducer-facing tick.
+// Pairing the operational lifecycle record with delivery in one append closes
+// both crash gaps: a failed append leaves the timer recoverably pending, while a
+// confirmed append prevents restoration from delivering it a second time.
 //
 // Source is SourceRuntime because the clock IS part of the runtime, and that
 // classification has a consequence the reducer relies on: runtime events do not
@@ -364,17 +437,23 @@ func (l *Loop) tick(ctx context.Context) (bool, error) {
 // same bytes. A tick being a root is also true to what it is: time passing is not
 // an event's consequence. See the note on kernel.SetTimer.
 func (l *Loop) appendTicks(fired []string) error {
-	events := make([]kernel.Event, 0, len(fired))
+	events := make([]kernel.Event, 0, len(fired)*2)
 	for _, id := range fired {
-		events = append(events, kernel.Event{
-			Type:    kernel.TimerTick,
-			Scope:   "run:" + l.Config.Blueprint,
-			Source:  kernel.SourceRuntime,
-			Payload: map[string]any{"timer_id": id},
-		})
+		common := kernel.Event{
+			Scope:  "run:" + l.Config.Blueprint,
+			Source: kernel.SourceRuntime,
+		}
+		common.Type = kernel.TimerFired
+		common.Payload = map[string]any{
+			"timer_id": id, "fired_at_ms": l.Runner.Clock.NowMs(),
+		}
+		events = append(events, common)
+		common.Type = kernel.TimerTick
+		common.Payload = map[string]any{"timer_id": id}
+		events = append(events, common)
 	}
 	if _, err := l.Log.Append(l.Runner.stamp(events)); err != nil {
-		return fmt.Errorf("run loop: append %d timer tick(s): %w", len(events), err)
+		return fmt.Errorf("run loop: append %d timer firing(s): %w", len(fired), err)
 	}
 	return nil
 }

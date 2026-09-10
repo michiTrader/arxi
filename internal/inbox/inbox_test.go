@@ -1,7 +1,9 @@
 package inbox
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,7 +167,6 @@ func TestTheLogSaysWhetherAHumanApprovedOrRejected(t *testing.T) {
 	}{
 		{"approve", Reply{Decision: DecisionApprove}},
 		{"reject", Reply{Decision: DecisionReject, Text: "it hits staging"}},
-		{"answer", Reply{Decision: DecisionAnswer, Text: "use -short"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := blocked(t)
@@ -190,6 +191,57 @@ func TestTheLogSaysWhetherAHumanApprovedOrRejected(t *testing.T) {
 				t.Error("the appended event came back with no seq, so it was never written")
 			}
 		})
+	}
+}
+
+func question(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "r1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := logstore.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Append([]kernel.Event{
+		{ID: "e1", Type: kernel.RunStarted, Payload: map[string]any{"run_id": "r1"}},
+		{ID: "e2", Type: kernel.InboxCreated, Payload: map[string]any{
+			"inbox_id": "inbox-1", "kind": "question", "question": "which target?",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestDecisionVerbsRequireTheirExactItemKind(t *testing.T) {
+	dir := blocked(t)
+	if _, err := AnswerExact(dir, "inbox-1", Reply{Decision: DecisionAnswer, Text: "staging"}); !errors.Is(err, ErrWrongDecisionKind) {
+		t.Fatalf("answering approval returned %v, want ErrWrongDecisionKind", err)
+	}
+
+	for _, reply := range []Reply{{Decision: DecisionApprove}, {Decision: DecisionReject, Text: "no"}} {
+		dir = question(t)
+		if _, err := AnswerExact(dir, "inbox-1", reply); !errors.Is(err, ErrWrongDecisionKind) {
+			t.Fatalf("%s on question returned %v, want ErrWrongDecisionKind", reply.Decision, err)
+		}
+	}
+
+	dir = question(t)
+	if _, err := AnswerExact(dir, "inbox-1", Reply{Decision: DecisionAnswer, Text: "staging"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnswerRequiresNonWhitespaceText(t *testing.T) {
+	dir := question(t)
+	if _, err := Answer(dir, "inbox-1", Reply{Decision: DecisionAnswer, Text: " \n\t"}); err == nil {
+		t.Fatal("whitespace answer was accepted")
 	}
 }
 
@@ -391,6 +443,38 @@ func TestATruncatedLastLineIsStaleRatherThanCorrupt(t *testing.T) {
 	if pending := r.List(true); len(pending) != 1 {
 		t.Errorf("%d pending, want 1: the half-written line should be ignored, not "+
 			"folded", len(pending))
+	}
+}
+
+func TestACompleteProvisionalReplyStaysInvisible(t *testing.T) {
+	dir := blocked(t)
+	path := filepath.Join(dir, eventsFileName)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := kernel.Event{
+		Seq: 5, ID: "e5", Type: kernel.InboxReplied,
+		Payload: map[string]any{"inbox_id": "inbox-1", "text": "approved"},
+	}
+	line, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(before, append(line, '\n')...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pending.commit"),
+		[]byte(fmt.Sprintf("%d\n", len(before))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := OpenRun(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := r.List(true); len(pending) != 1 {
+		t.Fatalf("%d pending, want 1: a complete provisional reply was folded before commit", len(pending))
 	}
 }
 

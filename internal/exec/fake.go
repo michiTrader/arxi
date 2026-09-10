@@ -227,7 +227,7 @@ func (f *Fake) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.Even
 	// before failing would leave a member the reducer believes is thinking, with a
 	// turn that can never close.
 	if err, ok := f.BreakTurns[e.Agent]; ok {
-		return nil, fmt.Errorf("spawn turn for %s: %w", e.Agent, err)
+		return nil, NotDispatched(fmt.Errorf("spawn turn for %s: %w", e.Agent, err))
 	}
 
 	events := []kernel.Event{
@@ -357,7 +357,7 @@ func (f *Fake) CallTool(ctx context.Context, e kernel.CallTool) ([]kernel.Event,
 	// "the call never landed" and "the call landed and failed" are different
 	// facts, and only the second one belongs in the log.
 	if err, ok := f.BreakTools[e.Tool]; ok {
-		return nil, fmt.Errorf("call tool %s: %w", e.Tool, err)
+		return nil, NotDispatched(fmt.Errorf("call tool %s: %w", e.Tool, err))
 	}
 
 	// A policy stop comes before the failure knobs because the tool never ran:

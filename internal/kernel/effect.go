@@ -209,10 +209,11 @@ func (AskHuman) isEffect()           {}
 func (AskHuman) Class() EffectClass  { return ClassIndependent }
 func (a AskHuman) Provenance() Cause { return a.Cause }
 
-// Snapshot materializes the state at the given seq so that `run show` does not
-// have to replay the entire log. It is control because it must look consistent
-// with the events already emitted in this same step.
-type Snapshot struct{ AtSeq int64 }
+// Snapshot materializes the state at the confirmed log head when the effect is
+// executed, so that `run show` does not have to replay the entire log. It is
+// control because it must look consistent with the events already emitted in
+// this same step.
+type Snapshot struct{}
 
 func (Snapshot) isEffect()          {}
 func (Snapshot) Class() EffectClass { return ClassControl }

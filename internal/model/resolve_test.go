@@ -14,18 +14,48 @@ func mustNew(t *testing.T, name, baseURL string) Provider {
 	return p
 }
 
+func openAIGatewayOffering(t *testing.T, name string, models ...Model) Provider {
+	t.Helper()
+	p := mustNew(t, name, "https://gateway.example/v1")
+	p.Models = models
+	return p
+}
+
 // The ordinary case: a bare id, one provider, enabled.
 func TestABareIDResolvesToTheProviderThatOffersIt(t *testing.T) {
-	ps := []Provider{mustNew(t, "anthropic", "")}
+	ps := []Provider{mustNew(t, "openai", "")}
 	got, err := Resolve(ps, ps[0].Models[0].ID)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got.Provider != "anthropic" {
-		t.Errorf("provider is %q, want anthropic", got.Provider)
+	if got.Provider != "openai" {
+		t.Errorf("provider is %q, want openai", got.Provider)
 	}
 	if got.BaseURL == "" || got.APIKeyEnv == "" {
 		t.Errorf("resolution is missing what a call needs: %+v", got)
+	}
+}
+
+func TestTheAnthropicNativePresetCannotResolve(t *testing.T) {
+	p := Provider{
+		Name: "anthropic", BaseURL: "https://api.anthropic.com/v1", APIKeyEnv: "ANTHROPIC_API_KEY",
+		Models: []Model{{ID: "claude-sonnet-4-6", Enabled: true}},
+	}
+	_, err := Resolve([]Provider{p}, "claude-sonnet-4-6")
+	if err == nil || !strings.Contains(err.Error(), ProtocolAnthropicMessages) {
+		t.Fatalf("native Anthropic record resolved through an OpenAI executor: %v", err)
+	}
+}
+
+func TestAClaudeModelThroughAnOpenAICompatibleGatewayResolves(t *testing.T) {
+	p := mustNew(t, "gateway", "https://gateway.example/v1")
+	p.Models = []Model{{ID: "claude-sonnet-4-6", Enabled: true}}
+	got, err := Resolve([]Provider{p}, "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("model name was mistaken for protocol: %v", err)
+	}
+	if got.Protocol != ProtocolOpenAIChatCompletions {
+		t.Errorf("protocol = %q", got.Protocol)
 	}
 }
 
@@ -33,7 +63,7 @@ func TestABareIDResolvesToTheProviderThatOffersIt(t *testing.T) {
 // operator decision, usually about cost; a resolver that ignored the flag would
 // make the command decorative and bill for the model anyway.
 func TestADisabledModelDoesNotResolve(t *testing.T) {
-	p := mustNew(t, "anthropic", "")
+	p := mustNew(t, "openai", "")
 	var disabled string
 	for _, m := range p.Models {
 		if !m.Enabled {
@@ -64,14 +94,14 @@ func TestAModelTwoProvidersOfferIsRefusedRatherThanChosen(t *testing.T) {
 	// A local server serving a vendor id under its own name is the realistic
 	// shape of this collision, not a contrived one.
 	local.Models = []Model{{ID: "claude-sonnet-4-6", Enabled: true}}
+	gateway := openAIGatewayOffering(t, "gateway",
+		Model{ID: "claude-sonnet-4-6", Enabled: true})
 
-	ps := []Provider{mustNew(t, "anthropic", ""), local}
-
-	_, err := Resolve(ps, "claude-sonnet-4-6")
+	_, err := Resolve([]Provider{gateway, local}, "claude-sonnet-4-6")
 	if err == nil {
 		t.Fatal("resolved: which provider gets billed was decided by sort order")
 	}
-	if !strings.Contains(err.Error(), "anthropic/claude-sonnet-4-6") {
+	if !strings.Contains(err.Error(), "gateway/claude-sonnet-4-6") {
 		t.Errorf("the error does not show the qualified spelling that fixes it: %v", err)
 	}
 }
@@ -80,7 +110,9 @@ func TestAModelTwoProvidersOfferIsRefusedRatherThanChosen(t *testing.T) {
 func TestAQualifiedRefResolvesAnAmbiguousID(t *testing.T) {
 	local := mustNew(t, "local", "http://localhost:11434/v1")
 	local.Models = []Model{{ID: "claude-sonnet-4-6", Enabled: true}}
-	ps := []Provider{mustNew(t, "anthropic", ""), local}
+	gateway := openAIGatewayOffering(t, "gateway",
+		Model{ID: "claude-sonnet-4-6", Enabled: true})
+	ps := []Provider{gateway, local}
 
 	got, err := Resolve(ps, "local/claude-sonnet-4-6")
 	if err != nil {
@@ -97,7 +129,8 @@ func TestAQualifiedRefResolvesAnAmbiguousID(t *testing.T) {
 // A typo gets the id it probably meant, because the failure this replaces costs
 // the user another command to discover that sonnet-4-5 is sonnet-4-6.
 func TestATypoIsToldWhatItProbablyMeant(t *testing.T) {
-	ps := []Provider{mustNew(t, "anthropic", "")}
+	ps := []Provider{openAIGatewayOffering(t, "gateway",
+		Model{ID: "claude-sonnet-4-6", Enabled: true})}
 	_, err := Resolve(ps, "claude-sonnet-4-5")
 	if err == nil {
 		t.Fatal("a model that does not exist resolved")
@@ -153,7 +186,7 @@ func TestAProviderWithNoModelsExplainsWhyItIsEmpty(t *testing.T) {
 // A ref naming a provider that is not registered says so, rather than
 // reporting the model as unknown. The two are different mistakes.
 func TestAnUnregisteredProviderInARefIsNamed(t *testing.T) {
-	ps := []Provider{mustNew(t, "anthropic", "")}
+	ps := []Provider{mustNew(t, "local", "")}
 	_, err := Resolve(ps, "openai/gpt-5.1")
 	if err == nil {
 		t.Fatal("resolved through a provider that is not registered")
@@ -165,7 +198,7 @@ func TestAnUnregisteredProviderInARefIsNamed(t *testing.T) {
 
 // An empty ref is its own error. A run with no model is not a typo.
 func TestAnEmptyRefIsRefused(t *testing.T) {
-	ps := []Provider{mustNew(t, "anthropic", "")}
+	ps := []Provider{mustNew(t, "openai", "")}
 	for _, ref := range []string{"", "   ", "anthropic/"} {
 		if _, err := Resolve(ps, ref); err == nil {
 			t.Errorf("ref %q resolved", ref)
@@ -177,7 +210,7 @@ func TestAnEmptyRefIsRefused(t *testing.T) {
 // question the user arrived with is "what can I use right now", and sorting
 // purely by id buries the two usable models among a dozen that are off.
 func TestModelListPutsUsableModelsFirst(t *testing.T) {
-	rows := Rows([]Provider{mustNew(t, "anthropic", "")})
+	rows := Rows([]Provider{mustNew(t, "openai", "")})
 	if len(rows) < 2 {
 		t.Fatal("not enough rows to test ordering")
 	}
@@ -200,10 +233,10 @@ func TestModelListPutsUsableModelsFirst(t *testing.T) {
 func TestModelListIsOrderedByProvider(t *testing.T) {
 	rows := Rows([]Provider{
 		mustNew(t, "openai", ""),
-		mustNew(t, "anthropic", ""),
+		mustNew(t, "local", ""),
 	})
-	if rows[0].Provider != "anthropic" {
-		t.Errorf("first provider is %q, want anthropic: an unordered list "+
+	if rows[0].Provider != "local" {
+		t.Errorf("first provider is %q, want local: an unordered list "+
 			"reshuffles between invocations", rows[0].Provider)
 	}
 }

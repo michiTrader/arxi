@@ -496,6 +496,148 @@ func TestAnInterruptedBatchIsRolledBackWhole(t *testing.T) {
 	}
 }
 
+func TestReadConfirmedLimitFailsWithoutAdvancing(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]kernel.Event{
+		{ID: "e1", Type: kernel.RunStarted, Source: kernel.SourceRuntime},
+		{ID: "e2", Type: kernel.RunPaused, Source: kernel.SourceHuman},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	read, overflow, err := ReadConfirmedLimit(dir, 0, 1)
+	if err != nil || !overflow {
+		t.Fatalf("limited read = %#v / %v / %v, want overflow", read, overflow, err)
+	}
+	if read.NextOffset != 0 || len(read.Bytes) != 0 {
+		t.Fatalf("overflow advanced read = %#v", read)
+	}
+}
+
+func TestReadConfirmedExcludesACompleteProvisionalBatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := seededLog(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, eventsFileName)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghost := ev(kernel.AgentTurnDone, "ghost", nil)
+	ghost.Seq = int64(len(committed) + 1)
+	line, err := json.Marshal(ghost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(before, append(line, '\n')...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, pendingFileName),
+		[]byte(fmt.Sprintf("%d\n", len(before))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := ReadConfirmed(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(read.Bytes) != string(before) {
+		t.Fatalf("confirmed bytes include provisional data:\n got %q\nwant %q", read.Bytes, before)
+	}
+	if read.NextOffset != int64(len(before)) || !read.BatchInFlight {
+		t.Fatalf("read = offset %d, pending %v; want %d, true",
+			read.NextOffset, read.BatchInFlight, len(before))
+	}
+	if read.WithheldBytes != int64(len(line)+1) {
+		t.Fatalf("withheld = %d, want %d", read.WithheldBytes, len(line)+1)
+	}
+}
+
+func TestReadConfirmedFailsClosedOnInvalidMarkers(t *testing.T) {
+	for name, body := range map[string]string{
+		"malformed legacy": "not-an-offset\n",
+		"negative legacy":  "-1\n",
+		"invalid version":  `{"version":2,"commit_id":"c1","pre_append_size":0}`,
+		"missing id":       `{"version":1,"pre_append_size":0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, eventsFileName), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, pendingFileName), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadConfirmed(dir, 0); err == nil {
+				t.Fatal("invalid marker was accepted; the committed boundary is unknowable")
+			}
+		})
+	}
+}
+
+func TestReadConfirmedRejectsOneCommitIDChangingItsBoundary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, eventsFileName), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	marker := func(offset int64) []byte {
+		body, err := json.Marshal(pendingMarker{Version: 1, CommitID: "same", PreAppendSize: offset})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(body, '\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, pendingFileName), marker(4), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readConfirmed(dir, 0, 0, func() {
+		if werr := os.WriteFile(filepath.Join(dir, pendingFileName), marker(8), 0o644); werr != nil {
+			t.Fatal(werr)
+		}
+	})
+	if err == nil {
+		t.Fatal("a marker changed its rollback point during the read without being rejected")
+	}
+}
+
+func TestReadConfirmedClampsAMarkerBeyondTheCapturedLog(t *testing.T) {
+	dir := t.TempDir()
+	body := []byte("complete\npartial")
+	if err := os.WriteFile(filepath.Join(dir, eventsFileName), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := json.Marshal(pendingMarker{Version: 1, CommitID: "c1", PreAppendSize: 999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, pendingFileName), marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadConfirmed(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(read.Bytes); got != "complete\n" {
+		t.Fatalf("bytes = %q, want only the complete captured line", got)
+	}
+	if read.NextOffset != int64(len("complete\n")) {
+		t.Fatalf("next offset = %d, want %d", read.NextOffset, len("complete\n"))
+	}
+}
+
 // ------------------------------------------------------------------ CAS
 
 func TestAppendIfSeqAtTheCurrentHeadSucceeds(t *testing.T) {

@@ -107,6 +107,16 @@ var ErrAlreadyAnswered = errors.New("inbox item is already answered")
 // and if the work still matters it needs a new run.
 var ErrRunOver = errors.New("the run has ended, so a reply would change nothing")
 
+// ErrWrongDecisionKind means the requested verb does not match the pending
+// item's kind. It is checked after acquiring the writer lock so an exact
+// decision is validated against the same fold to which the reply is appended.
+var ErrWrongDecisionKind = errors.New("decision verb does not match inbox item kind")
+
+const (
+	approvalKind = "tool_approval"
+	questionKind = "question"
+)
+
 // Item is a question as a human needs to see it, which is the folded InboxItem
 // plus the run it belongs to.
 //
@@ -176,7 +186,7 @@ func OpenRun(dir string) (*Run, error) {
 		return nil, fmt.Errorf("inbox: no run directory given")
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, eventsFileName))
+	read, err := logstore.ReadConfirmed(dir, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("inbox: %s holds no event log (%s), so it is not "+
@@ -184,8 +194,9 @@ func OpenRun(dir string) (*Run, error) {
 				"  runs live under ./runs/<run-id> unless --dir said otherwise",
 				dir, eventsFileName)
 		}
-		return nil, fmt.Errorf("inbox: read the log of %s: %w", dir, err)
+		return nil, fmt.Errorf("inbox: read the confirmed log of %s: %w", dir, err)
 	}
+	raw := read.Bytes
 
 	cfg, err := loadFrozenConfig(dir)
 	if err != nil {
@@ -262,7 +273,36 @@ func (r *Run) Item(id string) (Item, error) {
 // out or another person may have approved it, and a decision made from the
 // stale fold would append a second reply that the reducer honours by spawning a
 // second turn.
+// Answer appends a CLI-compatible reply. Answer decisions remain valid for
+// historical non-approval kinds; application APIs that promise exact question
+// semantics use AnswerExact.
 func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
+	return answer(dir, id, reply, false)
+}
+
+// AnswerExact appends a reply while requiring answer decisions to target the
+// explicit question kind. Approval and rejection are always approval-only.
+func AnswerExact(dir string, id string, reply Reply) (kernel.Event, error) {
+	return answer(dir, id, reply, true)
+}
+
+// AnswerExactStore applies the same exact decision through an already-open
+// writer. Resident execution owners use it to preserve single-writer ownership.
+func AnswerExactStore(store *logstore.Store, id string, reply Reply) (kernel.Event, error) {
+	if store == nil {
+		return kernel.Event{}, errors.New("inbox: no log store given")
+	}
+	if err := validDecision(reply); err != nil {
+		return kernel.Event{}, err
+	}
+	cfg, err := loadFrozenConfig(store.Dir())
+	if err != nil {
+		return kernel.Event{}, err
+	}
+	return answerStore(store, cfg, id, reply, true)
+}
+
+func answer(dir string, id string, reply Reply, exactQuestion bool) (kernel.Event, error) {
 	if err := validDecision(reply); err != nil {
 		return kernel.Event{}, err
 	}
@@ -277,7 +317,10 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 		return kernel.Event{}, err
 	}
 	defer store.Close()
+	return answerStore(store, cfg, id, reply, exactQuestion)
+}
 
+func answerStore(store *logstore.Store, cfg kernel.Config, id string, reply Reply, exactQuestion bool) (kernel.Event, error) {
 	st, err := store.Fold(cfg, 0)
 	if err != nil {
 		return kernel.Event{}, err
@@ -292,6 +335,10 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 		if it.Replied {
 			return kernel.Event{}, fmt.Errorf("inbox: %q in run %s: %w",
 				id, st.RunID, ErrAlreadyAnswered)
+		}
+		if !decisionMatchesKind(reply.Decision, it.Kind, exactQuestion) {
+			return kernel.Event{}, fmt.Errorf("inbox: cannot %s %q of kind %q in run %s: %w",
+				reply.Decision, id, it.Kind, st.RunID, ErrWrongDecisionKind)
 		}
 	}
 	if !found {
@@ -358,6 +405,19 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 	return written[0], nil
 }
 
+func decisionMatchesKind(decision, kind string, exactQuestion bool) bool {
+	if decision == DecisionApprove || decision == DecisionReject {
+		return kind == approvalKind
+	}
+	if decision != DecisionAnswer {
+		return false
+	}
+	if exactQuestion {
+		return kind == questionKind
+	}
+	return kind != approvalKind
+}
+
 // validDecision refuses a reply whose decision is not one of the three.
 //
 // An unrecognised decision is refused rather than defaulted, because every
@@ -366,7 +426,12 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 // the strength of a typo.
 func validDecision(r Reply) error {
 	switch r.Decision {
-	case DecisionApprove, DecisionAnswer:
+	case DecisionApprove:
+		return nil
+	case DecisionAnswer:
+		if strings.TrimSpace(r.Text) == "" {
+			return fmt.Errorf("inbox: an answer needs non-empty text")
+		}
 		return nil
 	case DecisionReject:
 		// A rejection with no reason is refused, and this is the one place this

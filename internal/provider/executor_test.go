@@ -59,7 +59,8 @@ func executorFor(t *testing.T, srv *httptest.Server, members ...kernel.MemberCon
 	t.Helper()
 	return &Executor{
 		Resolver: fixedResolver{res: model.Resolution{
-			Provider: "anthropic",
+			Provider: "openai-compatible",
+			Protocol: model.ProtocolOpenAIChatCompletions,
 			Model:    "claude-sonnet-4-6",
 			BaseURL:  srv.URL,
 		}},
@@ -163,7 +164,8 @@ func TestTheTurnReportsWhatItCost(t *testing.T) {
 func TestATransportFailureProducesNoEvents(t *testing.T) {
 	x := &Executor{
 		Resolver: fixedResolver{res: model.Resolution{
-			Provider: "anthropic",
+			Provider: "openai-compatible",
+			Protocol: model.ProtocolOpenAIChatCompletions,
 			Model:    "claude-sonnet-4-6",
 			// A port nothing listens on.
 			BaseURL: "http://127.0.0.1:1",
@@ -178,6 +180,84 @@ func TestATransportFailureProducesNoEvents(t *testing.T) {
 	if len(evs) != 0 {
 		t.Errorf("a transport failure emitted %d events (%v); the member would be left "+
 			"thinking forever, holding a turn that can never close", len(evs), types(evs))
+	}
+}
+
+func TestProviderNativeToolRequestsAreRecordedAsUnsupported(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"modern null content", func(body map[string]any) {
+			choice := body["choices"].([]any)[0].(map[string]any)
+			choice["finish_reason"] = "tool_calls"
+			msg := choice["message"].(map[string]any)
+			msg["content"] = nil
+			msg["tool_calls"] = []any{map[string]any{"id": "call-1"}}
+		}},
+		{"legacy function call with text", func(body map[string]any) {
+			msg := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+			msg["function_call"] = map[string]any{"name": "read"}
+		}},
+		{"finish reason alone", func(body map[string]any) {
+			body["choices"].([]any)[0].(map[string]any)["finish_reason"] = "tool_calls"
+		}},
+		{"later choice", func(body map[string]any) {
+			body["choices"] = append(body["choices"].([]any), map[string]any{
+				"index": 1, "finish_reason": "stop",
+				"message": map[string]any{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{"id": "call-2"}}},
+			})
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := okBody(10_000, 1_000, "text that must not make the tool request successful")
+			tc.mutate(body)
+			srv, _ := serverReturning(t, 200, body)
+			x := executorFor(t, srv)
+			runner := &fakeRunner{}
+			x.Tools = runner
+			evs, err := x.SpawnTurn(context.Background(), kernel.SpawnTurn{Agent: "backend"})
+			if err != nil {
+				t.Fatalf("known capability became transport error: %v", err)
+			}
+			if got := strings.Join(types(evs), ","); got != "agent.activated,llm.response,agent.turn_done" {
+				t.Fatalf("events = %s; refused capability must still close the turn", got)
+			}
+			if runner.calls != 0 {
+				t.Fatalf("provider-native tool request executed %d tools; unsupported wire capabilities must never cross into ToolRunner", runner.calls)
+			}
+			llm := evs[1]
+			if llm.Payload["ok"] != false || llm.Payload["code"] != "unsupported_tool_calls" || llm.Payload["retryable"] != false {
+				t.Errorf("outcome = %#v", llm.Payload)
+			}
+			if _, present := llm.Payload["text"]; present {
+				t.Error("tool request also recorded text as a successful answer")
+			}
+			if llm.Payload["response_id"] != "cmpl-1" || llm.Payload["tokens_in"] != 10_000 || llm.Payload["tokens_out"] != 1_000 {
+				t.Errorf("audit fields were lost: %#v", llm.Payload)
+			}
+			if cost, _ := llm.Payload["cost_usd"].(float64); math.Abs(cost-0.045) > 1e-9 {
+				t.Errorf("cost = %v, want 0.045", llm.Payload["cost_usd"])
+			}
+		})
+	}
+}
+
+func TestAnUnsupportedProtocolIsRefusedBeforeNetwork(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	t.Cleanup(srv.Close)
+	x := &Executor{
+		Resolver:     fixedResolver{res: model.Resolution{Provider: "anthropic", Protocol: model.ProtocolAnthropicMessages, Model: "claude-sonnet-4-6", BaseURL: srv.URL}},
+		DefaultModel: "claude-sonnet-4-6",
+	}
+	if evs, err := x.SpawnTurn(context.Background(), kernel.SpawnTurn{Agent: "backend"}); err == nil || len(evs) != 0 {
+		t.Fatalf("unsupported protocol returned events=%v error=%v", types(evs), err)
+	}
+	if called {
+		t.Error("unsupported protocol reached the network")
 	}
 }
 
@@ -295,7 +375,7 @@ type refEchoResolver struct{ baseURL string }
 
 func (r refEchoResolver) Resolve(ref string) (model.Resolution, error) {
 	_, id := model.ParseRef(ref)
-	return model.Resolution{Provider: "anthropic", Model: id, BaseURL: r.baseURL}, nil
+	return model.Resolution{Provider: "openai-compatible", Protocol: model.ProtocolOpenAIChatCompletions, Model: id, BaseURL: r.baseURL}, nil
 }
 
 // TestAMemberWithNoModelUsesTheRunDefault is the additive half: MemberConfig.Model
@@ -708,9 +788,11 @@ type fakeRunner struct {
 	args         map[string]any
 	result       string
 	err          error
+	calls        int
 }
 
 func (f *fakeRunner) RunTool(_ context.Context, member, name string, args map[string]any) (string, error) {
+	f.calls++
 	f.member, f.tool, f.args = member, name, args
 	return f.result, f.err
 }

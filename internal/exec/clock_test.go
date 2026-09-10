@@ -12,7 +12,7 @@ import (
 // passes and the firing order is a fact rather than a race with the scheduler.
 func TestVirtualClockFiresOnlyWhenAdvanced(t *testing.T) {
 	v := NewVirtualClock()
-	if err := v.SetTimer("stage:review", 30*60*1000); err != nil {
+	if _, err := v.SetTimer("stage:review", 30*60*1000); err != nil {
 		t.Fatalf("SetTimer: %v", err)
 	}
 
@@ -47,7 +47,7 @@ func TestTiedTimersFireInDeterministicOrder(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		v := NewVirtualClock()
 		for _, id := range []string{"c", "e", "a", "d", "b"} {
-			if err := v.SetTimer(id, 100); err != nil {
+			if _, err := v.SetTimer(id, 100); err != nil {
 				t.Fatalf("SetTimer: %v", err)
 			}
 		}
@@ -71,8 +71,8 @@ func TestTiedTimersFireInDeterministicOrder(t *testing.T) {
 // chain in the log would describe an impossible history.
 func TestEarlierTimerFiresBeforeLaterOne(t *testing.T) {
 	v := NewVirtualClock()
-	_ = v.SetTimer("late", 900)
-	_ = v.SetTimer("early", 100)
+	_, _ = v.SetTimer("late", 900)
+	_, _ = v.SetTimer("early", 100)
 
 	fired, _ := v.Advance(1000)
 	want := []string{"early", "late"}
@@ -89,12 +89,12 @@ func TestEarlierTimerFiresBeforeLaterOne(t *testing.T) {
 // could reconstruct from the log.
 func TestReArmingATimerOverwritesIt(t *testing.T) {
 	v := NewVirtualClock()
-	_ = v.SetTimer("stage:build", 100)
+	_, _ = v.SetTimer("stage:build", 100)
 	if _, err := v.Advance(50); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
 	// Re-entered the stage: fresh 100 ms from NOW (t=50), so due at t=150.
-	if err := v.SetTimer("stage:build", 100); err != nil {
+	if _, err := v.SetTimer("stage:build", 100); err != nil {
 		t.Fatalf("re-arming an existing timer failed: %v. A stage re-entry re-arms "+
 			"its timeout, and rejecting that leaves the stage on its old deadline.", err)
 	}
@@ -133,7 +133,7 @@ func TestCancellingAnUnknownTimerSucceeds(t *testing.T) {
 // written to prevent.
 func TestCancelRemovesAnAlreadyFiredTimer(t *testing.T) {
 	v := NewVirtualClock()
-	_ = v.SetTimer("stage:review", 100)
+	_, _ = v.SetTimer("stage:review", 100)
 	if fired, _ := v.Advance(100); len(fired) != 1 {
 		t.Fatalf("setup: expected the timer to fire, got %v", fired)
 	}
@@ -158,7 +158,7 @@ func TestCancelRemovesAnAlreadyFiredTimer(t *testing.T) {
 // log would claim a stage expired twice.
 func TestTakeFiredDrains(t *testing.T) {
 	v := NewVirtualClock()
-	_ = v.SetTimer("t1", 100)
+	_, _ = v.SetTimer("t1", 100)
 	_, _ = v.Advance(100)
 
 	first := v.TakeFired()
@@ -183,14 +183,14 @@ func TestNonPositiveOffsetIsRefused(t *testing.T) {
 		"real":    NewRealClock(),
 	} {
 		for _, offset := range []int64{0, -1, -5000} {
-			if err := c.SetTimer("t", offset); err == nil {
+			if _, err := c.SetTimer("t", offset); err == nil {
 				t.Errorf("%s clock accepted an offset of %d ms. It would fire inside "+
 					"the step that armed it, making a stage expire before it was "+
 					"entered; the real bug is a deadline computed from stale values, "+
 					"and accepting the timer hides it.", name, offset)
 			}
 		}
-		if err := c.SetTimer("", 100); err == nil {
+		if _, err := c.SetTimer("", 100); err == nil {
 			t.Errorf("%s clock accepted an empty timer id. An unnamed timer cannot be "+
 				"cancelled or matched to a stage, so it fires with no way to trace "+
 				"why.", name)
@@ -225,7 +225,7 @@ func TestBothClocksSatisfyTheSameContract(t *testing.T) {
 	r := NewRealClock()
 	r.Now = func() time.Time { return now }
 
-	if err := r.SetTimer("stage:build", 30*60*1000); err != nil {
+	if _, err := r.SetTimer("stage:build", 30*60*1000); err != nil {
 		t.Fatalf("SetTimer: %v", err)
 	}
 	if due := r.Due(); len(due) != 0 {
@@ -256,7 +256,7 @@ func TestRealClockTiesAreDeterministicToo(t *testing.T) {
 		r := NewRealClock()
 		r.Now = func() time.Time { return now }
 		for _, id := range []string{"d", "a", "e", "b", "c"} {
-			_ = r.SetTimer(id, 100)
+			_, _ = r.SetTimer(id, 100)
 		}
 		now = base.Add(200 * time.Millisecond)
 		if due := r.Due(); !reflect.DeepEqual(due, want) {
@@ -279,8 +279,8 @@ func TestClocksAreRaceFree(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := string(rune('a' + i%26))
-			_ = v.SetTimer(id, 100)
-			_ = r.SetTimer(id, 100)
+			_, _ = v.SetTimer(id, 100)
+			_, _ = r.SetTimer(id, 100)
 			_, _ = v.Advance(1)
 			_ = r.Due()
 			_ = v.Pending()

@@ -33,9 +33,9 @@ func add(t *testing.T, s *Store, name, baseURL string) model.Provider {
 
 func TestAProviderSurvivesARoundTrip(t *testing.T) {
 	s := open(t)
-	want := add(t, s, "anthropic", "")
+	want := add(t, s, "openai", "")
 
-	got, err := s.Load("anthropic")
+	got, err := s.Load("openai")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestAProviderSurvivesARoundTrip(t *testing.T) {
 // flags an operator chose.
 func TestAddingAProviderTwiceIsRefused(t *testing.T) {
 	s := open(t)
-	p := add(t, s, "anthropic", "")
+	p := add(t, s, "openai", "")
 
 	err := s.Add(p)
 	if err == nil {
@@ -74,11 +74,11 @@ func TestAddingAProviderTwiceIsRefused(t *testing.T) {
 // credential pointer on a laptop, which is the machine with no tests on it.
 func TestACaseCollidingNameIsRefused(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
 	// model.New lowercases, so build the colliding record directly — which is
 	// also what a hand-written file would look like.
-	p := model.Provider{Name: "anthropic", BaseURL: "https://x.test/v1"}
+	p := model.Provider{Name: "openai", BaseURL: "https://x.test/v1"}
 	if err := s.Add(p); err == nil {
 		t.Fatal("a colliding name was accepted")
 	}
@@ -88,7 +88,7 @@ func TestACaseCollidingNameIsRefused(t *testing.T) {
 // reports the typo instead of creating a second provider no run can use.
 func TestSavingAProviderThatDoesNotExistIsRefused(t *testing.T) {
 	s := open(t)
-	p, err := model.New("anthropic", "", "", "")
+	p, err := model.New("openai", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestSavingAProviderThatDoesNotExistIsRefused(t *testing.T) {
 // `model enable`.
 func TestEnablingAModelPersists(t *testing.T) {
 	s := open(t)
-	p := add(t, s, "anthropic", "")
+	p := add(t, s, "openai", "")
 
 	var target string
 	for _, m := range p.Models {
@@ -122,7 +122,7 @@ func TestEnablingAModelPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	back, err := s.Load("anthropic")
+	back, err := s.Load("openai")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,14 +142,14 @@ func TestTheProviderFileIsNotWorldReadable(t *testing.T) {
 		t.Skip("unix permissions")
 	}
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
-	info, err := os.Stat(s.Path("anthropic"))
+	info, err := os.Stat(s.Path("openai"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("providers/anthropic.json is %o, want 600: this file is a map to "+
+		t.Errorf("providers/openai.json is %o, want 600: this file is a map to "+
 			"an API key", perm)
 	}
 }
@@ -158,18 +158,18 @@ func TestTheProviderFileIsNotWorldReadable(t *testing.T) {
 // provider. This is the last line of the "the key is never stored" rule.
 func TestAKeyPastedIntoTheFileByHandIsCaughtOnRead(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
 	body := `{
-  "name": "anthropic",
+  "name": "openai",
   "base_url": "https://api.anthropic.com/v1",
   "api_key_env": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
 }
 `
-	if err := os.WriteFile(s.Path("anthropic"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(s.Path("openai"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Load("anthropic"); err == nil {
+	if _, err := s.Load("openai"); err == nil {
 		t.Fatal("loaded a provider whose api_key_env is the key itself")
 	}
 }
@@ -179,19 +179,19 @@ func TestAKeyPastedIntoTheFileByHandIsCaughtOnRead(t *testing.T) {
 // as perfectly fine.
 func TestAnApiKeyFieldAddedByHandIsRefused(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
 	body := `{
-  "name": "anthropic",
+  "name": "openai",
   "base_url": "https://api.anthropic.com/v1",
   "api_key_env": "ANTHROPIC_API_KEY",
   "api_key": "sk-ant-api03-secret"
 }
 `
-	if err := os.WriteFile(s.Path("anthropic"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(s.Path("openai"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.Load("anthropic")
+	_, err := s.Load("openai")
 	if err == nil {
 		t.Fatal("accepted an api_key field: the secret would sit in the file with " +
 			"the tool reporting the provider as fine")
@@ -207,18 +207,18 @@ func TestAnApiKeyFieldAddedByHandIsRefused(t *testing.T) {
 // unauthorized with nothing in the file to explain it.
 func TestAMisspelledFieldIsRefusedRatherThanIgnored(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
 	body := `{
-  "name": "anthropic",
+  "name": "openai",
   "base_url": "https://api.anthropic.com/v1",
   "api_key_evn": "ANTHROPIC_API_KEY"
 }
 `
-	if err := os.WriteFile(s.Path("anthropic"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(s.Path("openai"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Load("anthropic"); err == nil {
+	if _, err := s.Load("openai"); err == nil {
 		t.Fatal("accepted api_key_evn: the provider would have no credential and " +
 			"nothing would say why")
 	}
@@ -229,18 +229,18 @@ func TestAMisspelledFieldIsRefusedRatherThanIgnored(t *testing.T) {
 // and leave this one in place with the old flags.
 func TestAProviderWhoseNameDisagreesWithItsFileIsRefused(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
 	body := `{
-  "name": "openai",
-  "base_url": "https://api.anthropic.com/v1",
-  "api_key_env": "ANTHROPIC_API_KEY"
+  "name": "other",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "OPENAI_API_KEY"
 }
 `
-	if err := os.WriteFile(s.Path("anthropic"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(s.Path("openai"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Load("anthropic"); err == nil {
+	if _, err := s.Load("openai"); err == nil {
 		t.Fatal("accepted a provider that answers to one name and reports another")
 	}
 }
@@ -249,7 +249,7 @@ func TestAProviderWhoseNameDisagreesWithItsFileIsRefused(t *testing.T) {
 // a list quietly missing a row looks exactly like a complete list.
 func TestAnUnreadableProviderFailsTheListing(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 	if err := os.WriteFile(s.Path("broken"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestAnAbsentDirectoryListsNothing(t *testing.T) {
 // makes that true, and it is load-bearing rather than cosmetic.
 func TestAHalfWrittenFileIsNotAProvider(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 	if err := os.WriteFile(filepath.Join(s.Dir(), "x.json.tmp-1234"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -293,13 +293,13 @@ func TestAHalfWrittenFileIsNotAProvider(t *testing.T) {
 // needs before it can save anything.
 func TestOwnerFindsTheProviderThatOffersTheModel(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
-	p, id, err := s.Owner("claude-opus-4-1")
+	p, id, err := s.Owner("gpt-5.1-mini")
 	if err != nil {
 		t.Fatalf("owner: %v", err)
 	}
-	if p.Name != "anthropic" || id != "claude-opus-4-1" {
+	if p.Name != "openai" || id != "gpt-5.1-mini" {
 		t.Errorf("owner is %q/%q", p.Name, id)
 	}
 }
@@ -309,7 +309,7 @@ func TestOwnerFindsTheProviderThatOffersTheModel(t *testing.T) {
 // enable anything.
 func TestOwnerFindsADisabledModelBecauseThatIsWhatEnableActsOn(t *testing.T) {
 	s := open(t)
-	p := add(t, s, "anthropic", "")
+	p := add(t, s, "openai", "")
 
 	var disabled string
 	for _, m := range p.Models {
@@ -332,18 +332,18 @@ func TestOwnerFindsADisabledModelBecauseThatIsWhatEnableActsOn(t *testing.T) {
 // run that then fails to resolve.
 func TestOwnerRefusesAnAmbiguousModel(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 
 	local, err := model.New("local", "http://localhost:11434/v1", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	local.Models = []model.Model{{ID: "claude-opus-4-1"}}
+	local.Models = []model.Model{{ID: "gpt-5.1-mini"}}
 	if err := s.Add(local); err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, err = s.Owner("claude-opus-4-1")
+	_, _, err = s.Owner("gpt-5.1-mini")
 	if err == nil {
 		t.Fatal("Owner chose between two providers: the command would report " +
 			"success and the run would still fail to resolve")
@@ -356,22 +356,22 @@ func TestOwnerRefusesAnAmbiguousModel(t *testing.T) {
 // Owner accepts the qualified spelling, which is the fix its own error offers.
 func TestOwnerAcceptsTheQualifiedSpelling(t *testing.T) {
 	s := open(t)
-	add(t, s, "anthropic", "")
+	add(t, s, "openai", "")
 	local, err := model.New("local", "http://localhost:11434/v1", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	local.Models = []model.Model{{ID: "claude-opus-4-1"}}
+	local.Models = []model.Model{{ID: "gpt-5.1-mini"}}
 	if err := s.Add(local); err != nil {
 		t.Fatal(err)
 	}
 
-	p, id, err := s.Owner("local/claude-opus-4-1")
+	p, id, err := s.Owner("local/gpt-5.1-mini")
 	if err != nil {
 		t.Fatalf("owner: %v", err)
 	}
-	if p.Name != "local" || id != "claude-opus-4-1" {
-		t.Errorf("owner is %q/%q, want local/claude-opus-4-1", p.Name, id)
+	if p.Name != "local" || id != "gpt-5.1-mini" {
+		t.Errorf("owner is %q/%q, want local/gpt-5.1-mini", p.Name, id)
 	}
 }
 
@@ -379,7 +379,7 @@ func TestOwnerAcceptsTheQualifiedSpelling(t *testing.T) {
 // than reporting a missing file.
 func TestLoadingAnUnregisteredProviderNamesTheFix(t *testing.T) {
 	s := open(t)
-	_, err := s.Load("anthropic")
+	_, err := s.Load("openai")
 	if err == nil {
 		t.Fatal("loaded a provider that does not exist")
 	}

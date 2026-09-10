@@ -27,6 +27,14 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 	out := s.Clone()
 	out.Seq = e.Seq
 
+	// Execution and timer lifecycle records describe how the runtime carried out
+	// a decision; they are not domain inputs. Keeping them reducer-inert prevents
+	// operational bookkeeping from waking watchers, producing quiescence, or
+	// changing replayed state beyond the sequence already consumed.
+	if isExecutionMetadata(e.Type) {
+		return out, nil
+	}
+
 	// An event arriving at a terminal run is recorded and ignored. It is not an
 	// error: it happens all the time (a slow tool answering after the cancel)
 	// and treating it as an error would fail perfectly valid replays.
@@ -37,6 +45,24 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 	var fx []Effect
 
 	switch e.Type {
+	case ExecWorkPrepared:
+		return out, nil
+	case ExecWorkStarted:
+		return out, nil
+	case ExecWorkFinished:
+		return out, nil
+	case ExecStepCompleted:
+		return out, nil
+	case TimerScheduled:
+		return out, nil
+	case TimerCancelled:
+		return out, nil
+	case TimerFired:
+		// Operational metadata is intentionally reducer-inert. Advancing Seq is
+		// still a fold: replay sees that the record was consumed, while domain
+		// state, watchers and quiescence remain unchanged.
+		return out, nil
+
 	case RunStarted:
 		fx = append(fx, applyRunStarted(&out, e, c)...)
 
@@ -529,7 +555,7 @@ func applyStageSubmitted(out *State, e Event, c Config) []Effect {
 			"stage": c.Stages[next].Name,
 			"index": next,
 		})},
-		Snapshot{AtSeq: e.Seq},
+		Snapshot{},
 	)
 	return fx
 }
@@ -1361,6 +1387,15 @@ func orderEffects(fx []Effect) []Effect {
 func isWatcherDispatched(t EventType) bool {
 	switch t {
 	case ResourceConflict, RunQuiescent, StageTimeout:
+		return true
+	}
+	return false
+}
+
+func isExecutionMetadata(t EventType) bool {
+	switch t {
+	case ExecWorkPrepared, ExecWorkStarted, ExecWorkFinished, ExecStepCompleted,
+		TimerScheduled, TimerCancelled, TimerFired:
 		return true
 	}
 	return false

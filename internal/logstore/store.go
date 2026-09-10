@@ -15,6 +15,8 @@ package logstore
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -423,31 +425,203 @@ func (s *Store) WriteSnapshot(st kernel.State, atSeq int64) error {
 // delete it and prove the log stands alone.
 func (s *Store) SnapshotPath() string { return filepath.Join(s.dir, snapshotFileName) }
 
+// ConfirmedRead is one lock-free view of the durable log prefix.
+//
+// Bytes contains only complete, newline-terminated records. NextOffset is the
+// absolute byte offset immediately after them and is safe to pass to the next
+// ReadConfirmed call. If a batch is in flight, WithheldBytes reports how much
+// provisional data was present beyond the last confirmed byte.
+type ConfirmedRead struct {
+	Bytes         []byte
+	NextOffset    int64
+	BatchInFlight bool
+	WithheldBytes int64
+}
+
+type pendingMarker struct {
+	Version       int    `json:"version"`
+	CommitID      string `json:"commit_id"`
+	PreAppendSize int64  `json:"pre_append_size"`
+	legacy        bool
+}
+
+// ReadConfirmed reads complete records from the log without taking the writer
+// lock and without exposing a byte covered by pending.commit.
+func ReadConfirmed(dir string, fromOffset int64) (ConfirmedRead, error) {
+	return readConfirmed(dir, fromOffset, 0, nil)
+}
+
+// ReadConfirmedLimit is ReadConfirmed with a memory bound. If more than
+// maxBytes of complete confirmed records are available, overflow is true and no
+// bytes are returned; callers can fail without decoding or silently skipping the
+// backlog. A single record larger than maxBytes also overflows.
+func ReadConfirmedLimit(dir string, fromOffset, maxBytes int64) (ConfirmedRead, bool, error) {
+	if maxBytes <= 0 {
+		read, err := ReadConfirmed(dir, fromOffset)
+		return read, false, err
+	}
+	return readConfirmedLimit(dir, fromOffset, maxBytes)
+}
+
+func readConfirmedLimit(dir string, fromOffset, maxBytes int64) (ConfirmedRead, bool, error) {
+	if fromOffset < 0 {
+		fromOffset = 0
+	}
+	before, beforeExists, err := readPendingMarker(dir)
+	if err != nil {
+		return ConfirmedRead{}, false, err
+	}
+	file, err := os.Open(EventsPath(dir))
+	if err != nil {
+		return ConfirmedRead{}, false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return ConfirmedRead{}, false, err
+	}
+	capturedEnd := info.Size()
+	completeEnd, err := lastCompleteOffset(file, capturedEnd)
+	if err != nil {
+		return ConfirmedRead{}, false, err
+	}
+	after, afterExists, err := readPendingMarker(dir)
+	if err != nil {
+		return ConfirmedRead{}, false, err
+	}
+	if beforeExists && afterExists && !before.legacy && !after.legacy &&
+		before.CommitID == after.CommitID && before.PreAppendSize != after.PreAppendSize {
+		return ConfirmedRead{}, false, corruptPending(dir, fmt.Sprintf(
+			"pending marker %q changed its rollback point from %d to %d during a read",
+			after.CommitID, before.PreAppendSize, after.PreAppendSize))
+	}
+	confirmedEnd := completeEnd
+	if afterExists && after.PreAppendSize < confirmedEnd {
+		confirmedEnd = after.PreAppendSize
+		confirmedEnd, err = lastCompleteOffset(file, confirmedEnd)
+		if err != nil {
+			return ConfirmedRead{}, false, err
+		}
+	}
+	if fromOffset > confirmedEnd {
+		fromOffset = confirmedEnd
+	}
+	if confirmedEnd-fromOffset > maxBytes {
+		return ConfirmedRead{NextOffset: fromOffset}, true, nil
+	}
+	body := make([]byte, confirmedEnd-fromOffset)
+	if len(body) > 0 {
+		n, readErr := file.ReadAt(body, fromOffset)
+		if readErr != nil || n != len(body) {
+			return ConfirmedRead{}, false, fmt.Errorf("read confirmed log prefix: read %d of %d bytes: %w", n, len(body), readErr)
+		}
+	}
+	out := ConfirmedRead{Bytes: body, NextOffset: confirmedEnd, BatchInFlight: afterExists}
+	if afterExists && capturedEnd > after.PreAppendSize {
+		out.WithheldBytes = capturedEnd - after.PreAppendSize
+	}
+	return out, false, nil
+}
+
+func lastCompleteOffset(file *os.File, end int64) (int64, error) {
+	const chunkSize = int64(64 << 10)
+	for end > 0 {
+		start := end - chunkSize
+		if start < 0 {
+			start = 0
+		}
+		chunk := make([]byte, end-start)
+		n, err := file.ReadAt(chunk, start)
+		if err != nil || n != len(chunk) {
+			return 0, fmt.Errorf("scan confirmed log tail: read %d of %d bytes: %w", n, len(chunk), err)
+		}
+		if i := lastNewline(chunk); i >= 0 {
+			return start + int64(i+1), nil
+		}
+		end = start
+	}
+	return 0, nil
+}
+
+// readConfirmed keeps the afterRead hook private; tests use it to place a
+// marker transition exactly between the log read and the second marker sample.
+func readConfirmed(dir string, fromOffset, maxBytes int64, afterRead func()) (ConfirmedRead, error) {
+	if fromOffset < 0 {
+		fromOffset = 0
+	}
+	before, beforeExists, err := readPendingMarker(dir)
+	if err != nil {
+		return ConfirmedRead{}, err
+	}
+
+	raw, err := os.ReadFile(EventsPath(dir))
+	if err != nil {
+		return ConfirmedRead{}, err
+	}
+	if afterRead != nil {
+		afterRead()
+	}
+
+	after, afterExists, err := readPendingMarker(dir)
+	if err != nil {
+		return ConfirmedRead{}, err
+	}
+	if beforeExists && afterExists && !before.legacy && !after.legacy &&
+		before.CommitID == after.CommitID && before.PreAppendSize != after.PreAppendSize {
+		return ConfirmedRead{}, corruptPending(dir, fmt.Sprintf(
+			"pending marker %q changed its rollback point from %d to %d during a read",
+			after.CommitID, before.PreAppendSize, after.PreAppendSize))
+	}
+
+	confirmedEnd := int64(len(raw))
+	if afterExists && after.PreAppendSize < confirmedEnd {
+		confirmedEnd = after.PreAppendSize
+	}
+	if confirmedEnd < 0 {
+		return ConfirmedRead{}, corruptPending(dir, "pending marker names a negative rollback point")
+	}
+	if confirmedEnd > int64(len(raw)) {
+		confirmedEnd = int64(len(raw))
+	}
+	if fromOffset > confirmedEnd {
+		fromOffset = confirmedEnd
+	}
+
+	visible := raw[fromOffset:confirmedEnd]
+	whole := len(visible)
+	if i := lastNewline(visible); i >= 0 {
+		whole = i + 1
+	} else {
+		whole = 0
+	}
+	if maxBytes > 0 && int64(whole) > maxBytes {
+		return ConfirmedRead{}, errors.New("confirmed read exceeds limit")
+	}
+	out := ConfirmedRead{
+		Bytes:         append([]byte(nil), visible[:whole]...),
+		NextOffset:    fromOffset + int64(whole),
+		BatchInFlight: afterExists,
+	}
+	if afterExists && int64(len(raw)) > after.PreAppendSize {
+		out.WithheldBytes = int64(len(raw)) - after.PreAppendSize
+	}
+	return out, nil
+}
+
+func lastNewline(body []byte) int {
+	for i := len(body) - 1; i >= 0; i-- {
+		if body[i] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
 // BatchInFlight reports whether a batch write is in progress in a run directory,
 // or was interrupted by a writer that died.
-//
-// For a reader that does NOT hold the lock and follows the log from outside the
-// package -- `arxi run attach` is the one -- this is the only way to tell durable
-// bytes from provisional ones. The ordering in Append is what makes it usable:
-// the marker is written and fsynced BEFORE the batch and removed only after the
-// batch is fsynced, so observing "no marker" AFTER reading some bytes proves
-// every byte then on disk is past the commit point. Observing the marker means
-// the tail may still be rolled back by the next Open, and a follower that had
-// already printed those lines would have shown an event that ends up never
-// having existed.
-//
-// It takes a directory rather than being a method because the caller is precisely
-// the process that must not open the Store: Open takes the writer lock, and it
-// truncates a rolled-back tail. A viewer is not allowed to do either -- following
-// a live run must not be able to interfere with the run.
-//
-// An unreadable directory answers false, not an error. The consequence of a wrong
-// answer here is bounded on both sides (a spurious true delays a line; a spurious
-// false shows a line early), and a follower that aborted because it could not
-// stat one file would be a worse tool than one that keeps printing events.
 func BatchInFlight(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, pendingFileName))
-	return err == nil
+	_, exists, err := readPendingMarker(dir)
+	return err == nil && exists
 }
 
 // EventsPath is the log inside a run directory, for readers outside this package
@@ -608,28 +782,15 @@ func (s *Store) eachEvent(limit int64, fn func(kernel.Event, int64) error) error
 // died. See the atomicity comment on appendLocked for why the marker is the
 // commit point.
 func (s *Store) rollbackPending() error {
-	body, err := os.ReadFile(s.pendingPath())
-	if errors.Is(err, os.ErrNotExist) {
+	marker, exists, err := readPendingMarker(s.dir)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("logstore: read pending marker: %w", err)
-	}
 
-	offset, perr := strconv.ParseInt(trimSpace(string(body)), 10, 64)
-	if perr != nil || offset < 0 {
-		// The marker itself is damaged, so the rollback point is unknown. This
-		// refuses rather than guessing: guessing means either discarding good
-		// history or keeping a partial batch, and there is no way to tell which
-		// from here.
-		return &CorruptError{
-			Dir: s.dir, AtSeq: -1, Offset: -1,
-			Reason: fmt.Sprintf("pending marker %q is unreadable, so the rollback point "+
-				"of the interrupted batch is unknown", string(body)),
-		}
-	}
-
-	if err := truncateAndSync(s.eventsPath(), offset); err != nil {
+	if err := truncateAndSync(s.eventsPath(), marker.PreAppendSize); err != nil {
 		return err
 	}
 	if err := os.Remove(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -638,12 +799,56 @@ func (s *Store) rollbackPending() error {
 	return fsyncDir(s.dir)
 }
 
+func readPendingMarker(dir string) (pendingMarker, bool, error) {
+	body, err := os.ReadFile(filepath.Join(dir, pendingFileName))
+	if errors.Is(err, os.ErrNotExist) {
+		return pendingMarker{}, false, nil
+	}
+	if err != nil {
+		return pendingMarker{}, false, fmt.Errorf("logstore: read pending marker: %w", err)
+	}
+
+	trimmed := trimSpace(string(body))
+	if offset, perr := strconv.ParseInt(trimmed, 10, 64); perr == nil {
+		if offset < 0 {
+			return pendingMarker{}, false, corruptPending(dir, fmt.Sprintf(
+				"pending marker %q names a negative rollback point", string(body)))
+		}
+		return pendingMarker{Version: 0, PreAppendSize: offset, legacy: true}, true, nil
+	}
+
+	var marker pendingMarker
+	if err := json.Unmarshal(body, &marker); err != nil || marker.Version != 1 ||
+		marker.CommitID == "" || marker.PreAppendSize < 0 {
+		return pendingMarker{}, false, corruptPending(dir, fmt.Sprintf(
+			"pending marker %q is unreadable, so the rollback point of the interrupted batch is unknown",
+			string(body)))
+	}
+	return marker, true, nil
+}
+
+func corruptPending(dir, reason string) error {
+	return &CorruptError{Dir: dir, AtSeq: -1, Offset: -1, Reason: reason}
+}
+
 func (s *Store) writePending(offset int64) error {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return fmt.Errorf("logstore: mint pending commit id: %w", err)
+	}
+	body, err := json.Marshal(pendingMarker{
+		Version: 1, CommitID: hex.EncodeToString(id[:]), PreAppendSize: offset,
+	})
+	if err != nil {
+		return fmt.Errorf("logstore: encode pending marker: %w", err)
+	}
+	body = append(body, '\n')
+
 	f, err := os.OpenFile(s.pendingPath(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("logstore: create pending marker: %w", err)
 	}
-	if _, err := f.WriteString(strconv.FormatInt(offset, 10) + "\n"); err != nil {
+	if _, err := f.Write(body); err != nil {
 		f.Close()
 		return fmt.Errorf("logstore: write pending marker: %w", err)
 	}

@@ -45,7 +45,12 @@ import (
 type Provider struct {
 	Name string `json:"name"`
 
-	// BaseURL is an OpenAI-compatible endpoint, as the surface declares it.
+	// Protocol names the wire contract spoken by BaseURL. Empty is accepted only
+	// for records written before protocols were explicit; EffectiveProtocol maps
+	// those records without changing their inspectable stored form.
+	Protocol string `json:"protocol,omitempty"`
+
+	// BaseURL is the endpoint for Protocol.
 	// Stored even when it came from the table in Known, because a default that
 	// lives only in the binary changes under the user when the binary is
 	// upgraded, and a run that worked yesterday would then talk to a different
@@ -74,6 +79,15 @@ type Model struct {
 	Enabled bool   `json:"enabled"`
 }
 
+const (
+	// ProtocolOpenAIChatCompletions is the only provider wire implemented today.
+	ProtocolOpenAIChatCompletions = "openai-chat-completions/v1"
+	// ProtocolAnthropicMessages names Anthropic's native Messages API. It is
+	// recorded so unsupported native records fail explicitly rather than being
+	// sent an OpenAI request shape.
+	ProtocolAnthropicMessages = "anthropic-messages/v1"
+)
+
 // known is the table of providers whose endpoint and models ship with the
 // binary.
 //
@@ -89,18 +103,19 @@ type Model struct {
 // `--model` typo away, and §20.1's own output shows opus disabled next to
 // sonnet enabled.
 var known = []struct {
-	name    string
-	baseURL string
-	models  []string
+	name     string
+	protocol string
+	baseURL  string
+	models   []string
 }{
-	{"anthropic", "https://api.anthropic.com/v1", []string{
+	{"anthropic", ProtocolAnthropicMessages, "https://api.anthropic.com/v1", []string{
 		"claude-sonnet-4-6", "claude-opus-4-1", "claude-haiku-4-5"}},
-	{"openai", "https://api.openai.com/v1", []string{
+	{"openai", ProtocolOpenAIChatCompletions, "https://api.openai.com/v1", []string{
 		"gpt-5.1", "gpt-5.1-mini"}},
 	// A local server is in the table on purpose. It is the only provider that
 	// can be exercised end to end without a credential and without a bill, so
 	// the first real executor test has somewhere to point.
-	{"local", "http://127.0.0.1:11434/v1", []string{"llama3.1"}},
+	{"local", ProtocolOpenAIChatCompletions, "http://127.0.0.1:11434/v1", []string{"llama3.1"}},
 }
 
 // Known reports the shipped endpoint and models for a provider name.
@@ -111,6 +126,29 @@ func Known(name string) (baseURL string, models []string, ok bool) {
 		}
 	}
 	return "", nil, false
+}
+
+// KnownProtocol reports the wire spoken by a shipped provider.
+func KnownProtocol(name string) (string, bool) {
+	for _, k := range known {
+		if k.name == strings.ToLower(strings.TrimSpace(name)) {
+			return k.protocol, true
+		}
+	}
+	return "", false
+}
+
+// EffectiveProtocol preserves historical provider files, which predate the
+// protocol field. Anthropic's first-party endpoint is native Messages; all
+// other legacy records were documented as OpenAI-compatible.
+func (p Provider) EffectiveProtocol() string {
+	if p.Protocol != "" {
+		return p.Protocol
+	}
+	if p.Name == "anthropic" && p.BaseURL == "https://api.anthropic.com/v1" {
+		return ProtocolAnthropicMessages
+	}
+	return ProtocolOpenAIChatCompletions
 }
 
 // KnownNames lists the providers in the table, sorted. Used to name the
@@ -161,6 +199,10 @@ func New(name, baseURL, keyEnv, addedAt string) (Provider, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 
 	tableURL, models, inTable := Known(name)
+	protocol := ProtocolOpenAIChatCompletions
+	if knownProtocol, ok := KnownProtocol(name); ok {
+		protocol = knownProtocol
+	}
 	if baseURL == "" {
 		if !inTable {
 			return Provider{}, fmt.Errorf("provider %q is not one of the providers "+
@@ -188,9 +230,22 @@ func New(name, baseURL, keyEnv, addedAt string) (Provider, error) {
 
 	p := Provider{
 		Name:      name,
+		Protocol:  protocol,
 		BaseURL:   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKeyEnv: strings.TrimSpace(keyEnv),
 		AddedAt:   addedAt,
+	}
+	if p.Protocol == ProtocolAnthropicMessages && p.BaseURL == tableURL {
+		return Provider{}, fmt.Errorf("provider %q uses the native Anthropic Messages protocol, which this build does not implement.\n"+
+			"  no provider file was written and no request was sent.\n"+
+			"  use an OpenAI-compatible gateway under a different provider name, or wait for the native adapter", name)
+	}
+	if p.Protocol == ProtocolAnthropicMessages {
+		// The native preset was rejected above. A custom endpoint is explicitly
+		// documented as OpenAI-compatible and must not inherit a protocol merely
+		// because its chosen local label happens to be "anthropic".
+		p.Protocol = ProtocolOpenAIChatCompletions
+		models = nil
 	}
 	for i, id := range models {
 		// Only for a provider taken from the table. A provider registered by
@@ -209,6 +264,9 @@ func New(name, baseURL, keyEnv, addedAt string) (Provider, error) {
 func (p Provider) Validate() error {
 	if err := validateName(p.Name); err != nil {
 		return err
+	}
+	if p.Protocol != "" && p.Protocol != ProtocolOpenAIChatCompletions && p.Protocol != ProtocolAnthropicMessages {
+		return fmt.Errorf("provider %q declares unsupported protocol %q", p.Name, p.Protocol)
 	}
 	if err := validateBaseURL(p.Name, p.BaseURL); err != nil {
 		return err

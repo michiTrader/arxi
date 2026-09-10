@@ -197,6 +197,33 @@ func TestSingleVersionedManifest(t *testing.T) {
 	}
 }
 
+func TestSurfaceVersionMembership(t *testing.T) {
+	if HasVersion(0) || !HasVersion(1) || HasVersion(SurfaceVersion+1) {
+		t.Fatalf("version membership: zero=%v current=%v future=%v", HasVersion(0), HasVersion(1), HasVersion(SurfaceVersion+1))
+	}
+	for _, c := range Registry {
+		if !c.InVersion(SurfaceVersion) {
+			t.Errorf("%s is absent from current surface v%d", c.CLI(), SurfaceVersion)
+		}
+	}
+	cases := []struct {
+		cmd     Cmd
+		version int
+		want    bool
+	}{
+		{Cmd{Since: 1}, 1, true},
+		{Cmd{Since: 2}, 1, false},
+		{Cmd{Since: 1, DeprecatedIn: 2}, 1, true},
+		{Cmd{Since: 1, DeprecatedIn: 2}, 2, false},
+		{Cmd{Since: 1}, 0, false},
+	}
+	for _, tc := range cases {
+		if got := tc.cmd.InVersion(tc.version); got != tc.want {
+			t.Errorf("%+v.InVersion(%d) = %v, want %v", tc.cmd, tc.version, got, tc.want)
+		}
+	}
+}
+
 // TestUniformScope: everything exposed to the protocol has a derivable type.
 func TestUniformScope(t *testing.T) {
 	for _, c := range Registry {
