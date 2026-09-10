@@ -102,10 +102,9 @@ func Resolve(ps []Provider, ref string) (Resolution, error) {
 
 	h := hits[0]
 	protocol := h.p.EffectiveProtocol()
-	if protocol != ProtocolOpenAIChatCompletions {
-		return Resolution{}, fmt.Errorf("provider %s uses %s, but this build implements only %s.\n"+
-			"  no request was sent; register an OpenAI-compatible endpoint under a different provider name",
-			h.p.Name, protocol, ProtocolOpenAIChatCompletions)
+	if protocol != ProtocolOpenAIChatCompletions && protocol != ProtocolAnthropicMessages {
+		return Resolution{}, fmt.Errorf("provider %s uses unsupported protocol %s; no request was sent",
+			h.p.Name, protocol)
 	}
 	if !h.m.Enabled {
 		return Resolution{}, fmt.Errorf("model %s/%s is disabled, so this run will "+

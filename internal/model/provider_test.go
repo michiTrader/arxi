@@ -27,13 +27,19 @@ func TestAKnownProviderNeedsNothingButItsName(t *testing.T) {
 	}
 }
 
-func TestTheNativeAnthropicPresetIsRefused(t *testing.T) {
-	_, err := New("anthropic", "", "", "")
-	if err == nil {
-		t.Fatal("native Anthropic endpoint was registered for an OpenAI-only executor")
+func TestTheNativeAnthropicPresetIsRegistered(t *testing.T) {
+	p, err := New("anthropic", "", "", "")
+	if err != nil {
+		t.Fatalf("provider add anthropic: %v", err)
 	}
-	if !strings.Contains(err.Error(), "native Anthropic Messages") || !strings.Contains(err.Error(), "no provider file was written") {
-		t.Errorf("error is not actionable: %v", err)
+	if p.Protocol != ProtocolAnthropicMessages {
+		t.Errorf("protocol = %q, want %q", p.Protocol, ProtocolAnthropicMessages)
+	}
+	if p.BaseURL != "https://api.anthropic.com/v1" || p.APIKeyEnv != "ANTHROPIC_API_KEY" {
+		t.Errorf("native preset = %+v", p)
+	}
+	if len(p.Models) == 0 || !p.Models[0].Enabled {
+		t.Errorf("native preset has no enabled default model: %+v", p.Models)
 	}
 }
 

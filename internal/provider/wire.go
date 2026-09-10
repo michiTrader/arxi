@@ -9,11 +9,10 @@
 // so nothing has to be registered anywhere -- cmd/arxi hands one of these to
 // exec.Runner and the runner never learns which kind it got.
 //
-// The whole package speaks OpenAI's chat-completions shape, because that is what
-// `provider add` promises: the surface calls --base-url "an OpenAI-compatible
-// endpoint". One wire format for every provider is what makes a local llama and
-// a hosted model the same code path, and it means the case that can be tested
-// with no credential and no bill is the same case that runs in production.
+// Provider adapters own their wire formats here. The OpenAI-compatible path
+// remains the default, while Anthropic Messages is translated by its native
+// adapter before either protocol reaches the provider-neutral turn contract.
+
 package provider
 
 import (
@@ -30,6 +29,7 @@ import (
 type chatRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
+	Tools    []chatTool    `json:"tools,omitempty"`
 
 	// MaxTokens bounds the reply. It is always sent, never left to the
 	// provider's default: an unbounded reply is an unbounded bill, and the
@@ -52,20 +52,39 @@ type chatRequest struct {
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string         `json:"role"`
+	Content    any            `json:"content"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatTool struct {
+	Type     string           `json:"type"`
+	Function chatToolFunction `json:"function"`
+}
+
+type chatToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Arguments   string          `json:"arguments,omitempty"`
+}
+
+type chatToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function chatToolFunction `json:"function"`
 }
 
 // chatResponseMessage differs from a request message because providers may
 // return content:null alongside a tool call.
 type chatResponseMessage struct {
-	Role    string  `json:"role"`
-	Content *string `json:"content"`
+	Role      string         `json:"role"`
+	Content   *string        `json:"content"`
+	ToolCalls []chatToolCall `json:"tool_calls"`
 
-	// ToolCalls and FunctionCall are retained only to reject a capability this
-	// executor does not implement. RawMessage preserves presence without claiming
-	// to understand a provider-specific tool schema.
-	ToolCalls    json.RawMessage `json:"tool_calls"`
+	// FunctionCall is retained only to reject the legacy request shape. Native
+	// loops require provider call IDs, which the legacy shape cannot supply.
 	FunctionCall json.RawMessage `json:"function_call"`
 }
 
@@ -103,9 +122,14 @@ type chatChoice struct {
 // This is the most important struct in the package: everything the budget knows
 // about what a run cost comes through these two integers.
 type usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                `json:"prompt_tokens"`
+	CompletionTokens    int                `json:"completion_tokens"`
+	TotalTokens         int                `json:"total_tokens"`
+	PromptTokensDetails promptTokenDetails `json:"prompt_tokens_details"`
+}
+
+type promptTokenDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 type wireError struct {
@@ -143,7 +167,7 @@ func (r *chatResponse) text() (string, bool) {
 func (r *chatResponse) requestsTools() bool {
 	for _, choice := range r.Choices {
 		if choice.FinishReason == "tool_calls" || choice.FinishReason == "function_call" ||
-			presentJSON(choice.Message.ToolCalls) || presentJSON(choice.Message.FunctionCall) {
+			len(choice.Message.ToolCalls) > 0 || presentJSON(choice.Message.FunctionCall) {
 			return true
 		}
 	}

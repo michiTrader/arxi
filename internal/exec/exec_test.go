@@ -22,6 +22,8 @@ type memLog struct {
 	snapshots map[int64]kernel.State
 
 	failAppend   error
+	failAppendAt int
+	appendCalls  int
 	failFold     error
 	failSnapshot error
 
@@ -37,8 +39,12 @@ func newMemLog() *memLog {
 func (m *memLog) Append(events []kernel.Event) ([]kernel.Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.failAppend != nil {
-		return nil, m.failAppend
+	m.appendCalls++
+	if m.failAppend != nil || (m.failAppendAt > 0 && m.appendCalls == m.failAppendAt) {
+		if m.failAppend != nil {
+			return nil, m.failAppend
+		}
+		return nil, errors.New("injected append failure")
 	}
 	out := make([]kernel.Event, 0, len(events))
 	for _, e := range events {
@@ -405,6 +411,67 @@ func TestSimulatedTurnDrivesTheFullLifecycle(t *testing.T) {
 		t.Errorf("agent.activated names actor %q, want backend; the reducer looks the "+
 			"member up by Actor, so a blank one silently updates nobody",
 			res.Events[0].Actor)
+	}
+}
+
+func TestProductionFakeCanonicalReadLoopPreservesProviderCallIDAndResult(t *testing.T) {
+	log := newMemLog()
+	fake := NewFake()
+	fake.NativeReadTool = "read"
+	fake.ToolResults["read"] = "line one\nline two\n"
+	fake.Submits = false
+	r := &Runner{Log: log, Clock: NewVirtualClock(), Executor: fake, RunID: "run-fake-native"}
+
+	res, err := r.RunStep(context.Background(), testSource(40), []kernel.Effect{kernel.SpawnTurn{Agent: "backend"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []kernel.EventType{kernel.AgentActivated, kernel.ToolCall, kernel.ToolCallCompleted, kernel.LLMResponse, kernel.AgentTurnDone}
+	if got := typesOf(res.Events); !reflect.DeepEqual(got, want) {
+		t.Fatalf("canonical fake events = %v, want %v", got, want)
+	}
+	if res.Events[1].Str("call_id") != "sim-provider-call-1" || res.Events[2].Str("call_id") != "sim-provider-call-1" {
+		t.Fatalf("provider call ID was lost: %#v %#v", res.Events[1].Payload, res.Events[2].Payload)
+	}
+	if res.Events[2].Str("result") != fake.ToolResults["read"] {
+		t.Fatalf("tool result = %q, want exact %q", res.Events[2].Str("result"), fake.ToolResults["read"])
+	}
+	if got := fake.Kinds(); !reflect.DeepEqual(got, []string{"complete_turn", "turn_tool", "complete_turn", "spawn_turn"}) {
+		t.Fatalf("fake calls = %v", got)
+	}
+	var prepared, finished int
+	for _, event := range log.events {
+		if event.Str("work_scope") != "turn_child" {
+			continue
+		}
+		if event.Type == kernel.ExecWorkPrepared {
+			prepared++
+		}
+		if event.Type == kernel.ExecWorkFinished {
+			finished++
+		}
+	}
+	if prepared != 3 || finished != 3 {
+		t.Fatalf("durable child prepared/finished = %d/%d, want 3/3", prepared, finished)
+	}
+}
+
+func TestProductionFakeCanonicalPolicyStopNeverRunsTool(t *testing.T) {
+	fake := NewFake()
+	fake.NativeReadTool = "read"
+	fake.AskTools["read"] = "ask"
+	fake.Submits = false
+	r := &Runner{Log: newMemLog(), Clock: NewVirtualClock(), Executor: fake, RunID: "run-fake-denied"}
+
+	res, err := r.RunStep(context.Background(), testSource(41), []kernel.Effect{kernel.SpawnTurn{Agent: "backend"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.Kinds(); !reflect.DeepEqual(got, []string{"complete_turn", "spawn_turn"}) {
+		t.Fatalf("policy stop reached tool runner: %v", got)
+	}
+	if got := typesOf(res.Events); !reflect.DeepEqual(got, []kernel.EventType{kernel.AgentActivated, kernel.ToolCall, kernel.ToolCallDenied, kernel.LLMResponse, kernel.AgentTurnDone}) {
+		t.Fatalf("policy-stop events = %v", got)
 	}
 }
 

@@ -183,7 +183,11 @@ func runStartedEvent(events []kernel.Event) *kernel.Event {
 
 func runtimeExecutor(dir string, a runconfig.Artifact) exec.Executor {
 	if a.Mode == "sim" {
-		return exec.NewFake()
+		fake := exec.NewFake()
+		if a.SimVersion == runconfig.SimulationNative {
+			fake.NativeReadTool = "read"
+		}
+		return fake
 	}
 	resolver := frozenResolver{}
 	prices := map[string]model.Price{}

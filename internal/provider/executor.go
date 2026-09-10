@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/michiTrader/arxi/internal/model"
 	"github.com/michiTrader/arxi/internal/surface"
 	"github.com/michiTrader/arxi/internal/tool"
+	"github.com/michiTrader/arxi/internal/turn"
 )
 
 // asAPIError reports whether err is a provider refusal, and binds it.
@@ -61,13 +63,9 @@ type ToolRunner interface {
 	RunTool(ctx context.Context, member, name string, args map[string]any) (string, error)
 }
 
-// Executor is the live executor. It satisfies exec.Executor structurally.
-//
-// SpawnTurn calls a model. CallTool and AskHuman deliberately do not do their
-// real work yet, and they say so rather than pretending -- see their comments.
-// Shipping a CallTool that silently succeeded would be worse than one that
-// refuses: the reducer would advance a stage on the strength of a tool result
-// that never happened.
+// Executor is the live executor. It implements the text-only effect surface and
+// the provider-neutral native turn seam; policy-gated tools and human questions
+// are projected through the same domain events as their legacy effect paths.
 type Executor struct {
 	// Resolver maps a member's model ref to an endpoint and a key variable.
 	Resolver Resolver
@@ -267,6 +265,242 @@ func (x *Executor) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.
 		Payload: map[string]any{"agent": e.Agent},
 	})
 	return events, nil
+}
+
+// PrepareTurn resolves the model and freezes a provider-neutral request before
+// the durable coordinator records and dispatches the first model child.
+func (x *Executor) PrepareTurn(ctx context.Context, e kernel.SpawnTurn) (turn.Request, error) {
+	if err := ctx.Err(); err != nil {
+		return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: %w", e.Agent, err))
+	}
+	res, _, err := x.resolve(e.Agent)
+	if err != nil {
+		return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: %w", e.Agent, err))
+	}
+	if res.Protocol != "" && res.Protocol != model.ProtocolOpenAIChatCompletions && res.Protocol != model.ProtocolAnthropicMessages {
+		return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: provider %s uses unsupported protocol %s",
+			e.Agent, res.Provider, res.Protocol))
+	}
+	messages := buildMessages(e.Context, x.Prompt)
+	req := turn.Request{
+		Schema: turn.Schema, Provider: res.Provider, Protocol: res.Protocol,
+		BaseURL: res.BaseURL, APIKeyEnv: res.APIKeyEnv,
+		Model: res.Model, MaxTokens: maxTokensFor(e.Context), Temperature: x.Temperature,
+	}
+	for _, msg := range messages {
+		text, ok := msg.Content.(string)
+		if !ok {
+			return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: context message %q is not text", e.Agent, msg.Role))
+		}
+		req.Messages = append(req.Messages, turn.Message{Role: turn.Role(msg.Role), Content: []turn.ContentBlock{{
+			Type: turn.BlockText, Text: text,
+		}}})
+	}
+	for _, name := range x.toolsFor(e.Agent) {
+		schema, err := json.Marshal(toolSchema(name))
+		if err != nil {
+			return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare schema for tool %s: %w", name, err))
+		}
+		req.Tools = append(req.Tools, turn.ToolDefinition{Name: name, Description: toolDescription(name), InputSchema: schema})
+	}
+	return req, nil
+}
+
+// CompleteTurn translates one committed canonical request to the provider wire.
+func (x *Executor) CompleteTurn(ctx context.Context, req turn.Request) (turn.Response, error) {
+	if req.Schema != turn.Schema {
+		return turn.Response{}, exec.NotDispatched(fmt.Errorf("turn schema %q, want %q", req.Schema, turn.Schema))
+	}
+	if req.Provider == "" || req.Protocol == "" || req.BaseURL == "" || req.Model == "" {
+		return turn.Response{}, exec.NotDispatched(fmt.Errorf("canonical turn request does not contain a complete provider resolution"))
+	}
+	res := model.Resolution{Provider: req.Provider, Protocol: req.Protocol, Model: req.Model, BaseURL: req.BaseURL, APIKeyEnv: req.APIKeyEnv}
+	switch res.Protocol {
+	case model.ProtocolAnthropicMessages:
+		wire, err := anthropicTurnRequest(req)
+		if err != nil {
+			return turn.Response{}, exec.NotDispatched(err)
+		}
+		resp, callErr := x.newClient(res).CompleteAnthropic(ctx, wire)
+		var apiErr *APIError
+		if callErr != nil && !asAPIError(callErr, &apiErr) {
+			return turn.Response{}, callErr
+		}
+		if apiErr != nil {
+			out := turn.Response{Schema: turn.Schema, Model: req.Model, FinishReason: turn.FinishRefusal,
+				Refusal: &turn.Refusal{Code: fmt.Sprintf("http_%d", apiErr.Status), Message: apiErr.Message, Retryable: apiErr.Retryable()}}
+			if resp != nil {
+				out.ID = resp.ID
+				out.Usage = turn.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
+					CacheReadTokens: resp.Usage.CacheReadInputTokens, CacheWriteTokens: resp.Usage.CacheCreationInputTokens}
+			}
+			return out, nil
+		}
+		return canonicalAnthropicResponse(resp)
+	case model.ProtocolOpenAIChatCompletions:
+		wire, err := openAIRequest(req)
+		if err != nil {
+			return turn.Response{}, exec.NotDispatched(err)
+		}
+		resp, callErr := x.newClient(res).Complete(ctx, wire)
+		var apiErr *APIError
+		if callErr != nil && !asAPIError(callErr, &apiErr) {
+			return turn.Response{}, callErr
+		}
+		if apiErr != nil {
+			out := turn.Response{Schema: turn.Schema, Model: req.Model, FinishReason: turn.FinishRefusal,
+				Refusal: &turn.Refusal{Code: fmt.Sprintf("http_%d", apiErr.Status), Message: apiErr.Message, Retryable: apiErr.Retryable()}}
+			if resp != nil {
+				out.ID = resp.ID
+				out.Usage = turn.Usage{InputTokens: resp.Usage.PromptTokens, OutputTokens: resp.Usage.CompletionTokens}
+			}
+			return out, nil
+		}
+		return canonicalOpenAIResponse(resp)
+	default:
+		return turn.Response{}, exec.NotDispatched(fmt.Errorf("provider %s uses unsupported protocol %s", res.Provider, res.Protocol))
+	}
+}
+
+// ExecuteTurnTool applies policy before invoking the runner and binds the exact
+// output to the provider's call ID for durable reinjection.
+func (x *Executor) ExecuteTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (exec.TurnToolOutcome, error) {
+	args, err := decodeArguments(call.Arguments)
+	if err != nil {
+		return exec.TurnToolOutcome{}, exec.NotDispatched(err)
+	}
+	policy := x.policyFor(e.Agent, call.Name)
+	if policy != surface.PolicyAllow {
+		text := fmt.Sprintf("tool %q was not executed: policy=%s", call.Name, policy)
+		return exec.TurnToolOutcome{Policy: string(policy), Continue: false, Result: turn.ToolResult{
+			CallID: call.ID, IsError: true, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}},
+		}}, nil
+	}
+	if x.Tools == nil {
+		return exec.TurnToolOutcome{}, exec.NotDispatched(fmt.Errorf("tool %q is allowed for %s, but no tool runner is configured", call.Name, e.Agent))
+	}
+	result, err := x.Tools.RunTool(ctx, e.Agent, call.Name, args)
+	if err != nil {
+		return exec.TurnToolOutcome{}, err
+	}
+	return exec.TurnToolOutcome{Policy: string(policy), Continue: true, Result: turn.ToolResult{
+		CallID: call.ID, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: result}},
+	}}, nil
+}
+
+// FinishTurn projects the canonical trace into the existing domain event stream.
+func (x *Executor) FinishTurn(e kernel.SpawnTurn, trace []exec.TurnEntry) ([]kernel.Event, error) {
+	in, out := 0, 0
+	var final turn.Response
+	var haveFinal bool
+	var tools []kernel.Event
+	for _, entry := range trace {
+		if entry.Response != nil {
+			in += entry.Response.Usage.InputTokens
+			out += entry.Response.Usage.OutputTokens
+			final, haveFinal = *entry.Response, true
+		}
+		if entry.Tool != nil {
+			call, outcome := entry.Tool.Call, entry.Tool.Outcome
+			tools = append(tools, kernel.Event{ID: x.id(e.Agent, "tool-call"), Type: kernel.ToolCall,
+				Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments)}})
+			if outcome.Policy == string(surface.PolicyAllow) {
+				tools = append(tools, kernel.Event{ID: x.id(e.Agent, "tool"), Type: kernel.ToolCallCompleted,
+					Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "result": toolResultText(outcome.Result)}})
+			} else {
+				tools = append(tools, kernel.Event{ID: x.id(e.Agent, "tool"), Type: kernel.ToolCallDenied,
+					Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "policy": outcome.Policy}})
+			}
+		}
+	}
+	if !haveFinal {
+		return nil, fmt.Errorf("finish turn for %s without a model response", e.Agent)
+	}
+	_, price, err := x.resolve(e.Agent)
+	if err != nil {
+		return nil, err
+	}
+	llmOK := final.Refusal == nil && final.FinishReason != turn.FinishError && final.FinishReason != turn.FinishCanceled
+	llm := map[string]any{"agent": e.Agent, "ok": llmOK, "model": final.Model,
+		"cost_usd": price.Cost(in, out), "tokens_in": in, "tokens_out": out,
+		"finish_reason": string(final.FinishReason), "coalesced": e.Coalesced}
+	if final.ID != "" {
+		llm["response_id"] = final.ID
+	}
+	if text := responseText(final); text != "" {
+		llm["text"] = text
+	}
+	if final.Refusal != nil {
+		llm["error"], llm["code"], llm["retryable"] = final.Refusal.Message, final.Refusal.Code, final.Refusal.Retryable
+	} else if !llmOK {
+		llm["error"] = "the model turn ended with " + string(final.FinishReason)
+	}
+	events := []kernel.Event{{ID: x.id(e.Agent, "act"), Type: kernel.AgentActivated, Source: kernel.SourceRuntime, Actor: e.Agent, Payload: map[string]any{"agent": e.Agent}}}
+	events = append(events, tools...)
+	events = append(events, kernel.Event{ID: x.id(e.Agent, "llm"), Type: kernel.LLMResponse, Source: kernel.SourceAgent, Actor: e.Agent, Payload: llm})
+	events = append(events, kernel.Event{ID: x.id(e.Agent, "turn"), Type: kernel.AgentTurnDone, Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"agent": e.Agent}})
+	return events, nil
+}
+
+func (x *Executor) toolsFor(agent string) []string {
+	for _, member := range x.Members {
+		if member.Name == agent {
+			return append([]string(nil), member.Tools...)
+		}
+	}
+	return nil
+}
+
+func toolResultText(result turn.ToolResult) string {
+	text, _ := textContent(result.Content)
+	return text
+}
+
+func responseText(resp turn.Response) string {
+	var out string
+	for _, block := range resp.Content {
+		if block.Type == turn.BlockText {
+			out += block.Text
+		}
+	}
+	return out
+}
+
+func toolDescription(name string) string {
+	return map[string]string{"read": "Read a file", "write": "Write a file", "edit": "Replace text in a file", "grep": "Search files", "bash": "Run a shell command"}[name]
+}
+
+func toolSchema(name string) map[string]any {
+	props := map[string]any{}
+	required := []string{}
+	add := func(key, description string, requiredField bool) {
+		props[key] = map[string]any{"type": "string", "description": description}
+		if requiredField {
+			required = append(required, key)
+		}
+	}
+	switch name {
+	case "read":
+		add("path", "File path", true)
+	case "write":
+		add("path", "File path", true)
+		add("content", "File content", false)
+	case "edit":
+		add("path", "File path", true)
+		add("old", "Text to replace", true)
+		add("new", "Replacement text", false)
+		props["all"] = map[string]any{"type": "boolean"}
+	case "grep":
+		add("pattern", "Regular expression", true)
+		add("path", "Directory or file", false)
+	case "bash":
+		add("command", "Shell command", true)
+	}
+	out := map[string]any{"type": "object", "properties": props}
+	if len(required) > 0 {
+		out["required"] = required
+	}
+	return out
 }
 
 // resolve finds the endpoint and the price for a member's model.

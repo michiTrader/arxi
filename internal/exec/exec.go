@@ -296,15 +296,19 @@ func (r *Runner) RunStep(ctx context.Context, source kernel.Event, fx []kernel.E
 			}
 			continue
 		}
-		if progress.started[w.ID] {
-			if err := r.finishUnknown(w, &res); err != nil {
-				return res, err
+		if progress.started[w.ID] && !progress.turnChildren[w.ID] {
+			if r.canResumeNativeTurn(w) {
+				progress.turnChildren[w.ID] = true
+			} else {
+				if err := r.finishUnknown(w, &res); err != nil {
+					return res, err
+				}
+				return res, fmt.Errorf("%w: work %s was started before restart; automatic redispatch is unsafe", ErrUnknownWork, w.ID)
 			}
-			return res, fmt.Errorf("%w: work %s was started before restart; automatic redispatch is unsafe", ErrUnknownWork, w.ID)
 		}
 		remaining = append(remaining, w)
 	}
-	if err := r.runDurableIndependent(ctx, remaining, &res); err != nil {
+	if err := r.runDurableIndependent(ctx, remaining, progress.turnChildren, &res); err != nil {
 		return res, err
 	}
 	if err := r.completeStep(source, work); err != nil {
@@ -317,11 +321,15 @@ type stepProgress struct {
 	prepared     map[string]bool
 	started      map[string]bool
 	finished     map[string]string
+	turnChildren map[string]bool
 	stepComplete bool
 }
 
 func (r *Runner) workProgress(sourceSeq int64) (stepProgress, error) {
-	p := stepProgress{prepared: map[string]bool{}, started: map[string]bool{}, finished: map[string]string{}}
+	p := stepProgress{
+		prepared: map[string]bool{}, started: map[string]bool{},
+		finished: map[string]string{}, turnChildren: map[string]bool{},
+	}
 	events, err := r.Log.Read(1, 0)
 	if err != nil {
 		return p, fmt.Errorf("read durable work progress: %w", err)
@@ -330,12 +338,20 @@ func (r *Runner) workProgress(sourceSeq int64) (stepProgress, error) {
 		switch event.Type {
 		case kernel.ExecWorkPrepared:
 			if int64(event.Num("source_seq")) == sourceSeq {
-				p.prepared[event.Str("work_id")] = true
+				if event.Str("work_scope") == "turn_child" {
+					p.turnChildren[event.Str("parent_work_id")] = true
+				} else {
+					p.prepared[event.Str("work_id")] = true
+				}
 			}
 		case kernel.ExecWorkStarted:
-			p.started[event.Str("work_id")] = true
+			if event.Str("work_scope") != "turn_child" {
+				p.started[event.Str("work_id")] = true
+			}
 		case kernel.ExecWorkFinished:
-			p.finished[event.Str("work_id")] = event.Str("status")
+			if event.Str("work_scope") != "turn_child" {
+				p.finished[event.Str("work_id")] = event.Str("status")
+			}
 		case kernel.ExecStepCompleted:
 			if int64(event.Num("source_seq")) == sourceSeq {
 				p.stepComplete = true
@@ -355,6 +371,18 @@ func verifyManifest(work []Work, prepared map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+func (r *Runner) canResumeNativeTurn(w Work) bool {
+	effect, effectOK := w.Effect.(kernel.SpawnTurn)
+	_, executorOK := r.Executor.(TurnExecutor)
+	if !effectOK || !executorOK {
+		return false
+	}
+	if gate, ok := r.Executor.(NativeTurnGate); ok {
+		return gate.NativeTurnEnabled(effect)
+	}
+	return true
 }
 
 func (r *Runner) finishUnknown(w Work, res *Result) error {
@@ -455,7 +483,7 @@ func (r *Runner) runDurableControl(ctx context.Context, w Work, res *Result) err
 	}
 }
 
-func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, res *Result) error {
+func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, resuming map[string]bool, res *Result) error {
 	if len(work) == 0 {
 		return nil
 	}
@@ -469,6 +497,24 @@ func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, res *Re
 	started := 0
 	var startErr error
 	for i := range work {
+		if resuming[work[i].ID] {
+			started++
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				effect, effectOK := work[i].Effect.(kernel.SpawnTurn)
+				turnExecutor, executorOK := r.Executor.(TurnExecutor)
+				if gate, ok := r.Executor.(NativeTurnGate); ok && effectOK && !gate.NativeTurnEnabled(effect) {
+					executorOK = false
+				}
+				if !effectOK || !executorOK {
+					outcomes[i].err = fmt.Errorf("%w: composite work %s cannot resume without a native turn executor", ErrUnknownWork, work[i].ID)
+					return
+				}
+				outcomes[i].events, outcomes[i].err = r.runDurableTurn(ctx, work[i], effect, turnExecutor)
+			}(i)
+			continue
+		}
 		start := r.progressEvent(kernel.ExecWorkStarted, map[string]any{"work_id": work[i].ID}, work[i].Source)
 		if _, err := r.Log.Append(r.stamp([]kernel.Event{start})); err != nil {
 			startErr = fmt.Errorf("append start of %s: %w", work[i].ID, err)
@@ -483,6 +529,14 @@ func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, res *Re
 					outcomes[i].err = fmt.Errorf("effect %T panicked: %v", work[i].Effect, p)
 				}
 			}()
+			if effect, ok := work[i].Effect.(kernel.SpawnTurn); ok {
+				if turnExecutor, ok := r.Executor.(TurnExecutor); ok {
+					if gate, gated := r.Executor.(NativeTurnGate); !gated || gate.NativeTurnEnabled(effect) {
+						outcomes[i].events, outcomes[i].err = r.runDurableTurn(ctx, work[i], effect, turnExecutor)
+						return
+					}
+				}
+			}
 			outcomes[i].events, outcomes[i].err = r.dispatch(ctx, work[i].Effect)
 		}(i)
 	}

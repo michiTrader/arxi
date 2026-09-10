@@ -17,6 +17,8 @@ has to decide which — not ignore the contradiction.
 | [0005](0005-one-injection-mechanism.md) | A single injection mechanism gives queue, follow-up and coalescing | accepted |
 | [0006](0006-cas-on-seq.md) | Concurrency is resolved with CAS on `seq`; `turn_source` is retired | accepted |
 | [0007](0007-go-instead-of-rust.md) | Go instead of Rust, with tests covering what the compiler does not give | accepted |
+| [0008](0008-terse-invocation.md) | A terse invocation is a declared alias, not a second code path | accepted |
+| [0009](0009-provider-neutral-native-turns.md) | Native model/tool loops use one durable provider-neutral turn contract | accepted |
 
 ## Format
 

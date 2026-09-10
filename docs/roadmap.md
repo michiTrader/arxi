@@ -40,9 +40,10 @@ the universal kernel.
 
 Before expanding the public surface:
 
-- reject provider responses containing unsupported tool calls instead of decoding
-  them as empty text;
-- implement a native Anthropic adapter or refuse the misleading current preset;
+- refuse unsupported provider response shapes instead of decoding them as empty
+  text, while routing supported native tool calls through the durable turn loop;
+- route the first-party Anthropic preset through native Messages and reject
+  unimplemented protocols explicitly;
 - freeze the fully resolved effective configuration, including prompt, model,
   policies, defaults and capability versions;
 - make fresh and resumed execution restore the same configuration and pending work;
