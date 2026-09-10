@@ -590,6 +590,7 @@ func TestTheSchedulerDoesNotDecideWhenAThingIsDue(t *testing.T) {
 // what the scheduler is a caller OF.
 func TestTheSchedulerDoesNotReachPastItsInterfaces(t *testing.T) {
 	permitted := map[string]bool{
+		mod + "internal/job":     true, // pure durable coordination vocabulary
 		mod + "internal/trigger": true,
 		mod + "internal/surface": true, // inherited through trigger's ParseAction
 		mod + "internal/kernel":  true, // inherited

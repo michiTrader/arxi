@@ -105,6 +105,7 @@ type View struct {
 type Store interface {
 	View() View
 	BindSubmission(Revision, Submission) (Submission, Revision, error)
+	RecordOccurrence(Revision, job.Occurrence) (job.Occurrence, Revision, error)
 	Admit(Revision, Admission) (job.Occurrence, Revision, error)
 	Claim(Revision, job.JobID, string, time.Duration) (job.Claim, Revision, error)
 	Heartbeat(Revision, job.JobID, job.AttemptID, job.Fence, time.Duration) (job.Claim, Revision, error)

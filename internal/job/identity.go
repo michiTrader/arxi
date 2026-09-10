@@ -13,12 +13,20 @@ const (
 	attemptIdentityVersion    = "arxi.attempt/v1"
 	dispatchIdentityVersion   = "arxi.dispatch/v1"
 	requestDigestVersion      = "arxi.request/v1"
+	scheduledJobVersion       = "arxi.scheduled-job/v1"
 )
 
 // OccurrenceIdentity binds scheduling to the nominal UTC slot rather than the
 // scheduler wake time, so delayed and duplicate ticks still name one record.
 func OccurrenceIdentity(triggerID TriggerID, nominalAt time.Time) OccurrenceID {
 	return OccurrenceID(hashParts(occurrenceIdentityVersion, string(triggerID), canonicalInstant(nominalAt)))
+}
+
+// ScheduledJobIdentity binds the one run created for a scheduled occurrence to
+// that occurrence. Retries and replacement scheduler processes therefore publish
+// or adopt the same run rather than minting another identity.
+func ScheduledJobIdentity(occurrenceID OccurrenceID) JobID {
+	return JobID(hashParts(scheduledJobVersion, string(occurrenceID)))
 }
 
 // AttemptIdentity survives process replacement while distinguishing every

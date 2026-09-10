@@ -19,7 +19,7 @@ func (s *state) apply(records []record) error {
 			}
 			s.view.Submissions[value.Key] = value
 			s.view.Jobs[value.JobID] = job.Job{ID: value.JobID, State: job.JobAccepted}
-		case kindOccurrence:
+		case kindOccurrence, kindOccurrenceAdmitted:
 			var value job.Occurrence
 			if err := decodeData(entry.Data, &value); err != nil {
 				return err

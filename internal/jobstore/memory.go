@@ -57,6 +57,16 @@ func (m *Memory) BindSubmission(expected Revision, value Submission) (Submission
 	revision, err := m.commit(records)
 	return result, revision, err
 }
+func (m *Memory) RecordOccurrence(expected Revision, value job.Occurrence) (job.Occurrence, Revision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	records, result, err := m.state.recordOccurrence(expected, value)
+	if err != nil {
+		return job.Occurrence{}, m.state.view.Revision, err
+	}
+	revision, err := m.commit(records)
+	return result, revision, err
+}
 func (m *Memory) Admit(expected Revision, value Admission) (job.Occurrence, Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

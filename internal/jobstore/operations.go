@@ -8,18 +8,19 @@ import (
 )
 
 const (
-	kindSubmission      = "submission.bound"
-	kindOccurrence      = "occurrence.recorded"
-	kindReservation     = "budget.reserved"
-	kindExpired         = "attempt.expired"
-	kindClaimed         = "attempt.claimed"
-	kindHeartbeat       = "attempt.heartbeat"
-	kindCheckpoint      = "attempt.checkpointed"
-	kindReceipt         = "external.receipt_recorded"
-	kindSettlement      = "budget.settled"
-	kindCancellation    = "job.cancel_requested"
-	kindAttemptFinished = "attempt.finished"
-	kindJobFinished     = "job.finished"
+	kindSubmission         = "submission.bound"
+	kindOccurrence         = "occurrence.recorded"
+	kindOccurrenceAdmitted = "occurrence.admitted"
+	kindReservation        = "budget.reserved"
+	kindExpired            = "attempt.expired"
+	kindClaimed            = "attempt.claimed"
+	kindHeartbeat          = "attempt.heartbeat"
+	kindCheckpoint         = "attempt.checkpointed"
+	kindReceipt            = "external.receipt_recorded"
+	kindSettlement         = "budget.settled"
+	kindCancellation       = "job.cancel_requested"
+	kindAttemptFinished    = "attempt.finished"
+	kindJobFinished        = "job.finished"
 )
 
 func (s *state) bind(expected Revision, value Submission) ([]record, Submission, error) {
@@ -36,6 +37,27 @@ func (s *state) bind(expected Revision, value Submission) ([]record, Submission,
 		return nil, Submission{}, ErrConflict
 	}
 	return []record{{Kind: kindSubmission, Data: encodeData(value)}}, value, nil
+}
+
+func (s *state) recordOccurrence(expected Revision, value job.Occurrence) ([]record, job.Occurrence, error) {
+	if err := s.checkRevision(expected); err != nil {
+		return nil, job.Occurrence{}, err
+	}
+	if value.ID == "" || value.TriggerID == "" || value.NominalAt.IsZero() ||
+		value.ID != job.OccurrenceIdentity(value.TriggerID, value.NominalAt) ||
+		(value.State != job.OccurrencePending && value.State != job.OccurrenceSkipped) ||
+		value.JobID != "" || value.ReservationID != "" ||
+		(value.State == job.OccurrenceSkipped && value.SkipReason == "") ||
+		(value.State == job.OccurrencePending && value.SkipReason != "") {
+		return nil, job.Occurrence{}, ErrConflict
+	}
+	if old, ok := s.view.Occurrences[value.ID]; ok {
+		if old == value || old.State == job.OccurrenceAdmitted {
+			return nil, old, nil
+		}
+		return nil, job.Occurrence{}, ErrConflict
+	}
+	return []record{{Kind: kindOccurrence, Data: encodeData(value)}}, value, nil
 }
 
 func (s *state) admit(expected Revision, value Admission) ([]record, job.Occurrence, error) {
@@ -56,7 +78,9 @@ func (s *state) admit(expected Revision, value Admission) ([]record, job.Occurre
 		if old == o {
 			return nil, old, nil
 		}
-		return nil, job.Occurrence{}, ErrConflict
+		if old.State != job.OccurrencePending || old.TriggerID != o.TriggerID || !old.NominalAt.Equal(o.NominalAt) {
+			return nil, job.Occurrence{}, ErrConflict
+		}
 	}
 	ledger := s.view.Ledgers[windowKey(value.Window)]
 	if len(ledger.Reservations) > 0 && ledger.Ceiling != value.Ceiling {
@@ -86,10 +110,11 @@ func (s *state) admit(expected Revision, value Admission) ([]record, job.Occurre
 	} else if comparison > 0 {
 		return nil, job.Occurrence{}, ErrBudgetExceeded
 	}
-	return []record{
-		{Kind: kindOccurrence, Data: encodeData(o)},
-		{Kind: kindReservation, Data: encodeData(value)},
-	}, o, nil
+	records := []record{{Kind: kindOccurrence, Data: encodeData(o)}, {Kind: kindReservation, Data: encodeData(value)}}
+	if old, ok := s.view.Occurrences[o.ID]; ok && old.State == job.OccurrencePending {
+		records[0].Kind = kindOccurrenceAdmitted
+	}
+	return records, o, nil
 }
 
 func (s *state) claim(expected Revision, jobID job.JobID, owner string, duration time.Duration, now time.Time) ([]record, job.Claim, error) {

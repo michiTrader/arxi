@@ -297,6 +297,16 @@ func (f *File) BindSubmission(expected Revision, value Submission) (Submission, 
 	revision, err := f.commit(records)
 	return result, revision, err
 }
+func (f *File) RecordOccurrence(expected Revision, value job.Occurrence) (job.Occurrence, Revision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	records, result, err := f.state.recordOccurrence(expected, value)
+	if err != nil {
+		return job.Occurrence{}, f.state.view.Revision, err
+	}
+	revision, err := f.commit(records)
+	return result, revision, err
+}
 func (f *File) Admit(expected Revision, value Admission) (job.Occurrence, Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
