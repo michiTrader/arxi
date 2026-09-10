@@ -207,6 +207,7 @@ func defaultProtoHost() *hostv1.Host {
 	if err != nil {
 		return hostv1.New(hostv1.Options{Storage: storage})
 	}
+	storage.(*filesystemJobStorage).coordination = coordination
 	return hostv1.New(hostv1.Options{Storage: storage, Coordination: coordination})
 }
 

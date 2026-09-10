@@ -24,7 +24,10 @@ import (
 
 const hostStorageRecordFile = ".host-job.v1.json"
 
-type filesystemJobStorage struct{ root string }
+type filesystemJobStorage struct {
+	root         string
+	coordination hostv1.Coordination
+}
 
 type filesystemJobWriter struct {
 	store    *logstore.Store
@@ -232,12 +235,10 @@ func (s *filesystemJobStorage) OpenClaimedWriter(ctx context.Context, claim host
 	value := writer.(*filesystemJobWriter)
 	value.claim = &claim
 	value.validate = func(ctx context.Context, current hostv1.ExecutionClaim) error {
-		coordination, err := openHostCoordination(s.root)
-		if err != nil {
-			return err
+		if s.coordination == nil {
+			return errors.New("filesystem job storage has no coordination validator")
 		}
-		defer coordination.Close()
-		return coordination.Validate(ctx, current)
+		return s.coordination.Validate(ctx, current)
 	}
 	return value, nil
 }
