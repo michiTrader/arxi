@@ -37,11 +37,21 @@ type Result struct {
 // the immutable effective-config artifact before Build is called.
 type Build func(dir string, effective runconfig.Artifact) (exec.Executor, error)
 
+// Claim keeps a resident worker behind one renewable fenced attempt. The
+// coordinator, not the run log writer, decides whether the worker remains active.
+type Claim interface {
+	Checkpoint(cursor, revision int64) error
+	Heartbeat() error
+	Finish(exec.Outcome, error) error
+}
+
 // Options are process-level dependencies; run state is never supplied here.
 type Options struct {
 	Build        Build
 	Now          func() time.Time
 	CommandLimit int
+	Claim        Claim
+	Heartbeat    time.Duration
 }
 
 // Supervisor guarantees at most one resident worker for each run id.
@@ -59,6 +69,21 @@ func New(root string, opts Options) *Supervisor {
 		opts.CommandLimit = DefaultCommandLimit
 	}
 	return &Supervisor{root: root, opts: opts, workers: map[string]*worker{}}
+}
+
+// ConfigureClaim installs coordination before the first worker opens. Refusing
+// a late change prevents an existing log writer from silently switching fences.
+func (s *Supervisor) ConfigureClaim(claim Claim, heartbeat time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || len(s.workers) != 0 {
+		return errors.New("supervisor claim must be configured before opening a worker")
+	}
+	if claim == nil || heartbeat <= 0 {
+		return errors.New("supervisor claim and positive heartbeat cadence are required")
+	}
+	s.opts.Claim, s.opts.Heartbeat = claim, heartbeat
+	return nil
 }
 
 // Open starts (or returns) the one worker for id under the configured root and
@@ -347,6 +372,14 @@ func (w *worker) run() {
 	}
 	defer func() { w.setErr(store.Close()) }()
 
+	var heartbeatStop chan struct{}
+	var heartbeatDone chan struct{}
+	if w.opts.Claim != nil && w.opts.Heartbeat > 0 {
+		heartbeatStop, heartbeatDone = make(chan struct{}), make(chan struct{})
+		go w.heartbeat(heartbeatStop, heartbeatDone)
+		defer func() { close(heartbeatStop); <-heartbeatDone }()
+	}
+
 	for {
 		if w.stopping() {
 			w.rejectPending()
@@ -377,7 +410,14 @@ func (w *worker) run() {
 		once.Do(func() { close(boundary) })
 		<-wakeDone
 		loop.Cursor = out.Cursor
-		w.publish(Result{Outcome: out, Err: runErr})
+		result := Result{Outcome: out, Err: runErr}
+		if w.opts.Claim != nil && (runErr != nil || out.StoppedBy == exec.StopTerminal) {
+			if finishErr := w.opts.Claim.Finish(out, runErr); finishErr != nil {
+				result.Err = errors.Join(result.Err, finishErr)
+			}
+		}
+		w.publish(result)
+
 		drained := w.drain(store)
 		if w.stopping() {
 			w.rejectPending()
@@ -464,7 +504,28 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		Config: effective.Config, RunID: w.id, Now: now}
 	loop := &exec.Loop{Runner: runner, Log: store, Time: timekeeper,
 		Config: effective.Config, Cursor: recovery.Cursor}
+	if w.opts.Claim != nil {
+		loop.Progress = w.opts.Claim.Checkpoint
+	}
 	return store, effective, loop, nil
+}
+
+func (w *worker) heartbeat(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(w.opts.Heartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := w.opts.Claim.Heartbeat(); err != nil {
+				w.setErr(fmt.Errorf("renew worker claim: %w", err))
+				w.close()
+				return
+			}
+		}
+	}
 }
 
 func (w *worker) stopping() bool {

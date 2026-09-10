@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/michiTrader/arxi/internal/app"
+	arxiexec "github.com/michiTrader/arxi/internal/exec"
 	internalinbox "github.com/michiTrader/arxi/internal/inbox"
 	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/jobstore"
@@ -47,6 +49,8 @@ var nativeLifecycles = lifecycleRegistry{runs: map[string]*supervisor.Handle{}}
 var externalDecisionSequence atomic.Uint64
 
 const externalDecisionTimeout = 5 * time.Second
+const scheduledLeaseDuration = 30 * time.Second
+const scheduledHeartbeatCadence = 10 * time.Second
 
 type externalDecisionRequest struct {
 	Event kernel.Event `json:"event"`
@@ -329,6 +333,7 @@ type selfRunner struct {
 	prepare func(startFlags, func(string)) (cliSubmission, error)
 
 	coordinator jobstore.Store
+	owner       string
 
 	// resident retains process ownership of accepted native runs. Subprocess
 	// fallbacks survive a one-shot scheduler process on their own; goroutines do
@@ -338,7 +343,8 @@ type selfRunner struct {
 
 func newSelfRunner(self string) *selfRunner {
 	return &selfRunner{
-		self: self,
+		self:  self,
+		owner: fmt.Sprintf("scheduler-%d", os.Getpid()),
 		prepare: func(f startFlags, accepted func(string)) (cliSubmission, error) {
 			bp, err := resolveActor(f.actor)
 			if err != nil {
@@ -422,11 +428,33 @@ func (r *selfRunner) startRun(rec trigger.Record, slot scheduler.Slot, a trigger
 		}
 		runtime.prepared.IdempotencyKey = string(slot.OccurrenceID)
 		runtime.service.Submissions = coordinatorSubmissionAdapter{store: r.coordinator}
+		runtime.service.Lifecycle = deferredLifecycle{}
 	}
 	submission, err := runtime.service.SubmitPrepared(context.Background(), runtime.prepared)
 	if err != nil {
 		_ = runtime.supervisor.Close(context.Background())
 		return nil, err
+	}
+	if slot.OccurrenceID != "" {
+		claim, err := claimScheduledJob(r.coordinator, slot.JobID, r.owner)
+		if err != nil {
+			_ = runtime.supervisor.Close(context.Background())
+			return nil, fmt.Errorf("claim admitted job %s: %w", slot.JobID, err)
+		}
+		coordination := &scheduledClaim{store: r.coordinator, claim: claim, occurrence: slot.OccurrenceID, reservation: "reservation-" + string(slot.OccurrenceID)}
+		if err := runtime.supervisor.ConfigureClaim(coordination, scheduledHeartbeatCadence); err != nil {
+			_ = runtime.supervisor.Close(context.Background())
+			return nil, err
+		}
+		if err := runtime.supervisor.LaunchAt(context.Background(), submission.Result.JobID, submission.Dir); err != nil {
+			_ = runtime.supervisor.Close(context.Background())
+			return nil, err
+		}
+		submission.Handle, err = runtime.supervisor.OpenAt(context.Background(), submission.Result.JobID, submission.Dir)
+		if err != nil {
+			_ = runtime.supervisor.Close(context.Background())
+			return nil, err
+		}
 	}
 	if acceptedDir == "" {
 		acceptedDir = submission.Dir
@@ -442,6 +470,102 @@ func (r *selfRunner) startRun(rec trigger.Record, slot scheduler.Slot, a trigger
 	r.resident.Add(1)
 	go ex.observe()
 	return ex, nil
+}
+
+type deferredLifecycle struct{}
+
+func (deferredLifecycle) Launch(context.Context, string) error { return nil }
+
+func claimScheduledJob(store jobstore.Store, id job.JobID, owner string) (job.Claim, error) {
+	for {
+		view := store.View()
+		claim, _, err := store.Claim(view.Revision, id, owner, scheduledLeaseDuration)
+		if errors.Is(err, jobstore.ErrRevision) {
+			continue
+		}
+		return claim, err
+	}
+}
+
+type scheduledClaim struct {
+	mu          sync.Mutex
+	store       jobstore.Store
+	claim       job.Claim
+	occurrence  job.OccurrenceID
+	reservation string
+}
+
+func (c *scheduledClaim) Checkpoint(cursor, revision int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	view := c.store.View()
+	_, err := c.store.Checkpoint(view.Revision, job.Checkpoint{JobID: c.claim.JobID, AttemptID: c.claim.AttemptID,
+		Fence: c.claim.Fence, RunRevision: uint64(revision), CompletedCursor: uint64(cursor), CreatedAt: nowFunc().UTC()})
+	return err
+}
+
+func (c *scheduledClaim) Heartbeat() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	view := c.store.View()
+	claim, _, err := c.store.Heartbeat(view.Revision, c.claim.JobID, c.claim.AttemptID, c.claim.Fence, scheduledLeaseDuration)
+	if err == nil {
+		c.claim = claim
+	}
+	return err
+}
+
+func (c *scheduledClaim) Finish(out arxiexec.Outcome, runErr error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	attemptState, jobState, occurrenceState, settlement := job.AttemptFailed, job.JobFailed, job.OccurrenceCompleted, jobstore.SettlementRelease
+	if errors.Is(runErr, arxiexec.ErrUnknownWork) {
+		attemptState, jobState, occurrenceState, settlement = job.AttemptUnknown, job.JobUnknown, job.OccurrenceUnknown, jobstore.SettlementUnknown
+	} else if out.State.Status == kernel.StatusCancelled {
+		attemptState, jobState = job.AttemptCancelled, job.JobCancelled
+	} else if out.State.Status == kernel.StatusSucceeded {
+		attemptState, jobState, settlement = job.AttemptSucceeded, job.JobSucceeded, jobstore.SettlementSpend
+	} else if runErr == nil {
+		return nil
+	}
+	spent, err := amountFromRuntimeUSD(out.State.TreeSpentUSD)
+	if err != nil {
+		return err
+	}
+	if settlement != jobstore.SettlementSpend {
+		spent = job.Amount{}
+	}
+	view := c.store.View()
+	_, err = c.store.Finalize(view.Revision, jobstore.Finalization{
+		Completion: jobstore.Completion{JobID: c.claim.JobID, AttemptID: c.claim.AttemptID, Fence: c.claim.Fence, AttemptState: attemptState, JobState: jobState},
+		Settlement: jobstore.Settlement{JobID: c.claim.JobID, AttemptID: c.claim.AttemptID, Fence: c.claim.Fence, ReservationID: c.reservation, Kind: settlement, Spent: spent},
+		Occurrence: c.occurrence, State: occurrenceState,
+	})
+	return err
+}
+
+func amountFromRuntimeUSD(value float64) (job.Amount, error) {
+	if value < 0 {
+		return job.Amount{}, errors.New("confirmed spend cannot be negative")
+	}
+	if value == 0 {
+		return job.Amount{}, nil
+	}
+	text := strconv.FormatFloat(value, 'f', 9, 64)
+	var coefficient uint64
+	var scale uint8
+	fraction := false
+	for _, ch := range text {
+		if ch == '.' {
+			fraction = true
+			continue
+		}
+		coefficient = coefficient*10 + uint64(ch-'0')
+		if fraction {
+			scale++
+		}
+	}
+	return job.NewAmount(coefficient, scale), nil
 }
 
 // parseScheduledStartArgs applies the trigger's per-period ceiling to the run
