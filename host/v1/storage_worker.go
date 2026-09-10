@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -11,11 +12,13 @@ import (
 )
 
 type storageWorker struct {
-	id       JobID
-	record   JobRecord
-	writer   JobWriter
-	provider TextProvider
-	now      func() time.Time
+	id           JobID
+	record       JobRecord
+	writer       JobWriter
+	provider     TextProvider
+	now          func() time.Time
+	coordination *workerCoordination
+	heartbeat    time.Duration
 
 	mu        sync.Mutex
 	events    []kernel.Event
@@ -40,6 +43,21 @@ func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider Tex
 	return &storageWorker{id: id, record: record, writer: writer, provider: provider, now: now,
 		events: []kernel.Event{start}, changed: make(chan struct{}), done: make(chan struct{}),
 		commands: make(chan storageCommand, 32), wake: make(chan struct{}, 1), stop: make(chan struct{})}
+}
+
+func newRecoveredStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider,
+	now func() time.Time, events []kernel.Event, coordination *workerCoordination, heartbeat time.Duration) (*storageWorker, error) {
+	recovery, err := exec.Recover(events)
+	if err != nil {
+		return nil, err
+	}
+	if !recovery.HasProgress {
+		return nil, errors.New("job has no durable execution progress")
+	}
+	return &storageWorker{id: id, record: record, writer: writer, provider: provider, now: now,
+		coordination: coordination, heartbeat: heartbeat, events: append([]kernel.Event(nil), events...),
+		changed: make(chan struct{}), done: make(chan struct{}), commands: make(chan storageCommand, 32),
+		wake: make(chan struct{}, 1), stop: make(chan struct{})}, nil
 }
 
 func (w *storageWorker) start() { go w.run() }
@@ -74,6 +92,20 @@ func (w *storageWorker) run() {
 			return time.Now().UTC().Format(time.RFC3339Nano)
 		}}
 	loop := &exec.Loop{Runner: runner, Log: log, Time: timekeeper, Config: metadata.Effective.Config}
+	if recovery, recoverErr := exec.Recover(w.events); recoverErr != nil {
+		w.setErr(recoverErr)
+		return
+	} else if recovery.HasProgress {
+		loop.Cursor = recovery.Cursor
+	}
+	var heartbeatStop chan struct{}
+	var heartbeatDone chan struct{}
+	if w.coordination != nil {
+		loop.Progress = w.checkpoint
+		heartbeatStop, heartbeatDone = make(chan struct{}), make(chan struct{})
+		go w.renew(heartbeatStop, heartbeatDone)
+		defer func() { close(heartbeatStop); <-heartbeatDone }()
+	}
 	for {
 		if w.stopping() {
 			return
@@ -99,6 +131,11 @@ func (w *storageWorker) run() {
 		loop.Cursor = out.Cursor
 		if runErr != nil {
 			w.setErr(runErr)
+		}
+		if w.coordination != nil && (runErr != nil || out.StoppedBy == exec.StopTerminal) {
+			if err := w.coordination.complete(out, runErr); err != nil {
+				w.setErr(err)
+			}
 		}
 		w.drainCommands()
 		if w.stopping() {
@@ -176,6 +213,53 @@ func (w *storageWorker) applyCommand(command storageCommand) error {
 	}
 	w.signalChanged()
 	return nil
+}
+
+func (w *storageWorker) checkpoint(cursor, revision int64) error {
+	return w.coordination.port.Checkpoint(context.Background(), ExecutionCheckpoint{
+		Claim: w.coordination.claim, RunRevision: revision, CompletedCursor: cursor,
+	})
+}
+
+func (w *storageWorker) renew(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(w.heartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := w.coordination.port.Heartbeat(context.Background(), w.coordination.claim); err != nil {
+				w.setErr(err)
+				w.closeOnce.Do(func() { close(w.stop); w.signalWake() })
+				return
+			}
+		}
+	}
+}
+
+type workerCoordination struct {
+	port  Coordination
+	claim ExecutionClaim
+}
+
+func (c *workerCoordination) complete(out exec.Outcome, runErr error) error {
+	outcome := ExecutionFailed
+	if runErr != nil {
+		outcome = ExecutionUnknown
+	} else {
+		switch out.State.Status {
+		case kernel.StatusSucceeded:
+			outcome = ExecutionSucceeded
+		case kernel.StatusCancelled:
+			outcome = ExecutionCancelled
+		case kernel.StatusFailed, kernel.StatusExpired:
+		default:
+			return nil
+		}
+	}
+	return c.port.Complete(context.Background(), c.claim, outcome)
 }
 
 func (w *storageWorker) signalWake() {

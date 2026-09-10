@@ -22,6 +22,7 @@ import (
 type storageBackend struct {
 	storage      JobStorage
 	coordination Coordination
+	heartbeat    time.Duration
 	provider     TextProvider
 	now          func() time.Time
 	capabilities *capabilityResolver
@@ -58,9 +59,13 @@ func newBackend(options Options) backend {
 	if err != nil {
 		panic(err)
 	}
+	heartbeat := options.CoordinationHeartbeat
+	if heartbeat <= 0 {
+		heartbeat = 10 * time.Second
+	}
 	return &storageBackend{
-		storage: options.Storage, coordination: options.Coordination, provider: options.Provider, now: options.Now,
-		capabilities: resolver, workers: map[JobID]*storageWorker{},
+		storage: options.Storage, coordination: options.Coordination, heartbeat: heartbeat,
+		provider: options.Provider, now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
 	}
 }
 
@@ -304,6 +309,28 @@ func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error)
 			}
 			continue
 		}
+		if b.coordination != nil {
+			claimed, claimErr := b.claimWorker(ctx, req.JobID)
+			if claimErr == nil {
+				if err := claimed.wait(ctx); err != nil && !errors.Is(err, errAlreadyTerminal) {
+					return Job{}, adaptCoordinationError(CapabilityWait, req.JobID, err)
+				}
+				continue
+			}
+			if errors.Is(claimErr, ErrStorageConflict) {
+				timer := time.NewTimer(25 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return Job{}, ctx.Err()
+				case <-timer.C:
+					continue
+				}
+			}
+			return Job{}, adaptCoordinationError(CapabilityWait, req.JobID, claimErr)
+		}
 		return Job{}, adaptStorageError(CapabilityWait, req.JobID, job.Sequence,
 			errors.New("job is not resident in this host"))
 	}
@@ -412,6 +439,46 @@ func (b *storageBackend) clock() time.Time {
 		return b.now()
 	}
 	return time.Now()
+}
+
+func (b *storageBackend) claimWorker(ctx context.Context, id JobID) (*storageWorker, error) {
+	storage, ok := b.storage.(CoordinatedJobStorageV1)
+	if !ok {
+		return nil, errors.New("job storage cannot fence claimed writers")
+	}
+	claim, err := b.coordination.Claim(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := storage.OpenClaimedWriter(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	record, err := b.storage.Load(ctx, id)
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	events, _, err := b.readEvents(ctx, id)
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	worker, err := newRecoveredStorageWorker(id, record, writer, b.provider, b.now, events,
+		&workerCoordination{port: b.coordination, claim: claim}, b.heartbeat)
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := b.installWorker(worker); err != nil {
+		_ = writer.Close()
+		if existing := b.worker(id); existing != nil {
+			return existing, nil
+		}
+		return nil, err
+	}
+	worker.start()
+	return worker, nil
 }
 
 func (b *storageBackend) installWorker(worker *storageWorker) error {
