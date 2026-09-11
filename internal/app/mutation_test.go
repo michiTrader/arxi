@@ -233,10 +233,10 @@ func TestExactDecisionServiceErrors(t *testing.T) {
 	_, err = s.Approve(Decision{JobID: "../r1", ItemID: "approval-1"})
 	appErrorKind(t, err, InvalidArgument)
 
-	if _, err = s.Approve(Decision{JobID: "r1", ItemID: "approval-1"}); err != nil {
-		t.Fatal(err)
+	if _, err = s.Answer(Decision{JobID: "r1", ItemID: "question-1", Text: "staging", Principal: "operator:alice"}); err != nil {
+		t.Fatalf("a valid question answer failed: generic questions must keep legacy single-reply semantics; append the answer without requiring authorization: %v", err)
 	}
-	_, err = s.Approve(Decision{JobID: "r1", ItemID: "approval-1"})
+	_, err = s.Answer(Decision{JobID: "r1", ItemID: "question-1", Text: "production", Principal: "operator:bob"})
 	appErrorKind(t, err, AlreadyDecided)
 
 	store, err := logstore.Open(dir)
@@ -247,6 +247,6 @@ func TestExactDecisionServiceErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Close()
-	_, err = s.Answer(Decision{JobID: "r1", ItemID: "question-1", Text: "staging"})
+	_, err = s.Approve(Decision{JobID: "r1", ItemID: "approval-1", Principal: "operator:alice"})
 	appErrorKind(t, err, AlreadyTerminal)
 }
