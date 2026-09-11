@@ -98,12 +98,13 @@ const (
 	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
 	JobExpired   JobStatus = "expired"
+	JobUnknown   JobStatus = "unknown"
 )
 
 // Terminal reports whether no further lifecycle mutation is accepted.
 func (s JobStatus) Terminal() bool {
 	switch s {
-	case JobSucceeded, JobFailed, JobCancelled, JobExpired:
+	case JobSucceeded, JobFailed, JobCancelled, JobExpired, JobUnknown:
 		return true
 	default:
 		return false
@@ -127,8 +128,11 @@ type Job struct {
 	BudgetUSD    float64           `json:"budget_usd,omitempty"`
 	Simulated    bool              `json:"simulated,omitempty"`
 	Pending      []PendingDecision `json:"pending,omitempty"`
-	UnknownWork  int               `json:"unknown_work,omitempty"`
-	Result       string            `json:"result,omitempty"`
+	UnknownWork            int               `json:"unknown_work,omitempty"`
+	AttemptCount           uint64            `json:"attempt_count,omitempty"`
+	ReconciliationRequired bool              `json:"reconciliation_required,omitempty"`
+	CancellationRequested  bool              `json:"cancellation_requested,omitempty"`
+	Result                 string            `json:"result,omitempty"`
 }
 
 // Member is one participant in the selected job projection.
