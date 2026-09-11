@@ -34,9 +34,9 @@ type storageWorker struct {
 }
 
 type storageCommand struct {
-	ctx       context.Context
-	makeEvent func([]kernel.Event) (kernel.Event, error)
-	reply     chan error
+	ctx        context.Context
+	makeEvents func([]kernel.Event) ([]kernel.Event, error)
+	reply      chan error
 }
 
 func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider, now func() time.Time, start kernel.Event) *storageWorker {
@@ -161,8 +161,8 @@ func (w *storageWorker) run() {
 	}
 }
 
-func (w *storageWorker) command(ctx context.Context, makeEvent func([]kernel.Event) (kernel.Event, error)) error {
-	command := storageCommand{ctx: ctx, makeEvent: makeEvent, reply: make(chan error, 1)}
+func (w *storageWorker) command(ctx context.Context, makeEvents func([]kernel.Event) ([]kernel.Event, error)) error {
+	command := storageCommand{ctx: ctx, makeEvents: makeEvents, reply: make(chan error, 1)}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -198,15 +198,19 @@ func (w *storageWorker) applyCommand(command storageCommand) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	event, err := command.makeEvent(append([]kernel.Event(nil), w.events...))
+	events, err := command.makeEvents(append([]kernel.Event(nil), w.events...))
 	if err != nil {
 		return err
 	}
-	body, err := encodeStoredEvent(event)
-	if err != nil {
-		return err
+	records := make([]StoredRecord, len(events))
+	for i, event := range events {
+		body, encodeErr := encodeStoredEvent(event)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		records[i] = StoredRecord{Data: body}
 	}
-	result, err := w.writer.Append(command.ctx, AppendBatch{Expected: w.record.Revision, Records: []StoredRecord{{Data: body}}})
+	result, err := w.writer.Append(command.ctx, AppendBatch{Expected: w.record.Revision, Records: records})
 	if err != nil {
 		return err
 	}

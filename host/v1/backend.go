@@ -249,18 +249,18 @@ func (b *storageBackend) Cancel(ctx context.Context, req CancelRequest) (Job, er
 			return Job{}, adaptCoordinationError(CapabilityCancel, req.JobID, err)
 		}
 	}
-	return b.mutate(ctx, CapabilityCancel, req.JobID, "", func(events []kernel.Event) (kernel.Event, error) {
+	return b.mutate(ctx, CapabilityCancel, req.JobID, "", func(events []kernel.Event) ([]kernel.Event, error) {
 		state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
 		if state.Status.Terminal() {
-			return kernel.Event{}, errAlreadyTerminal
+			return nil, errAlreadyTerminal
 		}
 		payload := map[string]any{}
 		if reason := strings.TrimSpace(req.Reason); reason != "" {
 			payload["reason"] = reason
 		}
-		return kernel.Event{ID: "cancel-" + strconv.FormatInt(state.Seq+1, 10), Type: kernel.RunCancelled,
+		return []kernel.Event{{ID: "cancel-" + strconv.FormatInt(state.Seq+1, 10), Type: kernel.RunCancelled,
 			Ts: b.clock().UTC().Format(time.RFC3339Nano), Source: kernel.SourceHuman,
-			Scope: "run:" + string(req.JobID), Payload: payload}, nil
+			Scope: "run:" + string(req.JobID), Payload: payload}}, nil
 	})
 }
 
@@ -268,7 +268,7 @@ func (b *storageBackend) Approve(ctx context.Context, req ApproveRequest) (Job, 
 	if err := b.authorize(ctx, req.Principal, CapabilityApprove, req.JobID); err != nil {
 		return Job{}, err
 	}
-	return b.decide(ctx, CapabilityApprove, req.JobID, req.ItemID, "approve", "")
+	return b.decide(ctx, CapabilityApprove, req.Principal, req.JobID, req.ItemID, "approve", "")
 }
 
 func (b *storageBackend) Reject(ctx context.Context, req RejectRequest) (Job, error) {
@@ -278,7 +278,7 @@ func (b *storageBackend) Reject(ctx context.Context, req RejectRequest) (Job, er
 	if strings.TrimSpace(req.Reason) == "" {
 		return Job{}, mutationError(CodeInvalidArgument, CapabilityReject, req.JobID, req.ItemID, errors.New("rejection reason is required"))
 	}
-	return b.decide(ctx, CapabilityReject, req.JobID, req.ItemID, "reject", req.Reason)
+	return b.decide(ctx, CapabilityReject, req.Principal, req.JobID, req.ItemID, "reject", req.Reason)
 }
 
 func (b *storageBackend) Answer(ctx context.Context, req AnswerRequest) (Job, error) {
@@ -288,41 +288,74 @@ func (b *storageBackend) Answer(ctx context.Context, req AnswerRequest) (Job, er
 	if strings.TrimSpace(req.Text) == "" {
 		return Job{}, mutationError(CodeInvalidArgument, CapabilityAnswer, req.JobID, req.ItemID, errors.New("answer text is required"))
 	}
-	return b.decide(ctx, CapabilityAnswer, req.JobID, req.ItemID, "answer", req.Text)
+	return b.decide(ctx, CapabilityAnswer, req.Principal, req.JobID, req.ItemID, "answer", req.Text)
 }
 
-func (b *storageBackend) decide(ctx context.Context, op Capability, id JobID, itemID ItemID, decision, text string) (Job, error) {
-	return b.mutate(ctx, op, id, itemID, func(events []kernel.Event) (kernel.Event, error) {
-		state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
-		for _, item := range state.Inbox {
-			if item.ID != string(itemID) {
-				continue
-			}
-			if item.Replied {
-				return kernel.Event{}, errAlreadyDecided
-			}
-			approval := item.Kind == "tool_approval"
-			if approval != (decision == "approve" || decision == "reject") {
-				return kernel.Event{}, errWrongDecisionKind
-			}
-			if state.Status.Terminal() {
-				return kernel.Event{}, errAlreadyTerminal
-			}
-			return kernel.Event{ID: "inbox-reply-" + string(itemID), Type: kernel.InboxReplied,
-				Ts: b.clock().UTC().Format(time.RFC3339Nano), Source: kernel.SourceHuman,
-				Payload: map[string]any{"inbox_id": string(itemID), "decision": decision, "text": text}}, nil
-		}
-		return kernel.Event{}, errItemNotFound
+func (b *storageBackend) decide(ctx context.Context, op Capability, principal Principal, id JobID, itemID ItemID, decision, text string) (Job, error) {
+	return b.mutate(ctx, op, id, itemID, func(events []kernel.Event) ([]kernel.Event, error) {
+		return b.decisionEvents(events, principal.ID, id, itemID, decision, text)
 	})
 }
 
+func (b *storageBackend) decisionEvents(events []kernel.Event, principal string, id JobID, itemID ItemID, decision, text string) ([]kernel.Event, error) {
+	state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
+	item := state.InboxItem(string(itemID))
+	if item == nil {
+		return nil, errItemNotFound
+	}
+	if item.Replied {
+		return nil, errAlreadyDecided
+	}
+	approval := item.Kind == "tool_approval"
+	if approval != (decision == "approve" || decision == "reject") {
+		return nil, errWrongDecisionKind
+	}
+	if state.Status.Terminal() {
+		return nil, errAlreadyTerminal
+	}
+	at := b.clock().UTC().Format(time.RFC3339Nano)
+	reply := kernel.Event{ID: "inbox-reply-" + string(itemID), Type: kernel.InboxReplied,
+		Ts: at, Source: kernel.SourceHuman, Payload: map[string]any{
+			"inbox_id": string(itemID), "decision": decision, "text": text,
+		}}
+	principal = strings.TrimSpace(principal)
+	if principal != "" {
+		reply.Payload["principal"] = principal
+	}
+	if !approval {
+		return []kernel.Event{reply}, nil
+	}
+	a := state.Authorization(item.AuthorizationID)
+	if a == nil || item.AuthorizationID == "" || item.ActionDigest == "" ||
+		a.InboxID != item.ID || a.ActionDigest != item.ActionDigest || a.Schema != "arxi.authorization/v1" {
+		return nil, errAuthorizationBinding
+	}
+	if principal == "" || principal == a.RequesterPrincipal {
+		return nil, errInvalidPrincipal
+	}
+	expires, err := time.Parse(time.RFC3339, a.ExpiresAt)
+	if err != nil || !b.clock().Before(expires) {
+		return nil, errAuthorizationExpired
+	}
+	reply.Payload["authorization_id"], reply.Payload["action_digest"] = a.ID, a.ActionDigest
+	payload := map[string]any{"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest}
+	typeName, eventID := kernel.AuthorizationDenied, "authorization-denied-"+a.ID
+	if decision == "approve" {
+		typeName, eventID = kernel.AuthorizationGranted, "authorization-granted-"+a.ID
+		payload["approver_principal"], payload["grant_event_id"], payload["expires_at"] = principal, eventID, a.ExpiresAt
+	} else {
+		payload["principal"], payload["reason"] = principal, text
+	}
+	return []kernel.Event{reply, {ID: eventID, Type: typeName, Ts: at, Source: kernel.SourceHuman, Payload: payload}}, nil
+}
+
 func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, itemID ItemID,
-	makeEvent func([]kernel.Event) (kernel.Event, error)) (Job, error) {
+	makeEvents func([]kernel.Event) ([]kernel.Event, error)) (Job, error) {
 	if b.storage == nil {
 		return Job{}, unavailable(op)
 	}
 	if worker := b.worker(id); worker != nil {
-		err := worker.command(ctx, func(events []kernel.Event) (kernel.Event, error) { return makeEvent(events) })
+		err := worker.command(ctx, makeEvents)
 		if err != nil {
 			return Job{}, adaptMutationFailure(op, id, itemID, err)
 		}
@@ -348,15 +381,19 @@ func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, it
 	if err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
-	event, err := makeEvent(events)
+	eventsToAppend, err := makeEvents(events)
 	if err != nil {
 		return Job{}, adaptMutationFailure(op, id, itemID, err)
 	}
-	encoded, err := encodeStoredEvent(event)
-	if err != nil {
-		return Job{}, adaptStorageError(op, id, 0, err)
+	records := make([]StoredRecord, len(eventsToAppend))
+	for i, event := range eventsToAppend {
+		encoded, encodeErr := encodeStoredEvent(event)
+		if encodeErr != nil {
+			return Job{}, adaptStorageError(op, id, 0, encodeErr)
+		}
+		records[i] = StoredRecord{Data: encoded}
 	}
-	if _, err = writer.Append(ctx, AppendBatch{Expected: record.Revision, Records: []StoredRecord{{Data: encoded}}}); err != nil {
+	if _, err = writer.Append(ctx, AppendBatch{Expected: record.Revision, Records: records}); err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
 	return b.inspect(ctx, op, id)
@@ -755,10 +792,13 @@ func newStorageJobID(now time.Time) string {
 }
 
 var (
-	errAlreadyTerminal   = errors.New("job is already terminal")
-	errAlreadyDecided    = errors.New("item is already decided")
-	errWrongDecisionKind = errors.New("decision verb does not match item kind")
-	errItemNotFound      = errors.New("item was not found")
+	errAlreadyTerminal      = errors.New("job is already terminal")
+	errAlreadyDecided       = errors.New("item is already decided")
+	errWrongDecisionKind    = errors.New("decision verb does not match item kind")
+	errItemNotFound         = errors.New("item was not found")
+	errAuthorizationBinding = errors.New("approval item has no valid exact authorization binding")
+	errInvalidPrincipal     = errors.New("decision principal is empty or matches the requester")
+	errAuthorizationExpired = errors.New("authorization has expired")
 )
 
 func adaptMutationFailure(op Capability, id JobID, itemID ItemID, err error) error {
@@ -772,6 +812,8 @@ func adaptMutationFailure(op Capability, id JobID, itemID ItemID, err error) err
 		code = CodeWrongDecisionKind
 	case errors.Is(err, errItemNotFound):
 		code = CodeNotFound
+	case errors.Is(err, errAuthorizationBinding), errors.Is(err, errInvalidPrincipal), errors.Is(err, errAuthorizationExpired):
+		code = CodeInvalidArgument
 	}
 	return mutationError(code, op, id, itemID, err)
 }
