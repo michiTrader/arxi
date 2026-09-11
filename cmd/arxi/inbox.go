@@ -19,6 +19,8 @@ import (
 // somewhere disposable -- the same seam triggerDir and evalDir use.
 var runsDir = "runs"
 
+const trustedLocalOperatorPrincipal = "operator:local-cli"
+
 // cmdInbox routes the four inbox verbs.
 func cmdInbox(args []string) {
 	if len(args) == 0 {
@@ -191,7 +193,7 @@ func cmdInboxAnswer(verb string, args []string) {
 		os.Exit(2)
 	}
 
-	reply := inbox.Reply{}
+	reply := inbox.Reply{Principal: trustedLocalOperatorPrincipal}
 	switch verb {
 	case "approve":
 		reply.Decision = inbox.DecisionApprove
@@ -357,7 +359,7 @@ func externalInboxEvent(id string, reply inbox.Reply) kernel.Event {
 	return kernel.Event{
 		ID: "inbox-reply-" + id, Ts: nowFunc().UTC().Format(time.RFC3339),
 		Type: kernel.InboxReplied, Source: kernel.SourceHuman,
-		Payload: map[string]any{"inbox_id": id, "text": reply.Text, "decision": reply.Decision},
+		Payload: map[string]any{"inbox_id": id, "text": reply.Text, "decision": reply.Decision, "principal": reply.Principal},
 	}
 }
 

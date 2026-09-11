@@ -188,7 +188,8 @@ func importExternalDecisions(store *logstore.Store) (bool, error) {
 		}
 		var event kernel.Event
 		if request.Exact {
-			reply := internalinbox.Reply{Decision: request.Event.Str("decision"), Text: request.Event.Str("text")}
+			reply := internalinbox.Reply{Decision: request.Event.Str("decision"), Text: request.Event.Str("text"), Principal: request.Event.Str("principal")}
+
 			event, err = internalinbox.AnswerExactStore(store, request.Event.Str("inbox_id"), reply)
 		} else {
 			err = validateExternalDecision(store, request.Event, false)
