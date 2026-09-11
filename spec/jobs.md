@@ -75,8 +75,10 @@ process identifiers.
 ## 5. External dispatch
 
 Before dispatch, the run log contains the exact prepared work and the coordination
-journal binds its stable dispatch key. Immediately before calling outside the
-process, the started boundary is durable.
+journal binds its stable dispatch key to the active job, attempt, fence, provider,
+work ID and canonical request digest. A receipt is accepted only against that
+registered prepared dispatch and must repeat every binding exactly. Immediately
+before calling outside the process, the started boundary is durable.
 
 `idempotent` work may retry only when no terminal outcome exists and the same key
 is supplied to the external system. `non_idempotent` work may not retry after a
@@ -107,9 +109,11 @@ it does not silently reappear. Duplicate scheduler ticks observe existing record
 
 ## 7. Periodic budget ledger
 
-A ledger window is keyed by trigger ID, period kind and UTC window start. Amounts
-use the repository's canonical decimal representation; binary floating-point
-comparison is not an accounting boundary.
+A ledger window is keyed by trigger ID, period kind and its canonical UTC window
+start. The nominal occurrence instant must be UTC and inside that exact boundary:
+hours start at `HH:00`, days at `00:00`, weeks at Monday `00:00`, and months on
+the first at `00:00`. Amounts use the repository's canonical decimal
+representation; binary floating-point comparison is not an accounting boundary.
 
 Admission atomically appends the occurrence, job binding and maximum reservation.
 It fails without a partial occurrence when:
@@ -118,10 +122,11 @@ It fails without a partial occurrence when:
 settled + active reservations + requested reservation > configured ceiling
 ```
 
-Settlement replaces reserved capacity with confirmed spend. A proven
-pre-dispatch failure may release its reservation. `unknown` spend keeps the full
-reservation until reconciliation adds durable evidence. No heartbeat, expiry or
-cancellation request releases money by itself.
+Settlement replaces reserved capacity with confirmed spend. Reservation release is
+disabled until the journal defines and records a durable proven-pre-dispatch
+evidence type. `unknown` spend keeps the full reservation until reconciliation
+adds durable evidence. No heartbeat, expiry, cancellation request or worker claim
+releases money by itself.
 
 ## 8. Coordination journal
 
@@ -142,6 +147,7 @@ Cross-job record kinds are:
 
 | kind | required identity and purpose |
 |---|---|
+| `job.registered` | accepted job ID, including submissions without a caller idempotency key |
 | `submission.bound` | idempotency key, request digest and job ID |
 | `occurrence.recorded` | occurrence identity, trigger, nominal slot and state |
 | `budget.reserved` | occurrence/job, window, ceiling and reserved amount |
@@ -149,7 +155,8 @@ Cross-job record kinds are:
 | `attempt.expired` | prior attempt, fence and observed expiry |
 | `attempt.heartbeat` | active attempt, fence and new absolute expiry |
 | `attempt.checkpointed` | active attempt, fence, run revision and safe cursor |
-| `external.receipt_recorded` | active attempt, dispatch key and receipt evidence |
+| `external.dispatch_registered` | active attempt, fence, provider, work, request digest and dispatch key |
+| `external.receipt_recorded` | active attempt and evidence matching one registered dispatch |
 | `budget.settled` | reservation, confirmed spend or evidenced release |
 | `job.cancel_requested` | durable intent, actor and reason |
 | `attempt.finished` | fenced terminal attempt outcome |
@@ -160,12 +167,14 @@ but deleting it and replaying confirmed records must produce the same answer.
 
 ## 9. Acceptance and recovery boundaries
 
-`run.started` remains the durable job-acceptance record. Submission does not report
-success before immutable artifacts and that event are confirmed. A scheduled job
-uses a deterministic job ID bound in its occurrence transaction. If a process dies
-between reservation and per-run publication, recovery retries publication under
-the same ID; an already-published matching job is adopted, while conflicting
-artifacts are corruption.
+`run.started` remains the per-run durable acceptance record. A coordinated host
+also appends `job.registered` before claiming every job, whether or not the caller
+provided an idempotency key. Submission does not report success before immutable
+artifacts and `run.started` are confirmed. A scheduled job uses a deterministic job
+ID bound in its occurrence transaction. If a process dies between reservation and
+per-run publication, recovery retries publication under the same ID; an
+already-published matching job is adopted, while conflicting artifacts are
+corruption.
 
 Crash tests cover both sides of:
 
@@ -191,6 +200,8 @@ origin and whether reconciliation is required. It must not expose lease owner,
 fence token, journal location, credential references or raw checkpoint records.
 
 `host/v1.JobStorage` and surface version 1 remain source-compatible. Optional
-coordination and reconciliation ports install Phase 3 behavior; capability
-advertisement must still reflect only installed, authorized and safely adapted
-operations.
+coordination and reconciliation ports install Phase 3 behavior. A host configured
+with coordination advertises or executes `Submit` and `Recover` only when storage
+implements fenced writers; process-local storage may still advertise `Submit`
+without coordination. Capability advertisement must still reflect only installed,
+authorized and safely adapted operations.
