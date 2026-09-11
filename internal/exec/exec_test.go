@@ -39,6 +39,19 @@ func newMemLog() *memLog {
 func (m *memLog) Append(events []kernel.Event) ([]kernel.Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.appendLocked(events)
+}
+
+func (m *memLog) AppendIfSeq(expectedSeq int64, events []kernel.Event) ([]kernel.Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.head != expectedSeq {
+		return nil, fmt.Errorf("log head changed from %d to %d", expectedSeq, m.head)
+	}
+	return m.appendLocked(events)
+}
+
+func (m *memLog) appendLocked(events []kernel.Event) ([]kernel.Event, error) {
 	m.appendCalls++
 	if m.failAppend != nil || (m.failAppendAt > 0 && m.appendCalls == m.failAppendAt) {
 		if m.failAppend != nil {

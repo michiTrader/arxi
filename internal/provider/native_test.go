@@ -487,6 +487,19 @@ func newNativeTestLog() *nativeTestLog { return &nativeTestLog{} }
 func (l *nativeTestLog) Append(events []kernel.Event) ([]kernel.Event, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.appendLocked(events)
+}
+
+func (l *nativeTestLog) AppendIfSeq(expectedSeq int64, events []kernel.Event) ([]kernel.Event, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.head != expectedSeq {
+		return nil, fmt.Errorf("log head changed from %d to %d", expectedSeq, l.head)
+	}
+	return l.appendLocked(events)
+}
+
+func (l *nativeTestLog) appendLocked(events []kernel.Event) ([]kernel.Event, error) {
 	out := make([]kernel.Event, len(events))
 	for i, event := range events {
 		l.head++

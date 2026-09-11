@@ -44,6 +44,12 @@ type Log interface {
 	// runner does not assign it either, for the same reason. Only the log does.
 	Append(events []kernel.Event) ([]kernel.Event, error)
 
+	// AppendIfSeq atomically appends only at the confirmed version the caller
+	// verified. Exact authorization consumption and its external start boundary
+	// must share this operation; two separate appends would leave a crash gap in
+	// which authority was consumed without started work, or vice versa.
+	AppendIfSeq(expectedSeq int64, events []kernel.Event) ([]kernel.Event, error)
+
 	// Read exposes confirmed events for durable work recovery. The runner rebuilds
 	// prepared/started/finished state from these records before dispatching.
 	Read(fromSeq, toSeq int64) ([]kernel.Event, error)

@@ -376,6 +376,19 @@ type workerLog struct {
 func (l *workerLog) Append(events []kernel.Event) ([]kernel.Event, error) {
 	l.worker.mu.Lock()
 	defer l.worker.mu.Unlock()
+	return l.appendLocked(events)
+}
+
+func (l *workerLog) AppendIfSeq(expectedSeq int64, events []kernel.Event) ([]kernel.Event, error) {
+	l.worker.mu.Lock()
+	defer l.worker.mu.Unlock()
+	if len(l.worker.events) == 0 && expectedSeq != 0 || len(l.worker.events) > 0 && l.worker.events[len(l.worker.events)-1].Seq != expectedSeq {
+		return nil, errors.New("host worker log changed before compare-and-swap append")
+	}
+	return l.appendLocked(events)
+}
+
+func (l *workerLog) appendLocked(events []kernel.Event) ([]kernel.Event, error) {
 	records := make([]StoredRecord, len(events))
 	for i, event := range events {
 		body, err := encodeStoredEvent(event)
