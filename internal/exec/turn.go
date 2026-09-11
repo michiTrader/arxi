@@ -464,6 +464,31 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 		if child.Status == "unknown" {
 			return nil, fmt.Errorf("%w: authorized child %s has a durable unknown outcome", ErrUnknownWork, child.ID)
 		}
+		meta := childMetadata(r, &child, "tool", WorkNonIdempotent, false)
+		if r.Dispatches != nil {
+			receipt, found, lookupErr := r.Dispatches.Receipt(meta)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if found {
+				var outcome TurnToolOutcome
+				if err := json.Unmarshal(receipt.CanonicalOutcome, &outcome); err != nil {
+					return nil, NotDispatched(fmt.Errorf("decode authorized tool receipt %s: %w", child.ID, err))
+				}
+				if err := validateToolOutcome(suspension.Call, outcome); err != nil {
+					return nil, NotDispatched(err)
+				}
+				if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, "completed", receipt.CanonicalOutcome, nil); err != nil {
+					return nil, err
+				}
+				child.Status, child.ResultJSON = "completed", string(receipt.CanonicalOutcome)
+				return r.continueAuthorization(ctx, resumeWork, suspension, child)
+			}
+		}
+		if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, "unknown", nil,
+			fmt.Errorf("process stopped after authorized dispatch began and before a terminal outcome was committed")); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: authorized child %s started without a committed outcome", ErrUnknownWork, child.ID)
 	}
 	authorized, ok := r.Executor.(AuthorizedTurnToolExecutor)
@@ -471,6 +496,9 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 		return nil, NotDispatched(fmt.Errorf("executor cannot dispatch exact authorized native tools"))
 	}
 	head := r.Log.Head()
+	if err := r.register(childMetadata(r, &child, "tool", WorkNonIdempotent, false)); err != nil {
+		return nil, NotDispatched(fmt.Errorf("register authorized tool dispatch %s: %w", child.ID, err))
+	}
 	if r.Clock.NowMs() > 0 {
 		expires, parseErr := time.Parse(time.RFC3339Nano, a.ExpiresAt)
 		if parseErr != nil {
@@ -527,6 +555,10 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	body, err := json.Marshal(outcome)
 	if err != nil {
 		return nil, err
+	}
+	meta := childMetadata(r, &child, "tool", WorkNonIdempotent, false)
+	if err := r.recordReceipt(meta, &DispatchReceipt{Status: OutcomeSucceeded, CanonicalOutcome: body}); err != nil {
+		return nil, fmt.Errorf("record authorized tool receipt %s: %w", child.ID, err)
 	}
 	if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, "completed", body, nil); err != nil {
 		return nil, err
