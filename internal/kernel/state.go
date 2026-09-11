@@ -158,12 +158,43 @@ func (m Member) Busy() bool {
 
 // InboxItem is a pending question for a human.
 type InboxItem struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Question  string `json:"question"`
-	Agent     string `json:"agent,omitempty"`
-	OnTimeout string `json:"on_timeout,omitempty"`
-	Replied   bool   `json:"replied,omitempty"`
+	ID              string `json:"id"`
+	Kind            string `json:"kind"`
+	Question        string `json:"question"`
+	Agent           string `json:"agent,omitempty"`
+	OnTimeout       string `json:"on_timeout,omitempty"`
+	AuthorizationID string `json:"authorization_id,omitempty"`
+	ActionDigest    string `json:"action_digest,omitempty"`
+	Replied         bool   `json:"replied,omitempty"`
+}
+
+// Authorization is the replayable authority over one exact suspended action.
+// The reducer carries absolute expiry as evidence but never interprets wall
+// time; only authorization.expired turns that evidence into a terminal fact.
+type Authorization struct {
+	Schema             string `json:"schema"`
+	ID                 string `json:"authorization_id"`
+	InboxID            string `json:"inbox_id"`
+	RequesterPrincipal string `json:"requester_principal"`
+	SuspensionID       string `json:"suspension_id"`
+	ParentWorkID       string `json:"parent_work_id"`
+	ProviderCallID     string `json:"provider_call_id"`
+	Tool               string `json:"tool"`
+	ArgumentDigest     string `json:"argument_digest"`
+	ActionDigest       string `json:"action_digest"`
+	ToolSchemaVersion  string `json:"tool_schema_version"`
+	PolicyVersion      string `json:"policy_version"`
+	WorkspaceProfileID string `json:"workspace_profile_id"`
+	ExpiresAt          string `json:"expires_at"`
+	AfterMS            int64  `json:"after_ms"`
+	Decision           string `json:"decision,omitempty"`
+	DecisionPrincipal  string `json:"decision_principal,omitempty"`
+	DecisionReason     string `json:"decision_reason,omitempty"`
+	DecisionAt         string `json:"decision_at,omitempty"`
+	ApproverPrincipal  string `json:"approver_principal,omitempty"`
+	GrantEventID       string `json:"grant_event_id,omitempty"`
+	GrantExpiresAt     string `json:"grant_expires_at,omitempty"`
+	ConsumingWorkID    string `json:"consuming_work_id,omitempty"`
 }
 
 // Lock is a cooperative lock over a key. It is cooperative and not
@@ -231,8 +262,9 @@ type State struct {
 	ParentRunID  string  `json:"parent_run_id,omitempty"`
 	SpawnDepth   int     `json:"spawn_depth"`
 
-	Locks []Lock      `json:"locks,omitempty"`
-	Inbox []InboxItem `json:"inbox,omitempty"`
+	Locks          []Lock          `json:"locks,omitempty"`
+	Inbox          []InboxItem     `json:"inbox,omitempty"`
+	Authorizations []Authorization `json:"authorizations,omitempty"`
 
 	// KV is the run's shared key/value store: what one member wants another to
 	// know without paying for a turn to say it.
@@ -309,6 +341,19 @@ func (s *State) InboxItem(id string) *InboxItem {
 	return nil
 }
 
+// Authorization looks up exact authority by its stable id.
+func (s *State) Authorization(id string) *Authorization {
+	if id == "" {
+		return nil
+	}
+	for i := range s.Authorizations {
+		if s.Authorizations[i].ID == id {
+			return &s.Authorizations[i]
+		}
+	}
+	return nil
+}
+
 // Clone makes a deep copy. Decide clones before touching anything: the signature
 // says (State, Event) -> State, and if it mutated its input the fold would stop
 // being reproducible and the "does not mutate input" tests would exist for
@@ -335,6 +380,9 @@ func (s State) Clone() State {
 	}
 	if s.Inbox != nil {
 		out.Inbox = append([]InboxItem(nil), s.Inbox...)
+	}
+	if s.Authorizations != nil {
+		out.Authorizations = append([]Authorization(nil), s.Authorizations...)
 	}
 	// The second map in this state, after Member.BlockedOn, and it needs the same
 	// treatment for a reason the slices above hide: `out := s` copies a slice

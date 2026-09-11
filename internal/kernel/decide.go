@@ -137,6 +137,17 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 	case ToolCallDenied:
 		fx = append(fx, applyToolDenied(&out, e)...)
 
+	case AuthorizationRequested:
+		fx = append(fx, applyAuthorizationRequested(&out, e)...)
+	case AuthorizationGranted:
+		fx = append(fx, applyAuthorizationGranted(&out, e)...)
+	case AuthorizationDenied:
+		fx = append(fx, applyAuthorizationDenied(&out, e)...)
+	case AuthorizationExpired:
+		fx = append(fx, applyAuthorizationExpired(&out, e)...)
+	case AuthorizationConsumed:
+		fx = append(fx, applyAuthorizationConsumed(&out, e)...)
+
 	case LLMResponse:
 		applyCost(&out, e, c, &fx)
 
@@ -196,11 +207,13 @@ func Decide(s State, e Event, c Config) (State, []Effect) {
 		// in fact answered.
 		if it := out.InboxItem(e.Str("inbox_id")); it == nil {
 			out.Inbox = append(out.Inbox, InboxItem{
-				ID:        e.Str("inbox_id"),
-				Kind:      e.Str("kind"),
-				Question:  e.Str("question"),
-				Agent:     e.Str("agent"),
-				OnTimeout: e.Str("on_timeout"),
+				ID:              e.Str("inbox_id"),
+				Kind:            e.Str("kind"),
+				Question:        e.Str("question"),
+				Agent:           e.Str("agent"),
+				OnTimeout:       e.Str("on_timeout"),
+				AuthorizationID: e.Str("authorization_id"),
+				ActionDigest:    e.Str("action_digest"),
 			})
 		}
 	case InboxReplied:
@@ -625,6 +638,18 @@ func quorumMet(s State, c Config, st StageConfig) bool {
 // would fabricate an event about a stage that was never involved.
 func applyTimerTick(out *State, e Event) []Effect {
 	id := e.Str("timer_id")
+	if authorizationID, ok := afterPrefix(id, "authorization:"); ok {
+		a := out.Authorization(authorizationID)
+		if a == nil || a.Decision == "denied" || a.Decision == "expired" || a.ConsumingWorkID != "" {
+			return nil
+		}
+		return []Effect{Emit{Event: derived(out, e, AuthorizationExpired, map[string]any{
+			"schema":           a.Schema,
+			"authorization_id": a.ID,
+			"action_digest":    a.ActionDigest,
+			"expired_at":       a.ExpiresAt,
+		})}}
+	}
 	if id == "" || out.ActiveTimer != id {
 		return nil
 	}
@@ -847,6 +872,156 @@ func applyToolDenied(out *State, e Event) []Effect {
 		OnTimeout: item.OnTimeout,
 		Cause:     causeOf(e),
 	}}
+}
+
+func applyAuthorizationRequested(out *State, e Event) []Effect {
+	const schema = "arxi.authorization/v1"
+	if e.Str("schema") != schema || e.Actor == "" || e.Str("authorization_id") == "" ||
+		e.Str("inbox_id") == "" || e.Str("requester_principal") == "" ||
+		e.Str("suspension_id") == "" || e.Str("parent_work_id") == "" ||
+		e.Str("provider_call_id") == "" || e.Str("tool") == "" ||
+		!validAuthorizationDigest(e.Str("argument_digest")) ||
+		!validAuthorizationDigest(e.Str("action_digest")) ||
+		e.Str("tool_schema_version") == "" || e.Str("policy_version") == "" ||
+		e.Str("workspace_profile_id") == "" || e.Str("expires_at") == "" ||
+		e.Num("after_ms") <= 0 || out.Member(e.Actor) == nil ||
+		out.Authorization(e.Str("authorization_id")) != nil || out.InboxItem(e.Str("inbox_id")) != nil {
+		return nil
+	}
+
+	a := Authorization{
+		Schema: schema, ID: e.Str("authorization_id"), InboxID: e.Str("inbox_id"),
+		RequesterPrincipal: e.Str("requester_principal"), SuspensionID: e.Str("suspension_id"),
+		ParentWorkID: e.Str("parent_work_id"), ProviderCallID: e.Str("provider_call_id"),
+		Tool: e.Str("tool"), ArgumentDigest: e.Str("argument_digest"),
+		ActionDigest: e.Str("action_digest"), ToolSchemaVersion: e.Str("tool_schema_version"),
+		PolicyVersion: e.Str("policy_version"), WorkspaceProfileID: e.Str("workspace_profile_id"),
+		ExpiresAt: e.Str("expires_at"), AfterMS: int64(e.Num("after_ms")),
+	}
+	out.Authorizations = append(out.Authorizations, a)
+	out.Inbox = append(out.Inbox, InboxItem{
+		ID: a.InboxID, Kind: "tool_approval", Question: "approve " + a.Tool + " for " + e.Actor + "?",
+		Agent: e.Actor, OnTimeout: "deny", AuthorizationID: a.ID, ActionDigest: a.ActionDigest,
+	})
+	m := out.Member(e.Actor)
+	m.State, m.Detail, m.SinceSeq = MemberWaiting, "approval", e.Seq
+	m.BlockedOn = map[string]any{
+		"inbox_id": a.InboxID, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+		"tool": a.Tool, "policy": "ask",
+	}
+	return []Effect{
+		SetTimer{ID: authorizationTimerID(a.ID), FiresAtMs: a.AfterMS},
+		AskHuman{
+			ID: a.InboxID, Kind: "tool_approval", Question: "approve " + a.Tool + " for " + e.Actor + "?",
+			Agent: e.Actor, OnTimeout: "deny", AuthorizationID: a.ID, ActionDigest: a.ActionDigest, Cause: causeOf(e),
+		},
+	}
+}
+
+func applyAuthorizationGranted(out *State, e Event) []Effect {
+	a := matchingPendingAuthorization(out, e)
+	if a == nil || e.Str("schema") != a.Schema || e.Str("approver_principal") == "" ||
+		e.Str("approver_principal") == a.RequesterPrincipal || e.Str("grant_event_id") == "" ||
+		e.Str("expires_at") == "" || e.Str("expires_at") != a.ExpiresAt || e.ID != e.Str("grant_event_id") ||
+		!authorizationInboxPending(out, *a) {
+		return nil
+	}
+	a.Decision, a.DecisionPrincipal = "granted", e.Str("approver_principal")
+	a.ApproverPrincipal, a.GrantEventID, a.GrantExpiresAt = e.Str("approver_principal"), e.Str("grant_event_id"), e.Str("expires_at")
+	markAuthorizationInboxReplied(out, *a)
+	return []Effect{ResumeAuthorization{
+		AuthorizationID: a.ID, SuspensionID: a.SuspensionID, ActionDigest: a.ActionDigest, Cause: causeOf(e),
+	}}
+}
+
+func applyAuthorizationDenied(out *State, e Event) []Effect {
+	a := matchingPendingAuthorization(out, e)
+	if a == nil || e.Str("schema") != a.Schema || e.Str("principal") == "" || !authorizationInboxPending(out, *a) {
+		return nil
+	}
+	a.Decision, a.DecisionPrincipal, a.DecisionReason = "denied", e.Str("principal"), e.Str("reason")
+	markAuthorizationInboxReplied(out, *a)
+	unblockAuthorizationMember(out, *a, e.Seq)
+	return []Effect{CancelTimer{ID: authorizationTimerID(a.ID)}}
+}
+
+func applyAuthorizationExpired(out *State, e Event) []Effect {
+	a := matchingLiveAuthorization(out, e)
+	if a == nil || e.Str("schema") != a.Schema || e.Str("expired_at") == "" {
+		return nil
+	}
+	a.Decision, a.DecisionAt = "expired", e.Str("expired_at")
+	markAuthorizationInboxReplied(out, *a)
+	unblockAuthorizationMember(out, *a, e.Seq)
+	return []Effect{CancelTimer{ID: authorizationTimerID(a.ID)}}
+}
+
+func applyAuthorizationConsumed(out *State, e Event) []Effect {
+	a := matchingLiveAuthorization(out, e)
+	if a == nil || e.Str("schema") != a.Schema || a.Decision != "granted" ||
+		a.GrantEventID == "" || e.Str("grant_event_id") != a.GrantEventID ||
+		e.Str("work_id") == "" || e.Str("work_id") == a.ParentWorkID || a.ConsumingWorkID != "" {
+		return nil
+	}
+	a.ConsumingWorkID = e.Str("work_id")
+	return []Effect{CancelTimer{ID: authorizationTimerID(a.ID)}}
+}
+
+func matchingPendingAuthorization(out *State, e Event) *Authorization {
+	a := matchingLiveAuthorization(out, e)
+	if a == nil || a.Decision != "" {
+		return nil
+	}
+	return a
+}
+
+func matchingLiveAuthorization(out *State, e Event) *Authorization {
+	a := out.Authorization(e.Str("authorization_id"))
+	if a == nil || !validAuthorizationDigest(e.Str("action_digest")) || e.Str("action_digest") != a.ActionDigest ||
+		a.Decision == "denied" || a.Decision == "expired" || a.ConsumingWorkID != "" {
+		return nil
+	}
+	return a
+}
+
+func validAuthorizationDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func authorizationTimerID(id string) string { return "authorization:" + id }
+
+func authorizationInboxPending(out *State, a Authorization) bool {
+	item := out.InboxItem(a.InboxID)
+	return item != nil && !item.Replied && item.Kind == "tool_approval" &&
+		item.AuthorizationID == a.ID && item.ActionDigest == a.ActionDigest
+}
+
+func markAuthorizationInboxReplied(out *State, a Authorization) bool {
+	item := out.InboxItem(a.InboxID)
+	if item == nil || item.Replied || item.Kind != "tool_approval" ||
+		item.AuthorizationID != a.ID || item.ActionDigest != a.ActionDigest {
+		return false
+	}
+	item.Replied = true
+	return true
+}
+
+func unblockAuthorizationMember(out *State, a Authorization, seq int64) {
+	for i := range out.Members {
+		m := &out.Members[i]
+		if m.BlockedOn == nil || m.BlockedOn["authorization_id"] != a.ID || m.BlockedOn["action_digest"] != a.ActionDigest {
+			continue
+		}
+		m.State, m.Detail, m.BlockedOn, m.SinceSeq = MemberIdle, "", nil, seq
+	}
 }
 
 // nextInboxID mints the id of a question. It lives in the reducer, and not in
@@ -1081,7 +1256,7 @@ func checkQuiescence(out *State, e Event, c Config, pending []Effect) []Effect {
 	// Any pending effect is going to generate an event: there is no silence yet.
 	for _, f := range pending {
 		switch f.(type) {
-		case SpawnTurn, CallTool, SetTimer, AskHuman, Emit:
+		case SpawnTurn, CallTool, SetTimer, AskHuman, ResumeAuthorization, Emit:
 			return nil
 		}
 	}

@@ -523,7 +523,7 @@ directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
 |---|---|---|
-| the engine — event types the reducer folds | **40 / 40 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
+| the engine — event types the reducer folds | **45 / 45 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
 | the CLI surface | **50 / 50 — 100.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
