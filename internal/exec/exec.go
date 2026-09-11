@@ -18,10 +18,12 @@ package exec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
@@ -195,6 +197,13 @@ type Runner struct {
 	// RunID is frozen into every deterministic work identity.
 	RunID string
 
+	// JobID is stable across fenced attempts. Empty preserves legacy execution;
+	// coordinated wiring sets it before any external dispatch is registered.
+	JobID string
+
+	// Dispatches is the optional fenced registration and receipt journal adapter.
+	Dispatches DispatchCoordinator
+
 	// Now supplies the timestamp stamped onto events that arrive without one.
 	//
 	// Injected rather than read from the package `time` for the same reason
@@ -320,10 +329,27 @@ func (r *Runner) RunStep(ctx context.Context, source kernel.Event, fx []kernel.E
 			if r.canResumeNativeTurn(w) {
 				progress.turnChildren[w.ID] = true
 			} else {
-				if err := r.finishUnknown(w, &res); err != nil {
-					return res, err
+				meta := r.metadataFor(w)
+				if r.Dispatches != nil {
+					if receipt, found, receiptErr := r.Dispatches.Receipt(meta); receiptErr != nil {
+						return res, receiptErr
+					} else if found {
+						var events []kernel.Event
+						if err := json.Unmarshal(receipt.CanonicalOutcome, &events); err != nil {
+							return res, fmt.Errorf("decode receipt outcome for %s: %w", w.ID, err)
+						}
+						if err := r.finishWork(w, "completed", attribute(w.Effect, events), nil, &res); err != nil {
+							return res, err
+						}
+						continue
+					}
 				}
-				return res, fmt.Errorf("%w: work %s was started before restart; automatic redispatch is unsafe", ErrUnknownWork, w.ID)
+				if meta.WorkClass != job.WorkIdempotent || !meta.SupportsIdempotency {
+					if err := r.finishUnknown(w, &res); err != nil {
+						return res, err
+					}
+					return res, fmt.Errorf("%w: work %s was started before restart; automatic redispatch is unsafe", ErrUnknownWork, w.ID)
+				}
 			}
 		}
 		remaining = append(remaining, w)
@@ -413,11 +439,19 @@ func (r *Runner) finishUnknown(w Work, res *Result) error {
 func (r *Runner) prepareStep(source kernel.Event, work []Work) error {
 	events := make([]kernel.Event, 0, len(work))
 	for _, w := range work {
-		events = append(events, r.progressEvent(kernel.ExecWorkPrepared, map[string]any{
+		payload := map[string]any{
 			"work_id": w.ID, "source_seq": w.SourceSeq, "source_event_id": w.SourceID,
 			"effect_index": w.EffectIndex, "effect_kind": w.Kind,
 			"effect_class": w.Class, "effect_digest": w.Digest,
-		}, w.Source))
+		}
+		if w.Class == "independent" {
+			meta := r.metadataFor(w)
+			payload["work_class"] = string(meta.WorkClass)
+			payload["dispatch_key"] = string(meta.DispatchKey)
+			payload["request_digest"] = string(meta.RequestDigest)
+			payload["provider"] = meta.Provider
+		}
+		events = append(events, r.progressEvent(kernel.ExecWorkPrepared, payload, w.Source))
 	}
 	if len(events) == 0 {
 		return nil
@@ -517,6 +551,11 @@ func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, resumin
 	started := 0
 	var startErr error
 	for i := range work {
+		meta := r.metadataFor(work[i])
+		if err := r.register(meta); err != nil {
+			startErr = fmt.Errorf("register dispatch %s: %w", work[i].ID, err)
+			break
+		}
 		if resuming[work[i].ID] {
 			started++
 			wg.Add(1)
@@ -556,6 +595,21 @@ func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, resumin
 						return
 					}
 				}
+			}
+			meta := r.metadataFor(work[i])
+			if executor, ok := r.Executor.(MetadataExecutor); ok {
+				var receipt *DispatchReceipt
+				outcomes[i].events, receipt, outcomes[i].err = executor.Dispatch(ctx, work[i].Effect, meta)
+				if outcomes[i].err == nil {
+					body, marshalErr := json.Marshal(outcomes[i].events)
+					if marshalErr != nil {
+						outcomes[i].err = marshalErr
+					} else if receipt != nil {
+						receipt.CanonicalOutcome = body
+						outcomes[i].err = r.recordReceipt(meta, receipt)
+					}
+				}
+				return
 			}
 			outcomes[i].events, outcomes[i].err = r.dispatch(ctx, work[i].Effect)
 		}(i)
