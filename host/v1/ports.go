@@ -221,6 +221,28 @@ type Coordination interface {
 	Close() error
 }
 
+// CoordinationJob is selected cross-job lifecycle truth. It intentionally omits
+// owners, attempts IDs, fences, checkpoints, and journal locations.
+type CoordinationJob struct {
+	Status                 JobStatus `json:"status"`
+	AttemptCount           uint64    `json:"attempt_count,omitempty"`
+	ReconciliationRequired bool      `json:"reconciliation_required,omitempty"`
+	CancellationRequested  bool      `json:"cancellation_requested,omitempty"`
+}
+
+// CoordinationProjectionV1 lets inspection merge terminal coordination truth
+// with the per-run fold without exposing ownership internals.
+type CoordinationProjectionV1 interface {
+	InspectJob(context.Context, JobID) (CoordinationJob, error)
+}
+
+// CoordinationCancellationV1 serializes external cancellation intent in the
+// coordination journal and lets a replacement worker consume it before dispatch.
+type CoordinationCancellationV1 interface {
+	RequestCancellation(context.Context, JobID, string) error
+	CancellationRequested(context.Context, JobID) (bool, error)
+}
+
 // CoordinatedJobStorageV1 is the optional storage contract required for durable
 // execution. A returned writer must reject every mutation after claim expiry or
 // replacement; checking only when the writer opens leaves stale hosts able to append.
