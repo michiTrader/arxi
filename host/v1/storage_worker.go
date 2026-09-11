@@ -91,7 +91,12 @@ func (w *storageWorker) run() {
 	}
 	runner := &exec.Runner{Log: log, Clock: clock,
 		Executor: &textExecutor{provider: w.provider, effective: metadata.Effective},
-		Config:   metadata.Effective.Config, RunID: string(w.id), Now: func() string {
+		Config:   metadata.Effective.Config, RunID: string(w.id), JobID: string(w.id),
+		Authorization: exec.AuthorizationConfig{
+			ToolSchemaVersion: metadata.Effective.ToolSchemaVersion, PolicyVersion: metadata.Effective.PolicyVersion,
+			WorkspaceProfileID: metadata.Effective.WorkspaceProfileID, TTLMS: metadata.Effective.AuthorizationTTLMS,
+		},
+		Now: func() string {
 			if w.now != nil {
 				return w.now().UTC().Format(time.RFC3339Nano)
 			}

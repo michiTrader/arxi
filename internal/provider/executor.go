@@ -376,19 +376,17 @@ func (x *Executor) CompleteTurn(ctx context.Context, req turn.Request) (turn.Res
 	}
 }
 
-// ExecuteTurnTool applies policy before invoking the runner and binds the exact
-// output to the provider's call ID for durable reinjection.
-func (x *Executor) ExecuteTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (exec.TurnToolOutcome, error) {
+// ResolveTurnToolPolicy exposes the frozen policy without dispatching the tool.
+// Exact authorization requires ask to be known before the child's started
+// boundary; calling ExecuteTurnTool to discover it would be too late.
+func (x *Executor) ResolveTurnToolPolicy(e kernel.SpawnTurn, call turn.ToolCall) string {
+	return string(x.policyFor(e.Agent, call.Name))
+}
+
+func (x *Executor) runCanonicalTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (exec.TurnToolOutcome, error) {
 	args, err := decodeArguments(call.Arguments)
 	if err != nil {
 		return exec.TurnToolOutcome{}, exec.NotDispatched(err)
-	}
-	policy := x.policyFor(e.Agent, call.Name)
-	if policy != surface.PolicyAllow {
-		text := fmt.Sprintf("tool %q was not executed: policy=%s", call.Name, policy)
-		return exec.TurnToolOutcome{Policy: string(policy), Continue: false, Result: turn.ToolResult{
-			CallID: call.ID, IsError: true, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}},
-		}}, nil
 	}
 	if x.Tools == nil {
 		return exec.TurnToolOutcome{}, exec.NotDispatched(fmt.Errorf("tool %q is allowed for %s, but no tool runner is configured", call.Name, e.Agent))
@@ -397,9 +395,29 @@ func (x *Executor) ExecuteTurnTool(ctx context.Context, e kernel.SpawnTurn, call
 	if err != nil {
 		return exec.TurnToolOutcome{}, err
 	}
-	return exec.TurnToolOutcome{Policy: string(policy), Continue: true, Result: turn.ToolResult{
+	return exec.TurnToolOutcome{Policy: string(surface.PolicyAllow), Continue: true, Result: turn.ToolResult{
 		CallID: call.ID, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: result}},
 	}}, nil
+}
+
+// ExecuteAuthorizedTurnTool runs a call whose exact grant was consumed by the
+// runner's CAS boundary. Rechecking policy here would make a later policy edit
+// either revoke an already-approved exact action or silently replace its grant.
+func (x *Executor) ExecuteAuthorizedTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (exec.TurnToolOutcome, error) {
+	return x.runCanonicalTool(ctx, e, call)
+}
+
+// ExecuteTurnTool applies policy before invoking the runner and binds the exact
+// output to the provider's call ID for durable reinjection.
+func (x *Executor) ExecuteTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (exec.TurnToolOutcome, error) {
+	policy := x.policyFor(e.Agent, call.Name)
+	if policy != surface.PolicyAllow {
+		text := fmt.Sprintf("tool %q was not executed: policy=%s", call.Name, policy)
+		return exec.TurnToolOutcome{Policy: string(policy), Continue: false, Result: turn.ToolResult{
+			CallID: call.ID, IsError: true, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}},
+		}}, nil
+	}
+	return x.runCanonicalTool(ctx, e, call)
 }
 
 // FinishTurn projects the canonical trace into the existing domain event stream.

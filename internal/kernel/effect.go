@@ -250,19 +250,12 @@ var allEffectVariants = []Effect{
 	Snapshot{},
 }
 
-// EffectVariants returns a copy of the variants currently supported by the
-// external effect runner. ResumeAuthorization is deliberately absent until its
-// provider continuation adapter lands: registering it early would make exec's
-// exhaustiveness guard claim it can dispatch authority that this slice only
-// models inside the pure kernel.
+// EffectVariants returns a copy of every variant supported by the external
+// effect runner. Keeping this list complete makes exec's exhaustiveness test
+// fail whenever a new reducer decision has no dispatch path.
 func EffectVariants() []Effect {
-	out := make([]Effect, 0, len(allEffectVariants))
-	for _, effect := range allEffectVariants {
-		if _, deferred := effect.(ResumeAuthorization); deferred {
-			continue
-		}
-		out = append(out, effect)
-	}
+	out := make([]Effect, len(allEffectVariants))
+	copy(out, allEffectVariants)
 	return out
 }
 

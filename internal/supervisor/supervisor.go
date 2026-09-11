@@ -537,7 +537,12 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		}
 	}
 	runner := &exec.Runner{Log: store, Clock: clock, Executor: executor,
-		Config: effective.Config, RunID: w.id, Now: now}
+		Config: effective.Config, RunID: w.id, JobID: w.id, Now: now,
+		Authorization: exec.AuthorizationConfig{
+			ToolSchemaVersion: effective.ToolSchemaVersion, PolicyVersion: effective.PolicyVersion,
+			WorkspaceProfileID: effective.WorkspaceProfileID, TTLMS: effective.AuthorizationTTLMS,
+		},
+	}
 	if dispatches, ok := w.opts.Claim.(DispatchClaim); ok {
 		runner.JobID = w.id
 		runner.Dispatches = dispatches

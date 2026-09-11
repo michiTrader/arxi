@@ -332,7 +332,14 @@ func driveEffectiveRun(dir string, effective runconfig.Artifact, store *logstore
 		Executor: executor,
 		Config:   cfg,
 		RunID:    runID,
-		Now:      now,
+		JobID:    runID,
+		Authorization: exec.AuthorizationConfig{
+			ToolSchemaVersion:  effective.ToolSchemaVersion,
+			PolicyVersion:      effective.PolicyVersion,
+			WorkspaceProfileID: effective.WorkspaceProfileID,
+			TTLMS:              effective.AuthorizationTTLMS,
+		},
+		Now: now,
 	}
 
 	loop := &exec.Loop{

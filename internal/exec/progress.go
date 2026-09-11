@@ -192,6 +192,8 @@ func effectValue(effect kernel.Effect) (string, any, error) {
 		return "cancel_timer", v, nil
 	case kernel.AskHuman:
 		return "ask_human", v, nil
+	case kernel.ResumeAuthorization:
+		return "resume_authorization", v, nil
 	case kernel.Snapshot:
 		return "snapshot", struct{}{}, nil
 	default:
