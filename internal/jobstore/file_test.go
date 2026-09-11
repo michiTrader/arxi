@@ -72,6 +72,41 @@ func TestFilesystemRecoveryRollsBackAWholePendingTransaction(t *testing.T) {
 	}
 }
 
+func TestFilesystemPoisonsClientAfterUncertainPostMarkerFailure(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRemove := store.ops.remove
+	store.ops.remove = func(path string) error {
+		if path == store.pendingPath() {
+			return errors.New("injected marker removal failure")
+		}
+		return originalRemove(path)
+	}
+	if _, err := store.RegisterJob(0, JobRegistration{JobID: "job"}); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("post-marker failure returned %v, want ErrPoisoned: the caller cannot know whether revision one reached durable storage", err)
+	}
+	if _, err := store.RegisterJob(0, JobRegistration{JobID: "job"}); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("retry on poisoned client returned %v, want ErrPoisoned: repeating an uncertain revision can duplicate journal records", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir, time.Now)
+	if err != nil {
+		t.Fatalf("reopen must recover the pending transaction: %v", err)
+	}
+	defer reopened.Close()
+	if view := reopened.View(); view.Revision != 0 || len(view.Jobs) != 0 {
+		t.Fatalf("recovered view = revision %d, jobs %#v: the uncertain transaction must roll back before retries resume", view.Revision, view.Jobs)
+	}
+	if _, err := reopened.RegisterJob(0, JobRegistration{JobID: "job"}); err != nil {
+		t.Fatalf("retry after close and recovery: %v", err)
+	}
+}
+
 func TestFilesystemProjectionRebuildMatchesConfirmedJournal(t *testing.T) {
 	dir := t.TempDir()
 	clock := &testClock{now: time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)}

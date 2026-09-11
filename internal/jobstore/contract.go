@@ -20,6 +20,7 @@ var (
 	ErrAmountOverflow = errors.New("amount arithmetic overflow")
 	ErrClockRequired  = errors.New("coordination store requires a clock")
 	ErrClosed         = errors.New("coordination store is closed")
+	ErrPoisoned       = errors.New("coordination commit outcome is uncertain; close and reopen the store")
 )
 
 type LockedError struct {

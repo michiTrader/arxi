@@ -26,13 +26,21 @@ type pendingMarker struct {
 	PriorOffset int64 `json:"prior_offset"`
 }
 
+type fileOps struct {
+	openFile func(string, int, os.FileMode) (*os.File, error)
+	remove   func(string) error
+	syncDir  func(string) error
+}
+
 type File struct {
-	mu     sync.Mutex
-	dir    string
-	clock  Clock
-	state  *state
-	size   int64
-	closed bool
+	mu       sync.Mutex
+	dir      string
+	clock    Clock
+	state    *state
+	size     int64
+	closed   bool
+	poisoned bool
+	ops      fileOps
 }
 
 func Open(dir string, clock Clock) (*File, error) {
@@ -42,7 +50,7 @@ func Open(dir string, clock Clock) (*File, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("jobstore: create directory: %w", err)
 	}
-	file := &File{dir: dir, clock: clock, state: newState()}
+	file := &File{dir: dir, clock: clock, state: newState(), ops: fileOps{openFile: os.OpenFile, remove: os.Remove, syncDir: syncDir}}
 	lock, err := file.acquireTransactionLock()
 	if err != nil {
 		return nil, err
@@ -86,6 +94,9 @@ func (f *File) acquireTransactionLock() (*advisorylock.Lock, error) {
 }
 
 func (f *File) transaction(fn func() error) (err error) {
+	if f.poisoned {
+		return ErrPoisoned
+	}
 	lock, err := f.acquireTransactionLock()
 	if err != nil {
 		return err
@@ -181,22 +192,26 @@ func (f *File) commit(records []record) (Revision, error) {
 	if err := f.writePending(); err != nil {
 		return f.state.view.Revision, err
 	}
-	journal, err := os.OpenFile(f.journalPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	failUncertain := func(err error) (Revision, error) {
+		f.poisoned = true
+		return f.state.view.Revision, fmt.Errorf("%w: %v", ErrPoisoned, err)
+	}
+	journal, err := f.ops.openFile(f.journalPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return f.state.view.Revision, fmt.Errorf("jobstore: open journal for append: %w", err)
+		return failUncertain(fmt.Errorf("jobstore: open journal for append: %w", err))
 	}
 	defer journal.Close()
 	if _, err := journal.Write(body); err != nil {
-		return f.state.view.Revision, fmt.Errorf("jobstore: append journal: %w", err)
+		return failUncertain(fmt.Errorf("jobstore: append journal: %w", err))
 	}
 	if err := journal.Sync(); err != nil {
-		return f.state.view.Revision, fmt.Errorf("jobstore: sync journal: %w", err)
+		return failUncertain(fmt.Errorf("jobstore: sync journal: %w", err))
 	}
-	if err := os.Remove(f.pendingPath()); err != nil {
-		return f.state.view.Revision, fmt.Errorf("jobstore: clear pending marker: %w", err)
+	if err := f.ops.remove(f.pendingPath()); err != nil {
+		return failUncertain(fmt.Errorf("jobstore: clear pending marker: %w", err))
 	}
-	if err := syncDir(f.dir); err != nil {
-		return f.state.view.Revision, err
+	if err := f.ops.syncDir(f.dir); err != nil {
+		return failUncertain(err)
 	}
 	f.state = candidate
 	f.size += int64(len(body))
