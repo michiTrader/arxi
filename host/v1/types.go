@@ -113,21 +113,21 @@ func (s JobStatus) Terminal() bool {
 
 // Job is the selected public projection of one job.
 type Job struct {
-	ID           JobID             `json:"id"`
-	Actor        string            `json:"actor,omitempty"`
-	Status       JobStatus         `json:"status"`
-	Terminal     bool              `json:"terminal"`
-	Sequence     int64             `json:"sequence"`
-	Stage        string            `json:"stage,omitempty"`
-	StageIndex   int               `json:"stage_index"`
-	Turns        int               `json:"turns"`
-	MaxTurns     int               `json:"max_turns,omitempty"`
-	Members      []Member          `json:"members,omitempty"`
-	SpentUSD     float64           `json:"spent_usd,omitempty"`
-	TreeSpentUSD float64           `json:"tree_spent_usd,omitempty"`
-	BudgetUSD    float64           `json:"budget_usd,omitempty"`
-	Simulated    bool              `json:"simulated,omitempty"`
-	Pending      []PendingDecision `json:"pending,omitempty"`
+	ID                     JobID             `json:"id"`
+	Actor                  string            `json:"actor,omitempty"`
+	Status                 JobStatus         `json:"status"`
+	Terminal               bool              `json:"terminal"`
+	Sequence               int64             `json:"sequence"`
+	Stage                  string            `json:"stage,omitempty"`
+	StageIndex             int               `json:"stage_index"`
+	Turns                  int               `json:"turns"`
+	MaxTurns               int               `json:"max_turns,omitempty"`
+	Members                []Member          `json:"members,omitempty"`
+	SpentUSD               float64           `json:"spent_usd,omitempty"`
+	TreeSpentUSD           float64           `json:"tree_spent_usd,omitempty"`
+	BudgetUSD              float64           `json:"budget_usd,omitempty"`
+	Simulated              bool              `json:"simulated,omitempty"`
+	Pending                []PendingDecision `json:"pending,omitempty"`
 	UnknownWork            int               `json:"unknown_work,omitempty"`
 	AttemptCount           uint64            `json:"attempt_count,omitempty"`
 	ReconciliationRequired bool              `json:"reconciliation_required,omitempty"`
