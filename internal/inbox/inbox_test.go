@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -221,9 +222,21 @@ func question(t *testing.T) string {
 
 func exactApproval(t *testing.T, mutate func(*kernel.Event)) string {
 	t.Helper()
-	dir := question(t)
+	dir := filepath.Join(t.TempDir(), "r1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "blueprint.snapshot.yaml"), []byte("name: team\nmembers:\n  - name: worker\nstages:\n  - name: work\n    advance_when: all\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	store, err := logstore.Open(dir)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]kernel.Event{
+		{ID: "start-exact", Type: kernel.RunStarted, Payload: map[string]any{"run_id": "r1"}},
+		{ID: "activate-exact", Type: kernel.AgentActivated, Actor: "worker", Payload: map[string]any{"agent": "worker"}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	request := kernel.Event{ID: "authorization-request", Type: kernel.AuthorizationRequested, Actor: "worker", Payload: map[string]any{
@@ -236,7 +249,11 @@ func exactApproval(t *testing.T, mutate func(*kernel.Event)) string {
 	if mutate != nil {
 		mutate(&request)
 	}
-	if _, err := store.Append([]kernel.Event{request}); err != nil {
+	item := kernel.Event{ID: "approval-item", Type: kernel.InboxCreated, Payload: map[string]any{
+		"inbox_id": "approval-1", "kind": "tool_approval", "question": "allow bash?",
+		"authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64),
+	}}
+	if _, err := store.Append([]kernel.Event{request, item}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -279,8 +296,8 @@ func TestExactApprovalFailsClosedOnPrincipalAndBindingErrors(t *testing.T) {
 	}{
 		{"empty principal", "", nil, ErrInvalidPrincipal},
 		{"self approval", "agent:worker", nil, ErrInvalidPrincipal},
-		{"mismatched digest", "operator:alice", func(e *kernel.Event) { e.Payload["action_digest"] = strings.Repeat("c", 64) }, ErrAuthorizationBinding},
-		{"missing binding", "operator:alice", func(e *kernel.Event) { e.Payload["authorization_id"] = "" }, ErrAuthorizationBinding},
+		{"mismatched digest", "operator:alice", func(e *kernel.Event) { e.Payload["inbox_id"] = "request-only" }, ErrAuthorizationBinding},
+		{"missing binding", "operator:alice", func(e *kernel.Event) { e.Payload["inbox_id"] = "request-only" }, ErrAuthorizationBinding},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

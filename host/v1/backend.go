@@ -292,13 +292,24 @@ func (b *storageBackend) Answer(ctx context.Context, req AnswerRequest) (Job, er
 }
 
 func (b *storageBackend) decide(ctx context.Context, op Capability, principal Principal, id JobID, itemID ItemID, decision, text string) (Job, error) {
+	if b.storage == nil {
+		return Job{}, unavailable(op)
+	}
+	record, err := b.storage.Load(ctx, id)
+	if err != nil {
+		return Job{}, adaptStorageError(op, id, 0, err)
+	}
+	metadata, err := decodeStoredMetadata(record)
+	if err != nil {
+		return Job{}, adaptStorageError(op, id, 0, err)
+	}
 	return b.mutate(ctx, op, id, itemID, func(events []kernel.Event) ([]kernel.Event, error) {
-		return b.decisionEvents(events, principal.ID, id, itemID, decision, text)
+		return b.decisionEvents(events, metadata.Effective.Config, principal.ID, id, itemID, decision, text)
 	})
 }
 
-func (b *storageBackend) decisionEvents(events []kernel.Event, principal string, id JobID, itemID ItemID, decision, text string) ([]kernel.Event, error) {
-	state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
+func (b *storageBackend) decisionEvents(events []kernel.Event, config kernel.Config, principal string, id JobID, itemID ItemID, decision, text string) ([]kernel.Event, error) {
+	state, _ := kernel.Fold(kernel.State{}, events, config)
 	item := state.InboxItem(string(itemID))
 	if item == nil {
 		return nil, errItemNotFound
