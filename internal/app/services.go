@@ -30,9 +30,10 @@ type MutationResult struct {
 
 // Decision identifies one exact human response scoped to a job.
 type Decision struct {
-	JobID  string
-	ItemID string
-	Text   string
+	JobID     string
+	ItemID    string
+	Text      string
+	Principal string
 }
 
 // Inspect refolds the confirmed log and returns its current projection.
@@ -93,10 +94,11 @@ func (s MutationServices) decide(op string, req Decision, decision string, store
 		return MutationResult{}, serviceError(InvalidArgument, op, req,
 			fmt.Errorf("supplied store belongs to %s, not job %s", store.Dir(), req.JobID))
 	}
+	reply := inbox.Reply{Decision: decision, Text: req.Text, Principal: req.Principal}
 	if store == nil {
-		_, err = inbox.AnswerExact(dir, req.ItemID, inbox.Reply{Decision: decision, Text: req.Text})
+		_, err = inbox.AnswerExact(dir, req.ItemID, reply)
 	} else {
-		_, err = inbox.AnswerExactStore(store, req.ItemID, inbox.Reply{Decision: decision, Text: req.Text})
+		_, err = inbox.DecideExactStore(store, req.ItemID, reply, s.now())
 	}
 	if err != nil {
 		kind := StorageUnavailable
@@ -109,6 +111,8 @@ func (s MutationServices) decide(op string, req Decision, decision string, store
 			kind = AlreadyTerminal
 		case errors.Is(err, inbox.ErrWrongDecisionKind):
 			kind = WrongDecisionKind
+		case errors.Is(err, inbox.ErrAuthorizationBinding), errors.Is(err, inbox.ErrInvalidPrincipal), errors.Is(err, inbox.ErrAuthorizationExpired):
+			kind = InvalidArgument
 		default:
 			var locked *logstore.LockedError
 			if errors.As(err, &locked) {
