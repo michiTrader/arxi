@@ -45,6 +45,12 @@ type Claim interface {
 	Finish(exec.Outcome, error) error
 }
 
+// DispatchClaim extends a claim with fenced external dispatch coordination.
+type DispatchClaim interface {
+	Claim
+	exec.DispatchCoordinator
+}
+
 // Reconciler may establish a canonical terminal outcome for ambiguous external
 // work. It is intentionally absent from built-in providers until their APIs
 // offer trustworthy receipt lookup rather than only returning response IDs.
@@ -532,6 +538,10 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 	}
 	runner := &exec.Runner{Log: store, Clock: clock, Executor: executor,
 		Config: effective.Config, RunID: w.id, Now: now}
+	if dispatches, ok := w.opts.Claim.(DispatchClaim); ok {
+		runner.JobID = w.id
+		runner.Dispatches = dispatches
+	}
 	loop := &exec.Loop{Runner: runner, Log: store, Time: timekeeper,
 		Config: effective.Config, Cursor: recovery.Cursor}
 	if w.opts.Claim != nil {
