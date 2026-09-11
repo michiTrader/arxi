@@ -129,6 +129,26 @@ var ErrUnknownWork = errors.New("external work has an unknown outcome")
 // unmarked error after ExecWorkStarted is conservatively ambiguous.
 var ErrNotDispatched = errors.New("external work was not dispatched")
 
+// FailureClass determines whether an interrupted durable attempt may be reclaimed
+// or must publish terminal truth. Ordinary infrastructure failures never prove an
+// external outcome; only ErrUnknownWork means a durable started boundary is
+// ambiguous and automatic continuation is unsafe.
+type FailureClass string
+
+const (
+	FailureRecoverable FailureClass = "recoverable"
+	FailureUnknown     FailureClass = "unknown"
+)
+
+// ClassifyFailure gives lifecycle owners one shared interpretation of execution
+// errors. Domain terminal states are carried by Outcome.State rather than errors.
+func ClassifyFailure(err error) FailureClass {
+	if errors.Is(err, ErrUnknownWork) {
+		return FailureUnknown
+	}
+	return FailureRecoverable
+}
+
 // NotDispatched marks cause as a certain pre-dispatch failure.
 func NotDispatched(cause error) error {
 	if cause == nil {
