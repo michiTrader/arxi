@@ -112,6 +112,17 @@ var ErrRunOver = errors.New("the run has ended, so a reply would change nothing"
 // decision is validated against the same fold to which the reply is appended.
 var ErrWrongDecisionKind = errors.New("decision verb does not match inbox item kind")
 
+// ErrAuthorizationBinding means a live approval item lacks or contradicts the
+// immutable authorization record needed to decide the exact action.
+var ErrAuthorizationBinding = errors.New("approval item has no valid exact authorization binding")
+
+// ErrInvalidPrincipal means the adapter supplied no authenticated operator or
+// supplied the principal that requested the action.
+var ErrInvalidPrincipal = errors.New("decision principal is empty or matches the requester")
+
+// ErrAuthorizationExpired means wall-clock authority elapsed before mutation.
+var ErrAuthorizationExpired = errors.New("authorization has expired")
+
 const (
 	approvalKind = "tool_approval"
 	questionKind = "question"
@@ -151,6 +162,14 @@ type Reply struct {
 	// Text is the reason for a rejection or the answer to a question. Empty is
 	// legal for an approval, where there is nothing to say beyond yes.
 	Text string
+	// Principal is the authenticated operator making the decision. Questions
+	// retain legacy semantics but still record it when supplied.
+	Principal string
+}
+
+type DecisionResult struct {
+	Reply         kernel.Event
+	Authorization *kernel.Event
 }
 
 const (
@@ -280,14 +299,27 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 	return answer(dir, id, reply, false)
 }
 
-// AnswerExact appends a reply while requiring answer decisions to target the
-// explicit question kind. Approval and rejection are always approval-only.
+// AnswerExact appends a kind-checked reply. Tool approvals additionally require
+// an immutable authorization binding and append its terminal decision atomically.
 func AnswerExact(dir string, id string, reply Reply) (kernel.Event, error) {
-	return answer(dir, id, reply, true)
+	if err := validDecision(reply); err != nil {
+		return kernel.Event{}, err
+	}
+	cfg, err := loadFrozenConfig(dir)
+	if err != nil {
+		return kernel.Event{}, err
+	}
+	store, err := logstore.Open(dir)
+	if err != nil {
+		return kernel.Event{}, err
+	}
+	defer store.Close()
+	result, err := decideExactStore(store, cfg, id, reply, now())
+	return result.Reply, err
 }
 
-// AnswerExactStore applies the same exact decision through an already-open
-// writer. Resident execution owners use it to preserve single-writer ownership.
+// AnswerExactStore preserves resident writer ownership while applying the same
+// atomic exact decision.
 func AnswerExactStore(store *logstore.Store, id string, reply Reply) (kernel.Event, error) {
 	if store == nil {
 		return kernel.Event{}, errors.New("inbox: no log store given")
@@ -299,7 +331,23 @@ func AnswerExactStore(store *logstore.Store, id string, reply Reply) (kernel.Eve
 	if err != nil {
 		return kernel.Event{}, err
 	}
-	return answerStore(store, cfg, id, reply, true)
+	result, err := decideExactStore(store, cfg, id, reply, now())
+	return result.Reply, err
+}
+
+// DecideExactStore returns both records committed by an exact approval decision.
+func DecideExactStore(store *logstore.Store, id string, reply Reply, at time.Time) (DecisionResult, error) {
+	if store == nil {
+		return DecisionResult{}, errors.New("inbox: no log store given")
+	}
+	if err := validDecision(reply); err != nil {
+		return DecisionResult{}, err
+	}
+	cfg, err := loadFrozenConfig(store.Dir())
+	if err != nil {
+		return DecisionResult{}, err
+	}
+	return decideExactStore(store, cfg, id, reply, at)
 }
 
 func answer(dir string, id string, reply Reply, exactQuestion bool) (kernel.Event, error) {
@@ -318,6 +366,87 @@ func answer(dir string, id string, reply Reply, exactQuestion bool) (kernel.Even
 	}
 	defer store.Close()
 	return answerStore(store, cfg, id, reply, exactQuestion)
+}
+
+func decideExactStore(store *logstore.Store, cfg kernel.Config, id string, reply Reply, at time.Time) (DecisionResult, error) {
+	st, err := store.Fold(cfg, 0)
+	if err != nil {
+		return DecisionResult{}, err
+	}
+	item := st.InboxItem(id)
+	if item == nil {
+		return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrNoSuchItem)
+	}
+	if item.Replied {
+		return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAlreadyAnswered)
+	}
+	if !decisionMatchesKind(reply.Decision, item.Kind, true) {
+		return DecisionResult{}, fmt.Errorf("inbox: cannot %s %q of kind %q in run %s: %w",
+			reply.Decision, id, item.Kind, st.RunID, ErrWrongDecisionKind)
+	}
+	if st.Status.Terminal() {
+		return DecisionResult{}, fmt.Errorf("inbox: %q in run %s is %s: %w", id, st.RunID, st.Status, ErrRunOver)
+	}
+
+	events := []kernel.Event{replyEvent(id, reply, at)}
+	if item.Kind == approvalKind {
+		a := st.Authorization(item.AuthorizationID)
+		if a == nil || item.AuthorizationID == "" || item.ActionDigest == "" ||
+			a.InboxID != item.ID || a.ActionDigest != item.ActionDigest || a.Schema != "arxi.authorization/v1" {
+			return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAuthorizationBinding)
+		}
+		principal := strings.TrimSpace(reply.Principal)
+		if principal == "" || principal == a.RequesterPrincipal {
+			return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrInvalidPrincipal)
+		}
+		expires, parseErr := time.Parse(time.RFC3339, a.ExpiresAt)
+		if parseErr != nil || !at.Before(expires) {
+			return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAuthorizationExpired)
+		}
+		events[0].Payload["authorization_id"] = a.ID
+		events[0].Payload["action_digest"] = a.ActionDigest
+		authorization := authorizationDecisionEvent(*a, reply, principal, at)
+		events = append(events, authorization)
+	}
+	written, err := store.AppendIfSeq(st.Seq, events)
+	if err != nil {
+		return DecisionResult{}, err
+	}
+	if len(written) != len(events) {
+		return DecisionResult{}, fmt.Errorf("inbox: appended %d decision records and the log reported %d", len(events), len(written))
+	}
+	result := DecisionResult{Reply: written[0]}
+	if len(written) == 2 {
+		result.Authorization = &written[1]
+	}
+	return result, nil
+}
+
+func replyEvent(id string, reply Reply, at time.Time) kernel.Event {
+	payload := map[string]any{"inbox_id": id, "text": reply.Text, "decision": reply.Decision}
+	if principal := strings.TrimSpace(reply.Principal); principal != "" {
+		payload["principal"] = principal
+	}
+	return kernel.Event{ID: "inbox-reply-" + id, Type: kernel.InboxReplied,
+		Ts: at.UTC().Format(time.RFC3339Nano), Source: kernel.SourceHuman, Payload: payload}
+}
+
+func authorizationDecisionEvent(a kernel.Authorization, reply Reply, principal string, at time.Time) kernel.Event {
+	payload := map[string]any{"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest}
+	typeName := kernel.AuthorizationDenied
+	id := "authorization-denied-" + a.ID
+	if reply.Decision == DecisionApprove {
+		typeName = kernel.AuthorizationGranted
+		id = "authorization-granted-" + a.ID
+		payload["approver_principal"] = principal
+		payload["grant_event_id"] = id
+		payload["expires_at"] = a.ExpiresAt
+	} else {
+		payload["principal"] = principal
+		payload["reason"] = reply.Text
+	}
+	return kernel.Event{ID: id, Type: typeName, Ts: at.UTC().Format(time.RFC3339Nano),
+		Source: kernel.SourceHuman, Payload: payload}
 }
 
 func answerStore(store *logstore.Store, cfg kernel.Config, id string, reply Reply, exactQuestion bool) (kernel.Event, error) {
