@@ -131,6 +131,13 @@ type Execution interface {
 	Cancel()
 }
 
+// ExecutionError is implemented by executions that retain their terminal wait
+// error. Reap reports it instead of silently treating infrastructure loss as a
+// successful completion.
+type ExecutionError interface {
+	Err() error
+}
+
 // Scheduler fires triggers. It is not safe for concurrent use; Run owns it.
 type Scheduler struct {
 	store       Store
@@ -573,7 +580,14 @@ func (s *Scheduler) reap() {
 		for _, ex := range exs {
 			select {
 			case <-ex.Done():
-				// finished, drop it
+				for id, registered := range s.executions {
+					if registered == ex {
+						delete(s.executions, id)
+					}
+				}
+				if failed, ok := ex.(ExecutionError); ok && failed.Err() != nil {
+					s.report(Report{Trigger: name, Err: fmt.Errorf("execution ended: %w", failed.Err())})
+				}
 			default:
 				live = append(live, ex)
 			}

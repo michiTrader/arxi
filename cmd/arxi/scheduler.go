@@ -700,6 +700,14 @@ type childExec struct {
 }
 
 func (c *childExec) Done() <-chan struct{} { return c.done }
+func (c *childExec) Err() error {
+	select {
+	case <-c.done:
+		return c.err
+	default:
+		return nil
+	}
+}
 
 // Cancel asks the process group to stop, and does not wait for it.
 //
@@ -738,9 +746,16 @@ type runExec struct {
 	unregister   func()
 	externalStop chan struct{}
 	cancelOnce   sync.Once
+	errMu        sync.Mutex
+	waitErr      error
 }
 
 func (r *runExec) Done() <-chan struct{} { return r.done }
+func (r *runExec) Err() error {
+	r.errMu.Lock()
+	defer r.errMu.Unlock()
+	return r.waitErr
+}
 
 func (r *runExec) observe() {
 	defer close(r.done)
@@ -754,7 +769,10 @@ func (r *runExec) observe() {
 		defer close(r.externalStop)
 	}
 	defer r.supervisor.Close(context.Background())
-	_, _ = app.Wait(context.Background(), r.submission, app.WaitTerminal)
+	_, err := app.Wait(context.Background(), r.submission, app.WaitTerminal)
+	r.errMu.Lock()
+	r.waitErr = err
+	r.errMu.Unlock()
 }
 
 func (r *runExec) Cancel() {
