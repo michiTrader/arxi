@@ -222,6 +222,43 @@ func (w *storageWorker) applyCommand(command storageCommand) error {
 	return nil
 }
 
+func (w *storageWorker) appendRecoveredCancellation(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	state, _ := kernel.Fold(kernel.State{}, w.events, kernel.Config{})
+	if state.Status.Terminal() {
+		return nil
+	}
+	for _, event := range w.events {
+		if event.Type == kernel.RunCancelled {
+			return nil
+		}
+	}
+	event := kernel.Event{ID: "cancel-recovered-" + string(w.id), Type: kernel.RunCancelled,
+		Source: kernel.SourceRuntime, Scope: "run:" + string(w.id),
+		Payload: map[string]any{"reason": "durable cancellation requested before recovery"}}
+	if w.now != nil {
+		event.Ts = w.now().UTC().Format(time.RFC3339Nano)
+	}
+	body, err := encodeStoredEvent(event)
+	if err != nil {
+		return err
+	}
+	result, err := w.writer.Append(ctx, AppendBatch{Expected: w.record.Revision, Records: []StoredRecord{{Data: body}}})
+	if err != nil {
+		return err
+	}
+	w.record.Revision = result.Revision
+	for _, record := range result.Records {
+		decoded, decodeErr := decodeStoredEvent(record)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		w.events = append(w.events, decoded)
+	}
+	return nil
+}
+
 func (w *storageWorker) checkpoint(cursor, revision int64) error {
 	return w.coordination.port.Checkpoint(context.Background(), ExecutionCheckpoint{
 		Claim: w.coordination.claim, RunRevision: revision, CompletedCursor: cursor,

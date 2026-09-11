@@ -27,9 +27,12 @@ type storageBackend struct {
 	now          func() time.Time
 	capabilities *capabilityResolver
 
-	mu      sync.Mutex
-	workers map[JobID]*storageWorker
-	closed  bool
+	mu       sync.Mutex
+	workers  map[JobID]*storageWorker
+	closed   bool
+	recover  bool
+	recoverW sync.WaitGroup
+	recoverC chan struct{}
 }
 
 type storedJobMetadata struct {
@@ -63,10 +66,19 @@ func newBackend(options Options) backend {
 	if heartbeat <= 0 {
 		heartbeat = 10 * time.Second
 	}
-	return &storageBackend{
+	backend := &storageBackend{
 		storage: options.Storage, coordination: options.Coordination, heartbeat: heartbeat,
 		provider: options.Provider, now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
 	}
+	if options.Provider != nil && options.Coordination != nil {
+		if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
+			backend.recover = true
+			backend.recoverC = make(chan struct{})
+			backend.recoverW.Add(1)
+			go backend.recoverLoop()
+		}
+	}
+	return backend
 }
 
 func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, error) {
@@ -208,6 +220,19 @@ func (b *storageBackend) inspect(ctx context.Context, op Capability, id JobID) (
 	if err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
+	if coordination, ok := b.coordination.(CoordinationProjectionV1); ok {
+		coordinated, inspectErr := coordination.InspectJob(ctx, id)
+		if inspectErr != nil {
+			return Job{}, adaptCoordinationError(op, id, inspectErr)
+		}
+		projection.AttemptCount = coordinated.AttemptCount
+		projection.ReconciliationRequired = coordinated.ReconciliationRequired
+		projection.CancellationRequested = coordinated.CancellationRequested
+		if coordinated.Status.Terminal() {
+			projection.Status = coordinated.Status
+			projection.Terminal = true
+		}
+	}
 	return projection, nil
 }
 
@@ -293,6 +318,20 @@ func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, it
 			return Job{}, adaptMutationFailure(op, id, itemID, err)
 		}
 		return b.inspect(ctx, op, id)
+	}
+	if b.coordination != nil {
+		if op == CapabilityCancel {
+			cancellation, ok := b.coordination.(CoordinationCancellationV1)
+			if !ok {
+				return Job{}, unavailable(op)
+			}
+			if err := cancellation.RequestCancellation(ctx, id, "external host request"); err != nil {
+				return Job{}, adaptCoordinationError(op, id, err)
+			}
+			return b.inspect(ctx, op, id)
+		}
+		return Job{}, mutationError(CodeConflict, op, id, itemID,
+			errors.New("job has no local claim owner; retry after recovery acquires the job"))
 	}
 	writer, err := b.storage.OpenWriter(ctx, id)
 	if err != nil {
@@ -398,11 +437,15 @@ func (b *storageBackend) Close() error {
 		return nil
 	}
 	b.closed = true
+	if b.recoverC != nil {
+		close(b.recoverC)
+	}
 	workers := make([]*storageWorker, 0, len(b.workers))
 	for _, worker := range b.workers {
 		workers = append(workers, worker)
 	}
 	b.mu.Unlock()
+	b.recoverW.Wait()
 	var closeErr error
 	for _, worker := range workers {
 		if err := worker.close(); err != nil && closeErr == nil {
@@ -505,6 +548,19 @@ func (b *storageBackend) claimWorker(ctx context.Context, id JobID) (*storageWor
 		_ = writer.Close()
 		return nil, err
 	}
+	if cancellation, ok := b.coordination.(CoordinationCancellationV1); ok {
+		requested, cancellationErr := cancellation.CancellationRequested(ctx, id)
+		if cancellationErr != nil {
+			_ = writer.Close()
+			return nil, cancellationErr
+		}
+		if requested {
+			if appendErr := worker.appendRecoveredCancellation(ctx); appendErr != nil {
+				_ = writer.Close()
+				return nil, appendErr
+			}
+		}
+	}
 	if err := b.installWorker(worker); err != nil {
 		_ = writer.Close()
 		if existing := b.worker(id); existing != nil {
@@ -525,8 +581,56 @@ func (b *storageBackend) installWorker(worker *storageWorker) error {
 	if b.workers[worker.id] != nil {
 		return errors.New("job already has a resident writer")
 	}
+	worker.onExit = b.removeWorker
 	b.workers[worker.id] = worker
 	return nil
+}
+
+func (b *storageBackend) removeWorker(worker *storageWorker) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.workers[worker.id] == worker {
+		delete(b.workers, worker.id)
+	}
+}
+
+func (b *storageBackend) recoverLoop() {
+	defer b.recoverW.Done()
+	const retryDelay = 25 * time.Millisecond
+	for {
+		select {
+		case <-b.recoverC:
+			return
+		default:
+		}
+		records, err := b.storage.List(context.Background())
+		if err == nil {
+			for _, record := range records {
+				select {
+				case <-b.recoverC:
+					return
+				default:
+				}
+				job, inspectErr := b.inspect(context.Background(), CapabilityRecover, record.ID)
+				if inspectErr != nil || job.Terminal || b.worker(record.ID) != nil {
+					continue
+				}
+				_, claimErr := b.claimWorker(context.Background(), record.ID)
+				if claimErr != nil && !isCoordinationConflict(claimErr) {
+					continue
+				}
+			}
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-b.recoverC:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (b *storageBackend) worker(id JobID) *storageWorker {
