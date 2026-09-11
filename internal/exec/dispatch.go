@@ -122,6 +122,11 @@ func hashDispatchParts(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func exactActionDigest(jobID, runID, requester, parentWorkID, providerCallID, toolName, argumentDigest, toolSchemaVersion, policyVersion, workspaceProfileID string) string {
+	return hashDispatchParts("arxi.authorization-action/v1", jobID, runID, requester, parentWorkID,
+		providerCallID, toolName, argumentDigest, toolSchemaVersion, policyVersion, workspaceProfileID)
+}
+
 func (r *Runner) register(meta DispatchMetadata) error {
 	if r.Dispatches == nil {
 		return nil

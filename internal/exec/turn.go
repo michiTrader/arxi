@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/michiTrader/arxi/internal/authorization"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/turn"
 )
@@ -607,11 +606,9 @@ func (r *Runner) validateAuthorizationSuspension(a kernel.Authorization, s autho
 	if err := turn.ValidateToolCall(s.Call); err != nil {
 		return fmt.Errorf("authorization %s call is invalid: %w", a.ID, err)
 	}
-	action, err := authorization.NewAction(authorization.ActionInput{JobID: s.JobID, RunID: s.RunID,
-		RequesterPrincipal: s.RequesterPrincipal, SuspendedParentWorkID: s.ParentWorkID,
-		ProviderCallID: s.Call.ID, ToolName: s.Call.Name, ArgumentDigest: s.Call.ArgumentDigest,
-		ToolSchemaVersion: s.ToolSchemaVersion, PolicyVersion: s.PolicyVersion, WorkspaceProfileID: s.WorkspaceProfileID})
-	if err != nil || action.Digest() != a.ActionDigest {
+	digest := exactActionDigest(s.JobID, s.RunID, s.RequesterPrincipal, s.ParentWorkID, s.Call.ID,
+		s.Call.Name, s.Call.ArgumentDigest, s.ToolSchemaVersion, s.PolicyVersion, s.WorkspaceProfileID)
+	if digest != a.ActionDigest {
 		return fmt.Errorf("authorization %s action digest does not match exact suspension bytes", a.ID)
 	}
 	return nil
@@ -742,15 +739,8 @@ func (r *Runner) suspendAuthorization(parent Work, effect kernel.SpawnTurn, roun
 	}
 	authorizationID := "authorization-" + childID[len("work-"):]
 	suspensionID := "suspension-" + childID[len("work-"):]
-	action, err := authorization.NewAction(authorization.ActionInput{
-		JobID: r.JobID, RunID: r.RunID, RequesterPrincipal: "agent:" + effect.Agent,
-		SuspendedParentWorkID: parent.ID, ProviderCallID: call.ID, ToolName: call.Name,
-		ArgumentDigest: call.ArgumentDigest, ToolSchemaVersion: cfg.ToolSchemaVersion,
-		PolicyVersion: cfg.PolicyVersion, WorkspaceProfileID: cfg.WorkspaceProfileID,
-	})
-	if err != nil {
-		return NotDispatched(err)
-	}
+	actionDigest := exactActionDigest(r.JobID, r.RunID, "agent:"+effect.Agent, parent.ID, call.ID, call.Name,
+		call.ArgumentDigest, cfg.ToolSchemaVersion, cfg.PolicyVersion, cfg.WorkspaceProfileID)
 	orderedSeen := make([]turn.ToolCall, 0, len(seen))
 	for _, entry := range trace {
 		if entry.Tool != nil {
@@ -763,7 +753,7 @@ func (r *Runner) suspendAuthorization(parent Work, effect kernel.SpawnTurn, roun
 		ParentWorkID: parent.ID, SourceSeq: parent.SourceSeq, Round: round, CallIndex: callIndex,
 		Effect: effect, Request: req, Trace: trace, Seen: orderedSeen, PendingCalls: calls, Call: call,
 		ChildID: childID, ChildSlot: slot, ToolSchemaVersion: cfg.ToolSchemaVersion,
-		PolicyVersion: cfg.PolicyVersion, WorkspaceProfileID: cfg.WorkspaceProfileID, ActionDigest: action.Digest(),
+		PolicyVersion: cfg.PolicyVersion, WorkspaceProfileID: cfg.WorkspaceProfileID, ActionDigest: actionDigest,
 	}
 	body, err := json.Marshal(suspension)
 	if err != nil {
@@ -799,7 +789,7 @@ func (r *Runner) suspendAuthorization(parent Work, effect kernel.SpawnTurn, roun
 			"schema": "arxi.authorization/v1", "authorization_id": authorizationID, "inbox_id": inboxID,
 			"requester_principal": suspension.RequesterPrincipal, "suspension_id": suspensionID,
 			"parent_work_id": parent.ID, "provider_call_id": call.ID, "tool": call.Name,
-			"argument_digest": call.ArgumentDigest, "action_digest": action.Digest(),
+			"argument_digest": call.ArgumentDigest, "action_digest": actionDigest,
 			"tool_schema_version": cfg.ToolSchemaVersion, "policy_version": cfg.PolicyVersion,
 			"workspace_profile_id": cfg.WorkspaceProfileID, "expires_at": expires, "after_ms": cfg.TTLMS,
 		}}
