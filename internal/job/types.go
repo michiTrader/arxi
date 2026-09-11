@@ -1,7 +1,10 @@
 // Package job defines pure durable job coordination records and decisions.
 package job
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type JobID string
 type TriggerID string
@@ -131,20 +134,22 @@ type PreparedDispatch struct {
 	DispatchKey   DispatchKey `json:"dispatch_key"`
 	WorkID        WorkID      `json:"work_id"`
 	RequestDigest Digest      `json:"request_digest"`
+	WorkClass     WorkClass   `json:"work_class"`
 }
 
 type Receipt struct {
-	JobID         JobID         `json:"job_id"`
-	AttemptID     AttemptID     `json:"attempt_id"`
-	Fence         Fence         `json:"fence"`
-	Provider      string        `json:"provider"`
-	ExternalID    string        `json:"external_id"`
-	DispatchKey   DispatchKey   `json:"dispatch_key"`
-	WorkID        WorkID        `json:"work_id"`
-	RequestDigest Digest        `json:"request_digest"`
-	ObservedAt    time.Time     `json:"observed_at"`
-	Status        OutcomeStatus `json:"status"`
-	OutcomeDigest Digest        `json:"outcome_digest"`
+	JobID            JobID           `json:"job_id"`
+	AttemptID        AttemptID       `json:"attempt_id"`
+	Fence            Fence           `json:"fence"`
+	Provider         string          `json:"provider"`
+	ExternalID       string          `json:"external_id"`
+	DispatchKey      DispatchKey     `json:"dispatch_key"`
+	WorkID           WorkID          `json:"work_id"`
+	RequestDigest    Digest          `json:"request_digest"`
+	ObservedAt       time.Time       `json:"observed_at"`
+	Status           OutcomeStatus   `json:"status"`
+	OutcomeDigest    Digest          `json:"outcome_digest"`
+	CanonicalOutcome json.RawMessage `json:"canonical_outcome"`
 }
 
 type PeriodKind string
