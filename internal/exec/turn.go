@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/turn"
 )
@@ -255,13 +256,52 @@ func (r *Runner) runModelChild(ctx context.Context, parent Work, round int, req 
 		return resp, nil
 	}
 
-	if child.Status == "unknown" || child.Started {
+	if child.Status == "unknown" {
 		return turn.Response{}, fmt.Errorf("%w: child work %s has no committed model outcome", ErrUnknownWork, child.ID)
 	}
-	if err := r.startTurnChild(parent, child); err != nil {
-		return turn.Response{}, err
+	provider, class, honors := req.Provider, job.WorkNonIdempotent, false
+	if classifier, ok := x.(TurnDispatchClassifier); ok {
+		provider, class, honors = classifier.ClassifyModelDispatch(req)
 	}
-	resp, callErr := x.CompleteTurn(ctx, req)
+	meta := childMetadata(r, child, provider, class, honors)
+	if err := r.register(meta); err != nil {
+		return turn.Response{}, fmt.Errorf("register model dispatch %s: %w", child.ID, err)
+	}
+	if child.Started && r.Dispatches != nil {
+		receipt, found, lookupErr := r.Dispatches.Receipt(meta)
+		if lookupErr != nil {
+			return turn.Response{}, lookupErr
+		}
+		if found {
+			var resp turn.Response
+			if err := json.Unmarshal(receipt.CanonicalOutcome, &resp); err != nil {
+				return turn.Response{}, fmt.Errorf("decode receipt outcome of %s: %w", child.ID, err)
+			}
+			if err := validateTurnResponse(resp); err != nil {
+				return turn.Response{}, fmt.Errorf("validate receipt outcome of %s: %w", child.ID, err)
+			}
+			if err := r.finishTurnChild(parent, child, "completed", receipt.CanonicalOutcome, nil); err != nil {
+				return turn.Response{}, err
+			}
+			return resp, nil
+		}
+	}
+	if child.Started && (meta.WorkClass != job.WorkIdempotent || !meta.SupportsIdempotency) {
+		return turn.Response{}, fmt.Errorf("%w: child work %s has no committed model outcome", ErrUnknownWork, child.ID)
+	}
+	if !child.Started {
+		if err := r.startTurnChild(parent, child); err != nil {
+			return turn.Response{}, err
+		}
+	}
+	var resp turn.Response
+	var receipt *DispatchReceipt
+	var callErr error
+	if dispatch, ok := x.(MetadataTurnExecutor); ok {
+		resp, receipt, callErr = dispatch.CompleteTurnDispatch(ctx, req, meta)
+	} else {
+		resp, callErr = x.CompleteTurn(ctx, req)
+	}
 	if callErr == nil {
 		if err := validateTurnResponse(resp); err != nil {
 			callErr = NotDispatched(err)
@@ -283,6 +323,12 @@ func (r *Runner) runModelChild(ctx context.Context, parent Work, round int, req 
 	body, err := json.Marshal(resp)
 	if err != nil {
 		return turn.Response{}, fmt.Errorf("encode model outcome of %s: %w", child.ID, err)
+	}
+	if receipt != nil {
+		receipt.CanonicalOutcome = body
+		if err := r.recordReceipt(meta, receipt); err != nil {
+			return turn.Response{}, fmt.Errorf("record model receipt %s: %w", child.ID, err)
+		}
 	}
 	if err := r.finishTurnChild(parent, child, "completed", body, nil); err != nil {
 		return turn.Response{}, err
@@ -314,13 +360,52 @@ func (r *Runner) runToolChild(ctx context.Context, parent Work, effect kernel.Sp
 		}
 		return outcome, nil
 	}
-	if child.Status == "unknown" || child.Started {
+	if child.Status == "unknown" {
 		return TurnToolOutcome{}, fmt.Errorf("%w: child work %s has no committed tool outcome", ErrUnknownWork, child.ID)
 	}
-	if err := r.startTurnChild(parent, child); err != nil {
-		return TurnToolOutcome{}, err
+	provider, class, honors := "tool", job.WorkNonIdempotent, false
+	if classifier, ok := x.(TurnDispatchClassifier); ok {
+		provider, class, honors = classifier.ClassifyToolDispatch(effect, call)
 	}
-	outcome, callErr := x.ExecuteTurnTool(ctx, effect, call)
+	meta := childMetadata(r, child, provider, class, honors)
+	if err := r.register(meta); err != nil {
+		return TurnToolOutcome{}, fmt.Errorf("register tool dispatch %s: %w", child.ID, err)
+	}
+	if child.Started && r.Dispatches != nil {
+		receipt, found, lookupErr := r.Dispatches.Receipt(meta)
+		if lookupErr != nil {
+			return TurnToolOutcome{}, lookupErr
+		}
+		if found {
+			var outcome TurnToolOutcome
+			if err := json.Unmarshal(receipt.CanonicalOutcome, &outcome); err != nil {
+				return TurnToolOutcome{}, fmt.Errorf("decode receipt outcome of %s: %w", child.ID, err)
+			}
+			if err := validateToolOutcome(call, outcome); err != nil {
+				return TurnToolOutcome{}, fmt.Errorf("validate receipt outcome of %s: %w", child.ID, err)
+			}
+			if err := r.finishTurnChild(parent, child, "completed", receipt.CanonicalOutcome, nil); err != nil {
+				return TurnToolOutcome{}, err
+			}
+			return outcome, nil
+		}
+	}
+	if child.Started && (meta.WorkClass != job.WorkIdempotent || !meta.SupportsIdempotency) {
+		return TurnToolOutcome{}, fmt.Errorf("%w: child work %s has no committed tool outcome", ErrUnknownWork, child.ID)
+	}
+	if !child.Started {
+		if err := r.startTurnChild(parent, child); err != nil {
+			return TurnToolOutcome{}, err
+		}
+	}
+	var outcome TurnToolOutcome
+	var receipt *DispatchReceipt
+	var callErr error
+	if dispatch, ok := x.(MetadataTurnExecutor); ok {
+		outcome, receipt, callErr = dispatch.ExecuteTurnToolDispatch(ctx, effect, call, meta)
+	} else {
+		outcome, callErr = x.ExecuteTurnTool(ctx, effect, call)
+	}
 	if callErr == nil {
 		if err := validateToolOutcome(call, outcome); err != nil {
 			callErr = NotDispatched(err)
@@ -345,6 +430,12 @@ func (r *Runner) runToolChild(ctx context.Context, parent Work, effect kernel.Sp
 	body, err := json.Marshal(outcome)
 	if err != nil {
 		return TurnToolOutcome{}, fmt.Errorf("encode tool outcome of %s: %w", child.ID, err)
+	}
+	if receipt != nil {
+		receipt.CanonicalOutcome = body
+		if err := r.recordReceipt(meta, receipt); err != nil {
+			return TurnToolOutcome{}, fmt.Errorf("record tool receipt %s: %w", child.ID, err)
+		}
 	}
 	if err := r.finishTurnChild(parent, child, "completed", body, nil); err != nil {
 		return TurnToolOutcome{}, err
@@ -395,10 +486,22 @@ func (r *Runner) ensureTurnChild(parent Work, id, kind, slot, prepared string, p
 		return existing, nil
 	}
 	child := &turnChild{ID: id, Kind: kind, Slot: slot, PreparedJSON: prepared}
+	provider, class, honors := "external", job.WorkNonIdempotent, false
+	if classifier, ok := r.Executor.(TurnDispatchClassifier); ok {
+		if kind == "model" {
+			var request turn.Request
+			if json.Unmarshal([]byte(prepared), &request) == nil {
+				provider, class, honors = classifier.ClassifyModelDispatch(request)
+			}
+		}
+	}
+	meta := childMetadata(r, child, provider, class, honors)
 	event := r.progressEvent(kernel.ExecWorkPrepared, map[string]any{
 		"work_id": id, "parent_work_id": parent.ID, "work_scope": "turn_child",
 		"source_seq": parent.SourceSeq, "child_kind": kind, "child_slot": slot,
-		"request_json": prepared,
+		"request_json": prepared, "work_class": string(meta.WorkClass),
+		"dispatch_key": string(meta.DispatchKey), "request_digest": string(meta.RequestDigest),
+		"provider": meta.Provider,
 	}, parent.Source)
 	if _, err := r.Log.Append(r.stamp([]kernel.Event{event})); err != nil {
 		return nil, fmt.Errorf("append preparation of native turn child %s: %w", id, err)
