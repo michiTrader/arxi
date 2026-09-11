@@ -132,17 +132,22 @@ continuation boundaries, but do not themselves cause more effects.
 
 | type | payload | notes |
 |---|---|---|
-| `exec.work_prepared` | Top-level: `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest`. Native child: `work_id`, `parent_work_id`, `work_scope: "turn_child"`, `source_seq`, `child_kind`, `child_slot`, `request_json`. | The full top-level manifest is committed before external dispatch. Child request JSON is the exact provider-neutral model request or tool call that may dispatch. |
+| `exec.work_prepared` | Top-level: `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest`; external top-level work also carries `work_class`, `dispatch_key`, `request_digest`, `provider`. Native child: `work_id`, `parent_work_id`, `work_scope: "turn_child"`, `source_seq`, `child_kind`, `child_slot`, `request_json`, `work_class`, `dispatch_key`, `request_digest`, `provider`. | The full top-level manifest is committed before external dispatch. Child request JSON is the exact provider-neutral model request or tool call that may dispatch. `dispatch_key` derives from stable job/work/request identity and is independent of attempts. `work_class: "idempotent"` is valid only when the concrete adapter declares and actually honors that key; generic tools and production OpenAI/Anthropic adapters remain `non_idempotent`. |
 | `exec.work_started` | `work_id`; native children also carry `parent_work_id`, `work_scope: "turn_child"` | Durable boundary immediately before an independent external dispatch. A native parent marker starts coordination; ambiguity is tracked by its model and tool children. |
 | `exec.work_finished` | `work_id`, `status`, `error?`; native children also carry `parent_work_id`, `work_scope: "turn_child"`, `result_json?` | `status` is exactly `completed`, `failed`, or `unknown`. A completed native child stores the exact canonical outcome used by recovery. |
 | `exec.step_completed` | `source_seq`, `source_event_id`, `work_ids` | Commits that every effect of the source event has a durable terminal outcome. `work_ids` preserves effect-list order. |
 
-A prepared work item may be dispatched after restart. A started top-level native
-turn with no child may resume because its parent marker performs no external work;
-model and tool children each carry their own started boundary. Any other started
-item without a terminal record is materialized as `unknown` and is never
-automatically redispatched. A durable `unknown` blocks continuation until a later
-reconciliation facility can establish the external outcome. Finished work is not
+A prepared work item may be dispatched after restart. Coordinated workers first
+register its provider/work/request binding under the active fence, then commit the
+started boundary. A started top-level native turn with no child may resume because
+its parent marker performs no external work. Completed local outcomes always win.
+Otherwise, a committed trustworthy receipt may supply the exact canonical outcome;
+its digest and provider/work/request binding are verified before that outcome is
+committed locally. A started idempotent item may retry only when its concrete adapter
+both declares and honors external key semantics, and it reuses the prepared key.
+Any other started item without a terminal record is materialized as `unknown` and is
+never automatically redispatched. A durable `unknown` blocks continuation until
+trustworthy reconciliation establishes the external outcome. Finished work is not
 repeated, even when the process stopped before `exec.step_completed`; recovery
 closes the source step after validating its deterministic manifest.
 
