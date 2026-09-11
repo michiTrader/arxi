@@ -24,12 +24,17 @@ import (
 
 const hostStorageRecordFile = ".host-job.v1.json"
 
-type filesystemJobStorage struct{ root string }
+type filesystemJobStorage struct {
+	root         string
+	coordination hostv1.Coordination
+}
 
 type filesystemJobWriter struct {
-	store  *logstore.Store
-	record hostv1.JobRecord
-	closed bool
+	store    *logstore.Store
+	record   hostv1.JobRecord
+	claim    *hostv1.ExecutionClaim
+	validate func(context.Context, hostv1.ExecutionClaim) error
+	closed   bool
 }
 
 type filesystemJobEnvelope struct {
@@ -222,8 +227,24 @@ func (s *filesystemJobStorage) OpenWriter(ctx context.Context, id hostv1.JobID) 
 	return &filesystemJobWriter{store: store, record: record}, nil
 }
 
+func (s *filesystemJobStorage) OpenClaimedWriter(ctx context.Context, claim hostv1.ExecutionClaim) (hostv1.JobWriter, error) {
+	writer, err := s.OpenWriter(ctx, claim.JobID)
+	if err != nil {
+		return nil, err
+	}
+	value := writer.(*filesystemJobWriter)
+	value.claim = &claim
+	value.validate = func(ctx context.Context, current hostv1.ExecutionClaim) error {
+		if s.coordination == nil {
+			return errors.New("filesystem job storage has no coordination validator")
+		}
+		return s.coordination.Validate(ctx, current)
+	}
+	return value, nil
+}
+
 func (w *filesystemJobWriter) Append(ctx context.Context, batch hostv1.AppendBatch) (hostv1.AppendResult, error) {
-	if err := ctx.Err(); err != nil {
+	if err := w.validClaim(ctx); err != nil {
 		return hostv1.AppendResult{}, err
 	}
 	if w.closed || w.store == nil {
@@ -257,7 +278,7 @@ func (w *filesystemJobWriter) Append(ctx context.Context, batch hostv1.AppendBat
 }
 
 func (w *filesystemJobWriter) WriteSnapshot(ctx context.Context, snapshot hostv1.Snapshot) error {
-	if err := ctx.Err(); err != nil {
+	if err := w.validClaim(ctx); err != nil {
 		return err
 	}
 	if w.closed || w.store == nil {
@@ -268,6 +289,21 @@ func (w *filesystemJobWriter) WriteSnapshot(ctx context.Context, snapshot hostv1
 		return fmt.Errorf("decode lifecycle snapshot: %w", err)
 	}
 	return w.store.WriteSnapshot(state, snapshot.AtSequence)
+}
+
+func (w *filesystemJobWriter) validClaim(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if w.claim != nil {
+		if w.validate == nil {
+			return hostv1.ErrStorageConflict
+		}
+		if err := w.validate(ctx, *w.claim); err != nil {
+			return fmt.Errorf("%w: claimed writer is stale: %v", hostv1.ErrStorageConflict, err)
+		}
+	}
+	return nil
 }
 
 func (w *filesystemJobWriter) Close() error {
@@ -592,4 +628,5 @@ func cloneFilesystemArtifacts(artifacts []hostv1.Artifact) []hostv1.Artifact {
 }
 
 var _ hostv1.JobStorage = (*filesystemJobStorage)(nil)
+var _ hostv1.CoordinatedJobStorageV1 = (*filesystemJobStorage)(nil)
 var _ hostv1.JobWriter = (*filesystemJobWriter)(nil)

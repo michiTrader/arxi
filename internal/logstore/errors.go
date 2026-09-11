@@ -41,10 +41,9 @@ type LockedError struct {
 
 func (e *LockedError) Error() string {
 	return fmt.Sprintf("run directory %s is already open for writing by %s: "+
-		"exactly one writer per log is required, because two writers produce "+
-		"duplicate seq and an unfoldable log. If that writer is certainly dead, "+
-		"remove %s/%s by hand after confirming no process is running.",
-		e.Dir, e.Owner, e.Dir, lockFileName)
+		"exactly one local process writer per log is required, because two writers produce "+
+		"duplicate seq and an unfoldable log. The operating system releases this advisory "+
+		"lock when the writer exits; do not delete the lock file.", e.Dir, e.Owner)
 }
 
 // CorruptError reports damage in the middle of the log, not at its tail.

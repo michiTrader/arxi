@@ -260,7 +260,7 @@ func TestRunCancelRefusesARunThatAlreadyFinished(t *testing.T) {
 // is sound for a lock left by a dead process and wrong here -- this refusal
 // happens BECAUSE the writer is alive. Two writers produce duplicate seq and a log
 // that no longer folds.
-func TestRunCancelOnADrivenRunDoesNotAdviseDeletingTheLock(t *testing.T) {
+func TestRunCancelIgnoresAnUnlockedLegacySentinel(t *testing.T) {
 	dir := t.TempDir()
 	const id = "rmtcnl4kq-71c2a0de"
 	cancellableRun(t, dir, id)
@@ -271,25 +271,11 @@ func TestRunCancelOnADrivenRunDoesNotAdviseDeletingTheLock(t *testing.T) {
 	}
 
 	out, errb, code := arxiStreams(t, dir, "run", "cancel", id)
-	if code != 1 {
-		t.Fatalf("exit %d, want 1\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: an unlocked sentinel must not turn process death into a permanent outage\nstdout:\n%s\nstderr:\n%s", code, out, errb)
 	}
-	if !strings.Contains(errb, "pid 424242") {
-		t.Errorf("the refusal does not name the process holding the run:\n%s", errb)
-	}
-	if strings.Contains(errb, "by hand") {
-		t.Errorf("the raw lock error reached the user:\n%s\n"+
-			"  consequence: it advises removing writer.lock after confirming no "+
-			"process is running, and this refusal happens precisely because one "+
-			"is.", errb)
-	}
-	if _, err := os.Stat(lock); err != nil {
-		t.Errorf("the lock of a live writer was removed: %v", err)
-	}
-	for _, ev := range allEvents(t, dir, id) {
-		if ev["type"] == "run.cancelled" {
-			t.Fatalf("a run that could not be locked was cancelled anyway:\n%v", ev)
-		}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("inactive lock file survived successful cancellation: %v", err)
 	}
 }
 

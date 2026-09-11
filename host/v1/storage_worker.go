@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -11,11 +12,13 @@ import (
 )
 
 type storageWorker struct {
-	id       JobID
-	record   JobRecord
-	writer   JobWriter
-	provider TextProvider
-	now      func() time.Time
+	id           JobID
+	record       JobRecord
+	writer       JobWriter
+	provider     TextProvider
+	now          func() time.Time
+	coordination *workerCoordination
+	heartbeat    time.Duration
 
 	mu        sync.Mutex
 	events    []kernel.Event
@@ -27,6 +30,7 @@ type storageWorker struct {
 	stop      chan struct{}
 	closeOnce sync.Once
 	err       error
+	onExit    func(*storageWorker)
 }
 
 type storageCommand struct {
@@ -42,10 +46,30 @@ func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider Tex
 		commands: make(chan storageCommand, 32), wake: make(chan struct{}, 1), stop: make(chan struct{})}
 }
 
+func newRecoveredStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider,
+	now func() time.Time, events []kernel.Event, coordination *workerCoordination, heartbeat time.Duration) (*storageWorker, error) {
+	recovery, err := exec.Recover(events)
+	if err != nil {
+		return nil, err
+	}
+	if !recovery.HasProgress {
+		return nil, errors.New("job has no durable execution progress")
+	}
+	return &storageWorker{id: id, record: record, writer: writer, provider: provider, now: now,
+		coordination: coordination, heartbeat: heartbeat, events: append([]kernel.Event(nil), events...),
+		changed: make(chan struct{}), done: make(chan struct{}), commands: make(chan storageCommand, 32),
+		wake: make(chan struct{}, 1), stop: make(chan struct{})}, nil
+}
+
 func (w *storageWorker) start() { go w.run() }
 
 func (w *storageWorker) run() {
 	defer close(w.done)
+	defer func() {
+		if w.onExit != nil {
+			w.onExit(w)
+		}
+	}()
 	defer func() { w.setErr(w.writer.Close()) }()
 	metadata, err := decodeStoredMetadata(w.record)
 	if err != nil {
@@ -74,6 +98,20 @@ func (w *storageWorker) run() {
 			return time.Now().UTC().Format(time.RFC3339Nano)
 		}}
 	loop := &exec.Loop{Runner: runner, Log: log, Time: timekeeper, Config: metadata.Effective.Config}
+	if recovery, recoverErr := exec.Recover(w.events); recoverErr != nil {
+		w.setErr(recoverErr)
+		return
+	} else if recovery.HasProgress {
+		loop.Cursor = recovery.Cursor
+	}
+	var heartbeatStop chan struct{}
+	var heartbeatDone chan struct{}
+	if w.coordination != nil {
+		loop.Progress = w.checkpoint
+		heartbeatStop, heartbeatDone = make(chan struct{}), make(chan struct{})
+		go w.renew(heartbeatStop, heartbeatDone)
+		defer func() { close(heartbeatStop); <-heartbeatDone }()
+	}
 	for {
 		if w.stopping() {
 			return
@@ -99,6 +137,12 @@ func (w *storageWorker) run() {
 		loop.Cursor = out.Cursor
 		if runErr != nil {
 			w.setErr(runErr)
+		}
+		terminal := out.StoppedBy == exec.StopTerminal || exec.ClassifyFailure(runErr) == exec.FailureUnknown
+		if w.coordination != nil && terminal {
+			if err := w.coordination.complete(out, runErr); err != nil {
+				w.setErr(err)
+			}
 		}
 		w.drainCommands()
 		if w.stopping() {
@@ -176,6 +220,92 @@ func (w *storageWorker) applyCommand(command storageCommand) error {
 	}
 	w.signalChanged()
 	return nil
+}
+
+func (w *storageWorker) appendRecoveredCancellation(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	state, _ := kernel.Fold(kernel.State{}, w.events, kernel.Config{})
+	if state.Status.Terminal() {
+		return nil
+	}
+	for _, event := range w.events {
+		if event.Type == kernel.RunCancelled {
+			return nil
+		}
+	}
+	event := kernel.Event{ID: "cancel-recovered-" + string(w.id), Type: kernel.RunCancelled,
+		Source: kernel.SourceRuntime, Scope: "run:" + string(w.id),
+		Payload: map[string]any{"reason": "durable cancellation requested before recovery"}}
+	if w.now != nil {
+		event.Ts = w.now().UTC().Format(time.RFC3339Nano)
+	}
+	body, err := encodeStoredEvent(event)
+	if err != nil {
+		return err
+	}
+	result, err := w.writer.Append(ctx, AppendBatch{Expected: w.record.Revision, Records: []StoredRecord{{Data: body}}})
+	if err != nil {
+		return err
+	}
+	w.record.Revision = result.Revision
+	for _, record := range result.Records {
+		decoded, decodeErr := decodeStoredEvent(record)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		w.events = append(w.events, decoded)
+	}
+	return nil
+}
+
+func (w *storageWorker) checkpoint(cursor, revision int64) error {
+	return w.coordination.port.Checkpoint(context.Background(), ExecutionCheckpoint{
+		Claim: w.coordination.claim, RunRevision: revision, CompletedCursor: cursor,
+	})
+}
+
+func (w *storageWorker) renew(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(w.heartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := w.coordination.port.Heartbeat(context.Background(), w.coordination.claim); err != nil {
+				w.setErr(err)
+				w.closeOnce.Do(func() { close(w.stop); w.signalWake() })
+				return
+			}
+		}
+	}
+}
+
+type workerCoordination struct {
+	port  Coordination
+	claim ExecutionClaim
+}
+
+func (c *workerCoordination) complete(out exec.Outcome, runErr error) error {
+	outcome := ExecutionFailed
+	if exec.ClassifyFailure(runErr) == exec.FailureUnknown {
+		outcome = ExecutionUnknown
+	} else if runErr != nil {
+		return nil
+	} else {
+		switch out.State.Status {
+		case kernel.StatusSucceeded:
+			outcome = ExecutionSucceeded
+		case kernel.StatusCancelled:
+			outcome = ExecutionCancelled
+		case kernel.StatusFailed, kernel.StatusExpired:
+		default:
+			return nil
+		}
+	}
+	return c.port.Complete(context.Background(), c.claim, outcome)
 }
 
 func (w *storageWorker) signalWake() {

@@ -1,9 +1,12 @@
 package trigger
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -95,6 +98,10 @@ const (
 // on read, every time, by Record.Next.
 type Record struct {
 	Name string `json:"name"`
+	// ID is immutable once stored. It is optional only for compatibility with
+	// trigger files written before durable occurrences existed; Identity derives
+	// the same value every time for those records.
+	ID string `json:"id,omitempty"`
 
 	// On and Then are stored as the strings the user typed, not as parsed
 	// structures.
@@ -126,8 +133,66 @@ type Record struct {
 	// is why this is not a zero time.Time: "never fired" and "fired at the zero
 	// instant" must be distinguishable in `trigger list`, because the first is
 	// normal for a new trigger and the second means something is very wrong.
-	LastFiredAt string `json:"last_fired_at,omitempty"`
-	LastStatus  string `json:"last_status,omitempty"`
+	LastFiredAt     string `json:"last_fired_at,omitempty"`
+	LastScheduledAt string `json:"last_scheduled_at,omitempty"`
+	LastStatus      string `json:"last_status,omitempty"`
+}
+
+const legacyIdentityVersion = "arxi.trigger/v1"
+
+// Identity returns the stored immutable identity or derives one for a legacy
+// record from definition fields that cannot change without creating a different
+// trigger. Runtime status and firing history are deliberately excluded: pause,
+// resume and scheduler writes must keep naming the same durable occurrences.
+func (r Record) Identity() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return hashIdentityParts(
+		legacyIdentityVersion,
+		r.Name,
+		r.On,
+		r.Then,
+		strconv.FormatFloat(r.Budget, 'g', -1, 64),
+		string(r.BudgetPeriod),
+		string(r.OnMissed),
+		string(r.Overlap),
+		r.CreatedAt,
+	)
+}
+
+// CanonicalIdentitySource exposes the versioned source bytes used for legacy
+// identity without coupling this package to durable job types. Callers that
+// need to persist or audit migration can store these bytes beside the derived
+// identity and detect incompatible canonicalization changes.
+func (r Record) CanonicalIdentitySource() []byte {
+	parts := []string{
+		legacyIdentityVersion,
+		r.Name,
+		r.On,
+		r.Then,
+		strconv.FormatFloat(r.Budget, 'g', -1, 64),
+		string(r.BudgetPeriod),
+		string(r.OnMissed),
+		string(r.Overlap),
+		r.CreatedAt,
+	}
+	return encodeIdentityParts(parts...)
+}
+
+func hashIdentityParts(parts ...string) string {
+	sum := sha256.Sum256(encodeIdentityParts(parts...))
+	return hex.EncodeToString(sum[:])
+}
+
+func encodeIdentityParts(parts ...string) []byte {
+	var b strings.Builder
+	for _, part := range parts {
+		b.WriteString(strconv.Itoa(len(part)))
+		b.WriteByte(':')
+		b.WriteString(part)
+	}
+	return []byte(b.String())
 }
 
 // Validate re-parses everything the user wrote and checks it still holds.
@@ -208,6 +273,12 @@ func (r Record) Validate() error {
 				"RFC3339: %w", r.Name, r.LastFiredAt, err)
 		}
 	}
+	if r.LastScheduledAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, r.LastScheduledAt); err != nil {
+			return fmt.Errorf("trigger %q has last_scheduled_at %q, which is not "+
+				"RFC3339Nano: %w", r.Name, r.LastScheduledAt, err)
+		}
+	}
 	return nil
 }
 
@@ -216,6 +287,13 @@ func (r Record) Spec() (Spec, error) { return ParseSpec(r.On) }
 
 // Action parses this record's action.
 func (r Record) Action() (Action, error) { return ParseAction(r.Then) }
+
+func (r Record) schedulingCursor() string {
+	if r.LastScheduledAt != "" {
+		return r.LastScheduledAt
+	}
+	return r.LastFiredAt
+}
 
 // Next computes the next firing, and reports whether there is one to show.
 //
@@ -264,17 +342,18 @@ func (r Record) Next(now time.Time) (time.Time, bool, error) {
 const missedCap = 1000
 
 func (r Record) Missed(now time.Time) (n int, capped bool, err error) {
-	if r.LastFiredAt == "" {
+	cursor := r.schedulingCursor()
+	if cursor == "" {
 		// Never fired: nothing was missed. A trigger created yesterday has not
 		// "missed" every slot since its schedule began, and counting from
 		// CreatedAt would make a new daily trigger created a month ago report 30
 		// missed runs the moment it is loaded.
 		return 0, false, nil
 	}
-	last, err := time.Parse(time.RFC3339, r.LastFiredAt)
+	last, err := time.Parse(time.RFC3339Nano, cursor)
 	if err != nil {
-		return 0, false, fmt.Errorf("trigger %q: last_fired_at %q is not RFC3339: %w",
-			r.Name, r.LastFiredAt, err)
+		return 0, false, fmt.Errorf("trigger %q: scheduling cursor %q is not RFC3339: %w",
+			r.Name, cursor, err)
 	}
 	s, err := r.Spec()
 	if err != nil {

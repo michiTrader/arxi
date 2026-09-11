@@ -15,11 +15,13 @@ import (
 // boundary: when present, all acceptance, reads, mutations, waits, and
 // subscriptions use it.
 type Options struct {
-	Provider   TextProvider
-	Tools      ToolExecutor
-	Workspaces WorkspaceProvisioner
-	Storage    JobStorage
-	Authorizer Authorizer
+	Provider              TextProvider
+	Tools                 ToolExecutor
+	Workspaces            WorkspaceProvisioner
+	Storage               JobStorage
+	Coordination          Coordination
+	CoordinationHeartbeat time.Duration
+	Authorizer            Authorizer
 	// Now supplies the lifecycle event clock. It is primarily useful to composition
 	// roots that already expose a deterministic clock; nil uses time.Now.
 	Now func() time.Time

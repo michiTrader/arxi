@@ -19,6 +19,8 @@ import (
 	"github.com/michiTrader/arxi/internal/app"
 	arxiexec "github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/inbox"
+	"github.com/michiTrader/arxi/internal/job"
+	"github.com/michiTrader/arxi/internal/jobstore"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
@@ -243,6 +245,71 @@ func (*schedulerBlockingExecutor) CallTool(context.Context, kernel.CallTool) ([]
 
 func (*schedulerBlockingExecutor) AskHuman(context.Context, kernel.AskHuman) ([]kernel.Event, error) {
 	return nil, nil
+}
+
+func TestScheduledClaimExpiresAndReplacementResumesFrozenRun(t *testing.T) {
+	originalNow := nowFunc
+	defer func() { nowFunc = originalNow }()
+	now := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)
+	nowFunc = func() time.Time { return now }
+	store := jobstore.NewMemory(nowFunc)
+	defer store.Close()
+	nominal := now.Add(-time.Minute)
+	occurrence := job.Occurrence{ID: job.OccurrenceIdentity("trigger", nominal), TriggerID: "trigger", NominalAt: nominal,
+		State: job.OccurrenceAdmitted, JobID: "job-restart", ReservationID: "reservation-restart"}
+	_, revision, err := store.Admit(0, jobstore.Admission{Occurrence: occurrence,
+		Window:  job.LedgerWindow{TriggerID: "trigger", Period: job.PeriodDay, StartsAt: time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)},
+		Ceiling: job.NewAmount(5, 0), Reserved: job.NewAmount(5, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, revision, err := store.Claim(revision, occurrence.JobID, "worker-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = first.ExpiresAt
+	second, _, err := store.Claim(revision, occurrence.JobID, "worker-b", time.Minute)
+	if err != nil {
+		t.Fatalf("replacement claim after expiry: %v", err)
+	}
+	if second.AttemptID == first.AttemptID || second.Fence <= first.Fence {
+		t.Fatalf("replacement claim = %#v after %#v: restart must create a fresh attempt and increasing fence", second, first)
+	}
+	if store.View().Attempts[first.AttemptID].State != job.AttemptExpired {
+		t.Fatal("replacement claim did not durably expire the crashed worker before takeover")
+	}
+}
+
+func TestAmbiguousScheduledOutcomeFinishesUnknownAndKeepsReservation(t *testing.T) {
+	originalNow := nowFunc
+	defer func() { nowFunc = originalNow }()
+	now := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)
+	nowFunc = func() time.Time { return now }
+	store := jobstore.NewMemory(nowFunc)
+	defer store.Close()
+	nominal := now.Add(-time.Minute)
+	occurrence := job.Occurrence{ID: job.OccurrenceIdentity("trigger", nominal), TriggerID: "trigger", NominalAt: nominal,
+		State: job.OccurrenceAdmitted, JobID: "job-unknown", ReservationID: "reservation-unknown"}
+	_, revision, err := store.Admit(0, jobstore.Admission{Occurrence: occurrence,
+		Window:  job.LedgerWindow{TriggerID: "trigger", Period: job.PeriodDay, StartsAt: time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)},
+		Ceiling: job.NewAmount(5, 0), Reserved: job.NewAmount(5, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, _, err := store.Claim(revision, occurrence.JobID, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordination := &scheduledClaim{store: store, claim: claim, occurrence: occurrence.ID, reservation: occurrence.ReservationID}
+	if err := coordination.Finish(arxiexec.Outcome{}, arxiexec.ErrUnknownWork); err != nil {
+		t.Fatalf("finish ambiguous scheduled work: %v", err)
+	}
+	view := store.View()
+	if view.Jobs[occurrence.JobID].State != job.JobUnknown || view.Occurrences[occurrence.ID].State != job.OccurrenceUnknown ||
+		view.Reservations[occurrence.ReservationID].State != job.ReservationUnknown {
+		t.Fatalf("ambiguous projection job=%s occurrence=%s reservation=%s: no redispatch is safe and the full budget must remain held",
+			view.Jobs[occurrence.JobID].State, view.Occurrences[occurrence.ID].State, view.Reservations[occurrence.ReservationID].State)
+	}
 }
 
 func TestScheduledRunStartAcceptsNativelyAndOnceDoesNotAbandonIt(t *testing.T) {

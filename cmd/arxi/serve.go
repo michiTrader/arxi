@@ -201,8 +201,14 @@ func cloneProtoPrincipal(principal hostv1.Principal) hostv1.Principal {
 	return out
 }
 
-func defaultProtoHost() *hostv1.Host {
-	return hostv1.New(hostv1.Options{Storage: newFilesystemJobStorage(runsDir)})
+func defaultProtoHost() (*hostv1.Host, error) {
+	storage := newFilesystemJobStorage(runsDir)
+	coordination, err := openHostCoordination(runsDir)
+	if err != nil {
+		return nil, fmt.Errorf("open durable coordination: %w", err)
+	}
+	storage.(*filesystemJobStorage).coordination = coordination
+	return hostv1.New(hostv1.Options{Storage: storage, Coordination: coordination}), nil
 }
 
 // protoHandlers holds the implementations that exist.
@@ -235,7 +241,10 @@ var protoHandlers = map[string]protoHandler{
 // that wrote a value could read back the old one — a lost update produced by the
 // server, not by the race the CAS in ADR-0006 was built to catch.
 func serveConn(r io.Reader, w io.Writer) error {
-	host := defaultProtoHost()
+	host, err := defaultProtoHost()
+	if err != nil {
+		return err
+	}
 	defer host.Close()
 	return serveConnSession(r, w, newProtoSession(hostv1.Principal{ID: "local"}, host))
 }
@@ -314,7 +323,10 @@ func writeLineTooLong(enc *json.Encoder) {
 // can read it. A protocol server that drops a connection over a bad request makes
 // one typo cost every other in-flight request on that connection.
 func handleLine(line string) protoResponse {
-	host := defaultProtoHost()
+	host, err := defaultProtoHost()
+	if err != nil {
+		return protoResponse{OK: false, Error: &protoError{Code: "unavailable", Message: err.Error()}}
+	}
 	defer host.Close()
 	return handleLineSession(context.Background(), newProtoSession(hostv1.Principal{ID: "local"}, host), line)
 }
@@ -643,7 +655,10 @@ func cmdServe(args []string) {
 		os.Exit(2)
 	}
 
-	host := defaultProtoHost()
+	host, err := defaultProtoHost()
+	if err != nil {
+		fatal(err)
+	}
 	defer func() {
 		if err := host.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "arxi serve: close host: %v\n", err)
@@ -859,7 +874,10 @@ func parseServeFlags(args []string) (string, error) {
 // freeze whatever the registry looked like at init and would keep working after
 // somebody changed it.
 func protoHello() helloMsg {
-	host := defaultProtoHost()
+	host, err := defaultProtoHost()
+	if err != nil {
+		return helloMsg{}
+	}
 	defer host.Close()
 	session := newProtoSession(hostv1.Principal{ID: "local"}, host)
 	hello, _ := protoHelloSession(context.Background(), &session)

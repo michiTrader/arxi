@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	hostv1 "github.com/michiTrader/arxi/host/v1"
 	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/jobstore"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
@@ -175,6 +177,42 @@ func TestFilesystemJobStorageLoadsLegacyRunDirectory(t *testing.T) {
 	if metadata.Effective.RunID != "legacy" || metadata.Effective.BlueprintSHA == "" {
 		t.Fatalf("legacy metadata = %#v", metadata)
 	}
+}
+
+func TestFilesystemClaimedWriterRejectsStaleFence(t *testing.T) {
+	root := t.TempDir()
+	storage := newFilesystemJobStorage(root).(*filesystemJobStorage)
+	created, err := storage.Create(context.Background(), filesystemCreateRequest(t, "r1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coordination := jobstore.NewMemory(nowFunc)
+	if _, err := coordination.RegisterJob(0, jobstore.JobRegistration{JobID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := coordination.BindSubmission(coordination.View().Revision, jobstore.Submission{Key: "key", RequestDigest: "digest", JobID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := coordination.Claim(coordination.View().Revision, "r1", "first", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := publicExecutionClaim(first)
+	writer, err := storage.OpenWriter(context.Background(), "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenced := &filesystemJobWriter{store: writer.(*filesystemJobWriter).store, record: created.Record, claim: &claim,
+		validate: func(context.Context, hostv1.ExecutionClaim) error { return hostv1.ErrStorageConflict }}
+	event, _ := json.Marshal(kernel.Event{ID: "pause", Type: kernel.RunPaused, Source: kernel.SourceHuman})
+	if _, err := fenced.Append(context.Background(), hostv1.AppendBatch{Expected: created.Record.Revision,
+		Records: []hostv1.StoredRecord{{Data: event}}}); !errors.Is(err, hostv1.ErrStorageConflict) {
+		t.Fatalf("stale append error = %v, want storage conflict: a replaced host must not mutate the run log", err)
+	}
+	_ = fenced.Close()
 }
 
 func TestFilesystemStorageBacksProtocolInspectAndCancel(t *testing.T) {

@@ -23,9 +23,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 
+	"github.com/michiTrader/arxi/internal/advisorylock"
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
@@ -69,7 +71,7 @@ type Store struct {
 	mu sync.Mutex
 
 	events *os.File
-	lock   *os.File
+	lock   *advisorylock.Lock
 
 	// head is the highest seq durably written. size is the log's committed
 	// length in bytes, which is what a rolled-back batch is truncated to.
@@ -628,6 +630,10 @@ func BatchInFlight(dir string) bool {
 // that must not Open the Store. Exported for the same reason BatchInFlight is.
 func EventsPath(dir string) string { return filepath.Join(dir, eventsFileName) }
 
+func LockHeld(dir string) (bool, error) {
+	return advisorylock.Held(LockPath(dir))
+}
+
 // LockPath is the writer lock inside a run directory. A follower reads it to
 // name the process it is waiting on, and to learn that nothing is appending.
 func LockPath(dir string) string { return filepath.Join(dir, lockFileName) }
@@ -879,20 +885,16 @@ func (s *Store) clearPending() error {
 
 // ------------------------------------------------------------------ locking
 
-// acquireLock takes the single-writer lock with O_EXCL.
-//
-// O_EXCL and not advisory flock: the guarantee has to hold when the two writers
-// are on different machines sharing the directory, and flock does not survive
-// NFS reliably. The trade-off is that a hard-killed process leaves the lock
-// behind, so the lock records its pid and the error tells the operator what to
-// check. A stale lock is an annoyance; two live writers are duplicate `seq` and
-// an unfoldable log, so the failure is biased in the right direction on purpose.
-func acquireLock(dir string) (*os.File, error) {
+// acquireLock takes a non-blocking local-machine advisory writer lock. The OS
+// releases it when the process exits, including hard termination, so recovery
+// never requires deleting a stale sentinel. This deliberately makes no promise
+// for independent machines mounting the same network filesystem.
+func acquireLock(dir string) (*advisorylock.Lock, error) {
 	path := filepath.Join(dir, lockFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if errors.Is(err, os.ErrExist) {
-		owner := "an unknown process"
-		if body, rerr := os.ReadFile(path); rerr == nil && len(trimSpace(string(body))) > 0 {
+	lock, err := advisorylock.Acquire(path, false)
+	if errors.Is(err, advisorylock.ErrWouldBlock) {
+		owner := "another local process"
+		if body, readErr := os.ReadFile(path); readErr == nil && len(trimSpace(string(body))) > 0 {
 			owner = trimSpace(string(body))
 		}
 		return nil, &LockedError{Dir: dir, Owner: owner}
@@ -900,20 +902,27 @@ func acquireLock(dir string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("logstore: acquire writer lock: %w", err)
 	}
-	if _, werr := f.WriteString(fmt.Sprintf("pid %d\n", os.Getpid())); werr == nil {
-		_ = f.Sync()
+	file := lock.File()
+	if err := file.Truncate(0); err != nil {
+		lock.Release()
+		return nil, fmt.Errorf("logstore: clear writer lock owner: %w", err)
 	}
-	return f, nil
+	if _, err := file.WriteAt([]byte(fmt.Sprintf("pid %d\n", os.Getpid())), 0); err != nil {
+		lock.Release()
+		return nil, fmt.Errorf("logstore: record writer lock owner: %w", err)
+	}
+	_ = file.Sync()
+	return lock, nil
 }
 
 func (s *Store) releaseLock() error {
 	if s.lock == nil {
 		return nil
 	}
-	err := s.lock.Close()
+	err := s.lock.Release()
 	s.lock = nil
-	if rerr := os.Remove(s.lockPath()); rerr != nil && !errors.Is(rerr, os.ErrNotExist) && err == nil {
-		err = fmt.Errorf("logstore: remove writer lock: %w", rerr)
+	if removeErr := os.Remove(s.lockPath()); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && err == nil {
+		err = fmt.Errorf("logstore: remove inactive writer lock file: %w", removeErr)
 	}
 	return err
 }
@@ -924,6 +933,9 @@ func (s *Store) releaseLock() error {
 // removing a file are directory operations, and fsyncing the file does not make
 // the entry that names it durable.
 func fsyncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("logstore: open directory for fsync: %w", err)

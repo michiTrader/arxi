@@ -106,6 +106,12 @@ type Loop struct {
 	// report, not a limit users should tune.
 	MaxSteps int
 
+	// Progress commits an external coordination checkpoint after the matching
+	// exec.step_completed record is confirmed. A failure stops the loop before it
+	// can dispatch the next source event, which is how an expired fence removes a
+	// resident worker's authority without interrupting an in-flight call.
+	Progress func(cursor, revision int64) error
+
 	// blockedPublished prevents a resident worker from repeatedly publishing the
 	// same blocked standstill while it continues waiting for an armed timer.
 	blockedPublished bool
@@ -334,7 +340,13 @@ func (l *Loop) run(ctx context.Context, stop <-chan struct{}) (Outcome, error) {
 			// costs money, and skipping the turn a stage waits on costs the whole
 			// run: it waits forever for a result nobody will produce.
 			out.Cursor = cursor
+			if l.Progress != nil {
+				if err := l.Progress(cursor, l.Log.Head()); err != nil {
+					return out, fmt.Errorf("run loop: checkpoint confirmed source seq %d: %w", cursor, err)
+				}
+			}
 		}
+
 	}
 }
 

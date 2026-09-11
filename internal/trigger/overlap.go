@@ -92,7 +92,11 @@ func Admit(r Record, d Decision, running int) (Admission, error) {
 	// overlap policy override the schedule, and `parallel` would start runs
 	// for slots that had not arrived.
 	if !d.ShouldFire {
-		return Admission{Why: d.Why}, nil
+		// A consciously skipped backlog is still an attendance decision. Without
+		// Consume the same nominal slots return on every tick and cannot be recorded
+		// as skipped durably; ordinary not-due, paused and external decisions have no
+		// skipped slots and remain read-only.
+		return Admission{Consume: len(d.SkippedSlots) > 0, Why: d.Why}, nil
 	}
 
 	// Due with nothing running is the ordinary case, and every policy agrees

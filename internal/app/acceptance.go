@@ -5,19 +5,23 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/runread"
 	"github.com/michiTrader/arxi/internal/supervisor"
 )
 
@@ -35,14 +39,32 @@ type locationLifecycle interface {
 
 // SubmitRequest is transport-independent input to durable job acceptance.
 type SubmitRequest struct {
-	JobID     string
-	Actor     string
-	Blueprint []byte
-	Prompt    string
-	BudgetUSD float64
-	MaxTurns  int
-	Simulated bool
+	JobID          string
+	Actor          string
+	Blueprint      []byte
+	Prompt         string
+	BudgetUSD      float64
+	MaxTurns       int
+	Simulated      bool
+	IdempotencyKey string
+	RequestDigest  job.Digest
 }
+
+// SubmissionBinding is the application-level coordination value. Keeping the
+// port here lets acceptance depend on durable semantics rather than an adapter.
+type SubmissionBinding struct {
+	Key           string
+	RequestDigest job.Digest
+	JobID         job.JobID
+}
+
+// SubmissionCoordinator durably binds one caller key to one canonical request
+// and deterministic job identity before per-run publication begins.
+type SubmissionCoordinator interface {
+	BindSubmission(SubmissionBinding) (SubmissionBinding, error)
+}
+
+var ErrSubmissionConflict = errors.New("submission identity conflicts with existing binding")
 
 // SubmitResult identifies the confirmed run.started acceptance record.
 type SubmitResult struct {
@@ -54,14 +76,16 @@ type SubmitResult struct {
 // PreparedSubmission is the private shared acceptance contract after a caller
 // has composed the exact immutable runtime artifact it needs.
 type PreparedSubmission struct {
-	JobID      string
-	Actor      string
-	Blueprint  []byte
-	Artifact   runconfig.Artifact
-	BudgetUSD  float64
-	MaxTurns   int
-	Location   string
-	OnAccepted func(SubmitResult, string, kernel.Config)
+	JobID          string
+	Actor          string
+	Blueprint      []byte
+	Artifact       runconfig.Artifact
+	BudgetUSD      float64
+	MaxTurns       int
+	Location       string
+	IdempotencyKey string
+	RequestDigest  job.Digest
+	OnAccepted     func(SubmitResult, string, kernel.Config)
 }
 
 // Submission is an accepted run and its resident lifecycle endpoint.
@@ -90,6 +114,7 @@ type WaitResult struct {
 type AcceptanceServices struct {
 	RunsDir      string
 	Lifecycle    Lifecycle
+	Submissions  SubmissionCoordinator
 	NewID        func() string
 	Now          func() time.Time
 	DefaultModel string
@@ -137,10 +162,28 @@ func (s AcceptanceServices) Submit(ctx context.Context, req SubmitRequest) (Subm
 	if req.Simulated {
 		mode = "sim"
 	}
+	artifact := runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil)
+	digest, err := submissionDigest(actor, bp.Raw, artifact, req.BudgetUSD, req.MaxTurns)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
+	}
+	if req.RequestDigest != "" && req.RequestDigest != digest {
+		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("supplied request digest disagrees with canonical submission")}
+	}
+	if req.IdempotencyKey != "" {
+		bound, err := s.bindSubmission(SubmissionBinding{Key: req.IdempotencyKey, RequestDigest: digest, JobID: job.JobID(id)})
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		id = string(bound.JobID)
+		artifact = runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil)
+	}
 	prepared := PreparedSubmission{
 		JobID: id, Actor: actor, Blueprint: bp.Raw,
-		Artifact:  runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil),
-		BudgetUSD: req.BudgetUSD, MaxTurns: req.MaxTurns,
+		Artifact:      artifact,
+		BudgetUSD:     req.BudgetUSD,
+		MaxTurns:      req.MaxTurns,
+		RequestDigest: digest,
 	}
 	submission, err := s.SubmitPrepared(ctx, prepared)
 	return submission.Result, err
@@ -176,6 +219,22 @@ func (s AcceptanceServices) SubmitPrepared(ctx context.Context, req PreparedSubm
 	if got := hex.EncodeToString(blueprintSum[:]); got != req.Artifact.BlueprintSHA {
 		return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id,
 			Cause: fmt.Errorf("prepared blueprint digest %s disagrees with artifact %s", got, req.Artifact.BlueprintSHA)}
+	}
+	digest, digestErr := submissionDigest(req.Actor, req.Blueprint, req.Artifact, req.BudgetUSD, req.MaxTurns)
+	if digestErr != nil {
+		return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: digestErr}
+	}
+	if req.RequestDigest != "" && req.RequestDigest != digest {
+		return Submission{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("supplied request digest disagrees with canonical prepared submission")}
+	}
+	if req.IdempotencyKey != "" {
+		bound, bindErr := s.bindSubmission(SubmissionBinding{Key: req.IdempotencyKey, RequestDigest: digest, JobID: job.JobID(id)})
+		if bindErr != nil {
+			return Submission{}, bindErr
+		}
+		if bound.JobID != job.JobID(id) {
+			return Submission{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("prepared submission job disagrees with its durable binding")}
+		}
 	}
 	dir := req.Location
 	if dir == "" {
@@ -216,11 +275,10 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
 	if err := os.Mkdir(dir, 0o755); err != nil {
-		kind := StorageUnavailable
 		if os.IsExist(err) {
-			kind = Conflict
+			return s.adoptPublished(id, dir, req)
 		}
-		return result, &Error{Kind: kind, Op: "submit", JobID: id, Cause: err}
+		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
 	accepted := false
 	defer func() {
@@ -280,6 +338,68 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 	}
 	accepted = true
 	return SubmitResult{JobID: id, AcceptedSeq: written[0].Seq, Status: string(kernel.StatusRunning)}, nil
+}
+
+func (s AcceptanceServices) adoptPublished(id, dir string, req PreparedSubmission) (SubmitResult, error) {
+	run, err := runread.Open(dir)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: fmt.Errorf("bound job is not a confirmed published run: %w", err)}
+	}
+	artifact, err := runconfig.VerifyBinding(dir, id, run.Events)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: err}
+	}
+	if !reflect.DeepEqual(artifact, req.Artifact) {
+		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("bound job has different immutable effective configuration")}
+	}
+	snapshot, err := os.ReadFile(filepath.Join(dir, "blueprint.snapshot.yaml"))
+	if err != nil || !reflect.DeepEqual(snapshot, req.Blueprint) {
+		if err == nil {
+			err = errors.New("bound job has different immutable blueprint bytes")
+		}
+		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: err}
+	}
+	if len(run.Events) == 0 || run.Events[0].Type != kernel.RunStarted || run.Events[0].Seq != 1 ||
+		run.Events[0].Str("run_id") != id || run.Events[0].Str("actor") != req.Actor ||
+		run.Events[0].Str("prompt") != req.Artifact.Prompt || run.Events[0].Num("budget_usd") != req.BudgetUSD ||
+		int(run.Events[0].Num("max_turns")) != req.MaxTurns {
+		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("bound job run.started identity disagrees with the canonical submission")}
+	}
+	return SubmitResult{JobID: id, AcceptedSeq: 1, Status: string(run.State.Status)}, nil
+}
+
+func (s AcceptanceServices) bindSubmission(wanted SubmissionBinding) (SubmissionBinding, error) {
+	if s.Submissions == nil {
+		return SubmissionBinding{}, &Error{Kind: StorageUnavailable, Op: "submit", JobID: string(wanted.JobID), Cause: errors.New("idempotent submission requires a coordination store")}
+	}
+	bound, err := s.Submissions.BindSubmission(wanted)
+	if err != nil {
+		kind := StorageUnavailable
+		if errors.Is(err, ErrSubmissionConflict) {
+			kind = Conflict
+		}
+		return SubmissionBinding{}, &Error{Kind: kind, Op: "submit", JobID: string(wanted.JobID), Cause: err}
+	}
+	if bound.Key != wanted.Key || bound.RequestDigest != wanted.RequestDigest || bound.JobID == "" {
+		return SubmissionBinding{}, &Error{Kind: Conflict, Op: "submit", JobID: string(wanted.JobID), Cause: errors.New("coordination store returned a conflicting submission binding")}
+	}
+	return bound, nil
+}
+
+func submissionDigest(actor string, blueprintBytes []byte, artifact runconfig.Artifact, budgetUSD float64, maxTurns int) (job.Digest, error) {
+	artifact.RunID = ""
+	canonical := struct {
+		Actor     string             `json:"actor"`
+		Blueprint []byte             `json:"blueprint"`
+		Artifact  runconfig.Artifact `json:"artifact"`
+		BudgetUSD float64            `json:"budget_usd"`
+		MaxTurns  int                `json:"max_turns"`
+	}{actor, blueprintBytes, artifact, budgetUSD, maxTurns}
+	body, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize submission: %w", err)
+	}
+	return job.RequestDigest(body), nil
 }
 
 func writeSyncedFile(path string, body []byte, mode os.FileMode) error {

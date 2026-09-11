@@ -78,7 +78,7 @@ func checkExportedName(t *testing.T, filename, name string) {
 		return
 	}
 	lower := strings.ToLower(name)
-	for _, forbidden := range []string{"path", "offset", "lockfile", "directory", "pendingcause", "blockedref", "workmanifest"} {
+	for _, forbidden := range []string{"path", "offset", "lockfile", "directory", "pendingcause", "blockedref", "workmanifest", "jobstore", "storagepath"} {
 		if strings.Contains(lower, forbidden) {
 			t.Errorf("%s exports %q, which publishes forbidden persistence/path vocabulary %q", filename, name, forbidden)
 		}

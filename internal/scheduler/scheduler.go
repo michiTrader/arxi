@@ -44,6 +44,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/trigger"
 )
 
@@ -59,6 +60,35 @@ type Store interface {
 	Save(trigger.Record) error
 }
 
+type CoordinationView struct {
+	Revision    uint64
+	Occurrences map[job.OccurrenceID]job.Occurrence
+	Jobs        map[job.JobID]job.Job
+}
+
+type Admission struct {
+	Occurrence job.Occurrence
+	Window     job.LedgerWindow
+	Ceiling    job.Amount
+	Reserved   job.Amount
+}
+
+type Cancellation struct {
+	JobID  job.JobID
+	Actor  string
+	Reason string
+}
+
+// Coordinator is the durable scheduling seam. It deliberately mirrors only the
+// cross-job operations this package needs; concrete journal layout and locking
+// remain adapter concerns.
+type Coordinator interface {
+	View() CoordinationView
+	RecordOccurrence(uint64, job.Occurrence) (job.Occurrence, uint64, error)
+	Admit(uint64, Admission) (job.Occurrence, uint64, error)
+	Cancel(uint64, Cancellation) (uint64, error)
+}
+
 // Runner starts the work a trigger names. One method, because starting is the
 // only thing the scheduler asks for; cancelling belongs to the Execution that
 // was started, which is the thing that knows what it is.
@@ -69,6 +99,20 @@ type Runner interface {
 	// trigger is allowed to spend (Budget, BudgetPeriod) travels with it and a
 	// runner that only saw the command line would have to be told separately.
 	Start(r trigger.Record, a trigger.Action) (Execution, error)
+}
+
+// DurableRunner receives the canonical identity accepted before launch. Runner
+// remains the compatibility shape for non-durable callers; production wiring
+// implements this extension and never chooses an identity itself.
+type DurableRunner interface {
+	StartSlot(r trigger.Record, slot Slot, a trigger.Action) (Execution, error)
+}
+
+// Slot is the durable identity already accepted for one nominal firing.
+type Slot struct {
+	NominalAt    time.Time
+	OccurrenceID job.OccurrenceID
+	JobID        job.JobID
 }
 
 // Execution is one in-flight piece of work.
@@ -87,10 +131,18 @@ type Execution interface {
 	Cancel()
 }
 
+// ExecutionError is implemented by executions that retain their terminal wait
+// error. Reap reports it instead of silently treating infrastructure loss as a
+// successful completion.
+type ExecutionError interface {
+	Err() error
+}
+
 // Scheduler fires triggers. It is not safe for concurrent use; Run owns it.
 type Scheduler struct {
-	store  Store
-	runner Runner
+	store       Store
+	runner      Runner
+	coordinator Coordinator
 
 	// inflight is what is currently running, per trigger name.
 	//
@@ -100,7 +152,10 @@ type Scheduler struct {
 	// is honest rather than ideal -- those processes died with their parent --
 	// and the alternative, writing pids to a file, invents a second source of
 	// truth that goes stale the moment a machine is power-cycled.
-	inflight map[string][]Execution
+	// executions is only a wake/cancel convenience after durable policy accepts.
+	// Missing entries after restart do not change overlap decisions.
+	inflight   map[string][]Execution
+	executions map[job.JobID]Execution
 
 	// Now is the reporting hook. nil is fine and means silence.
 	//
@@ -128,6 +183,11 @@ type Report struct {
 
 // New builds a scheduler.
 func New(store Store, runner Runner, observe func(Report)) (*Scheduler, error) {
+	return NewDurable(store, runner, nil, observe)
+}
+
+// NewDurable installs cross-process occurrence, overlap, and budget truth.
+func NewDurable(store Store, runner Runner, coordinator Coordinator, observe func(Report)) (*Scheduler, error) {
 	if store == nil {
 		return nil, errors.New("scheduler: no store, so there would be nothing to schedule")
 	}
@@ -140,10 +200,12 @@ func New(store Store, runner Runner, observe func(Report)) (*Scheduler, error) {
 			"as fired without anything running")
 	}
 	return &Scheduler{
-		store:    store,
-		runner:   runner,
-		inflight: map[string][]Execution{},
-		observe:  observe,
+		store:       store,
+		runner:      runner,
+		coordinator: coordinator,
+		inflight:    map[string][]Execution{},
+		executions:  map[job.JobID]Execution{},
+		observe:     observe,
 	}, nil
 }
 
@@ -185,6 +247,10 @@ func (s *Scheduler) tickOne(r trigger.Record, now time.Time) {
 		return
 	}
 	report.Missed = d.Missed
+	if s.coordinator != nil {
+		s.tickDurable(r, now, d, report)
+		return
+	}
 
 	a, err := trigger.Admit(r, d, len(s.inflight[r.Name]))
 	if err != nil {
@@ -232,7 +298,7 @@ func (s *Scheduler) tickOne(r trigger.Record, now time.Time) {
 	// consciously consumed. If neither happened -- the first Start failed --
 	// the slot stays due, which is correct: nothing ran.
 	if report.Started > 0 || a.Consume {
-		if err := s.recordFiring(r, now, report.Started, a); err != nil {
+		if err := s.recordFiring(r, now, report.Started, a, d); err != nil {
 			// Reported and not retried. The consequence is knowable and worth
 			// stating: the slot stays due, so the next tick fires it again.
 			// That is a duplicate run, which is the failure mode chosen above.
@@ -241,6 +307,188 @@ func (s *Scheduler) tickOne(r trigger.Record, now time.Time) {
 	}
 	s.report(report)
 }
+
+func (s *Scheduler) tickDurable(r trigger.Record, now time.Time, d trigger.Decision, report Report) {
+	revision := s.coordinator.View().Revision
+	for _, slot := range d.SkippedSlots {
+		occurrence := occurrenceFor(r, slot, job.OccurrenceSkipped, d.Why)
+		_, next, err := s.coordinator.RecordOccurrence(revision, occurrence)
+		if err != nil {
+			report.Err = errors.Join(report.Err, fmt.Errorf("record skipped occurrence %s: %w", occurrence.ID, err))
+			break
+		}
+		revision = next
+		report.Consume = true
+	}
+	for _, nominal := range d.Slots {
+		started, cancel, consume, next, err := s.admitSlot(r, nominal, revision)
+		revision = next
+		report.Cancel = report.Cancel || cancel
+		report.Consume = report.Consume || consume
+		if err != nil {
+			report.Err = errors.Join(report.Err, err)
+			break
+		}
+		report.Started += started
+	}
+	if report.Started > 0 || report.Consume {
+		a := trigger.Admission{Cancel: report.Cancel, Consume: report.Consume, Why: d.Why}
+		if err := s.recordFiring(r, now, report.Started, a, d); err != nil {
+			report.Err = errors.Join(report.Err, err)
+		}
+	}
+	report.Why = d.Why
+	s.report(report)
+}
+
+func (s *Scheduler) admitSlot(r trigger.Record, nominal time.Time, revision uint64) (int, bool, bool, uint64, error) {
+	view := s.coordinator.View()
+	revision = view.Revision
+	occurrenceID := job.OccurrenceIdentity(job.TriggerID(r.Identity()), nominal)
+	if existing, ok := view.Occurrences[occurrenceID]; ok {
+		switch existing.State {
+		case job.OccurrenceAdmitted:
+			started, err := s.startAccepted(r, nominal, existing)
+			return started, false, true, revision, err
+		case job.OccurrenceSkipped:
+			return 0, false, true, revision, nil
+		}
+	}
+	active := activeJobs(view, job.TriggerID(r.Identity()))
+	if len(active) > 0 {
+		switch r.Overlap {
+		case trigger.OverlapSkip:
+			o := occurrenceFor(r, nominal, job.OccurrenceSkipped, "overlap policy skipped an active trigger")
+			_, next, err := s.coordinator.RecordOccurrence(revision, o)
+			return 0, false, err == nil, next, err
+		case trigger.OverlapQueue:
+			o := occurrenceFor(r, nominal, job.OccurrencePending, "")
+			_, next, err := s.coordinator.RecordOccurrence(revision, o)
+			return 0, false, false, next, err
+		case trigger.OverlapCancelPrevious:
+			for _, id := range active {
+				next, err := s.coordinator.Cancel(revision, Cancellation{JobID: id, Actor: "scheduler", Reason: "trigger overlap replacement"})
+				if err != nil {
+					return 0, true, false, revision, fmt.Errorf("record cancellation for %s before replacement: %w", id, err)
+				}
+				revision = next
+				if ex := s.execution(id); ex != nil {
+					ex.Cancel()
+				}
+			}
+		}
+	}
+	o := occurrenceFor(r, nominal, job.OccurrenceAdmitted, "")
+	o.JobID = job.ScheduledJobIdentity(o.ID)
+	o.ReservationID = "reservation-" + string(o.ID)
+	amount, err := amountFromUSD(r.Budget)
+	if err != nil {
+		return 0, false, false, revision, err
+	}
+	window, err := ledgerWindow(r, nominal)
+	if err != nil {
+		return 0, false, false, revision, err
+	}
+	accepted, next, err := s.coordinator.Admit(revision, Admission{Occurrence: o, Window: window, Ceiling: amount, Reserved: amount})
+	if err != nil {
+		return 0, false, false, next, fmt.Errorf("admit occurrence %s: %w", o.ID, err)
+	}
+	started, err := s.startAccepted(r, nominal, accepted)
+	if err != nil {
+		return 0, false, false, next, err
+	}
+	return started, len(active) > 0 && r.Overlap == trigger.OverlapCancelPrevious, true, next, nil
+}
+
+func (s *Scheduler) startAccepted(r trigger.Record, nominal time.Time, occurrence job.Occurrence) (int, error) {
+	if _, ok := s.executions[occurrence.JobID]; ok {
+		return 0, nil
+	}
+	action, err := r.Action()
+	if err != nil {
+		return 0, err
+	}
+	durable, ok := s.runner.(DurableRunner)
+	if !ok {
+		return 0, errors.New("durable scheduler runner does not accept canonical slot identity")
+	}
+	ex, err := durable.StartSlot(r, Slot{NominalAt: nominal, OccurrenceID: occurrence.ID, JobID: occurrence.JobID}, action)
+	if err != nil {
+		return 0, fmt.Errorf("publish admitted job %s: %w", occurrence.JobID, err)
+	}
+	if ex == nil {
+		return 0, errors.New("durable runner returned no execution")
+	}
+	s.inflight[r.Name] = append(s.inflight[r.Name], ex)
+	s.executions[occurrence.JobID] = ex
+	return 1, nil
+}
+
+func occurrenceFor(r trigger.Record, nominal time.Time, state job.OccurrenceState, reason string) job.Occurrence {
+	triggerID := job.TriggerID(r.Identity())
+	return job.Occurrence{ID: job.OccurrenceIdentity(triggerID, nominal), TriggerID: triggerID, NominalAt: nominal.UTC(), State: state, SkipReason: reason}
+}
+
+func activeJobs(view CoordinationView, triggerID job.TriggerID) []job.JobID {
+	seen := map[job.JobID]bool{}
+	var ids []job.JobID
+	for _, occurrence := range view.Occurrences {
+		if occurrence.TriggerID != triggerID || occurrence.State != job.OccurrenceAdmitted || occurrence.JobID == "" {
+			continue
+		}
+		stored, ok := view.Jobs[occurrence.JobID]
+		if !ok || job.JobTerminal(stored.State) || seen[occurrence.JobID] {
+			continue
+		}
+		seen[occurrence.JobID] = true
+		ids = append(ids, occurrence.JobID)
+	}
+	sort.Slice(ids, func(i, k int) bool { return ids[i] < ids[k] })
+	return ids
+}
+
+func amountFromUSD(value float64) (job.Amount, error) {
+	if value <= 0 {
+		return job.Amount{}, errors.New("trigger budget must be positive")
+	}
+	text := fmt.Sprintf("%.9f", value)
+	var whole uint64
+	var scale uint8
+	seenDot := false
+	for _, ch := range text {
+		if ch == '.' {
+			seenDot = true
+			continue
+		}
+		whole = whole*10 + uint64(ch-'0')
+		if seenDot {
+			scale++
+		}
+	}
+	return job.NewAmount(whole, scale), nil
+}
+
+func ledgerWindow(r trigger.Record, nominal time.Time) (job.LedgerWindow, error) {
+	nominal = nominal.UTC()
+	var start time.Time
+	var period job.PeriodKind
+	switch r.BudgetPeriod {
+	case trigger.PeriodDay:
+		period, start = job.PeriodDay, time.Date(nominal.Year(), nominal.Month(), nominal.Day(), 0, 0, 0, 0, time.UTC)
+	case trigger.PeriodWeek:
+		period = job.PeriodWeek
+		days := (int(nominal.Weekday()) + 6) % 7
+		day := nominal.AddDate(0, 0, -days)
+		start = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	case trigger.PeriodMonth:
+		period, start = job.PeriodMonth, time.Date(nominal.Year(), nominal.Month(), 1, 0, 0, 0, 0, time.UTC)
+	default:
+		return job.LedgerWindow{}, fmt.Errorf("unknown budget period %q", r.BudgetPeriod)
+	}
+	return job.LedgerWindow{TriggerID: job.TriggerID(r.Identity()), Period: period, StartsAt: start}, nil
+}
+
+func (s *Scheduler) execution(id job.JobID) Execution { return s.executions[id] }
 
 // start launches one execution and books it as in-flight.
 func (s *Scheduler) start(r trigger.Record) error {
@@ -268,15 +516,24 @@ func (s *Scheduler) start(r trigger.Record) error {
 }
 
 // recordFiring writes back what happened, so the next tick does not repeat it.
-func (s *Scheduler) recordFiring(r trigger.Record, now time.Time, started int, a trigger.Admission) error {
-	// The WALL CLOCK instant, not the slot the firing belongs to.
-	//
-	// Both work for scheduling -- Missed counts slots strictly after this
-	// value, and `now` is at or after the slot by definition of being due -- so
-	// the tie is broken by what the LAST column should mean to a human. "When
-	// did this actually run" is a fact; "which slot did it nominally belong
-	// to" is a derivation the operator cannot check against anything.
+func (s *Scheduler) recordFiring(r trigger.Record, now time.Time, started int, a trigger.Admission, d trigger.Decision) error {
+	// LastFiredAt remains the wall-clock observation shown to operators. The
+	// separate schedule cursor advances by nominal slot so a late tick cannot make
+	// an interval schedule drift and durable occurrence identity remains exact.
+	if r.ID == "" {
+		r.ID = r.Identity()
+	}
 	r.LastFiredAt = now.Format(time.RFC3339)
+	consumed := append(append([]time.Time(nil), d.Slots...), d.SkippedSlots...)
+	if len(consumed) > 0 {
+		latest := consumed[0]
+		for _, slot := range consumed[1:] {
+			if slot.After(latest) {
+				latest = slot
+			}
+		}
+		r.LastScheduledAt = latest.UTC().Format(time.RFC3339Nano)
+	}
 	r.LastStatus = firingStatus(started, a)
 
 	if err := s.store.Save(r); err != nil {
@@ -323,7 +580,14 @@ func (s *Scheduler) reap() {
 		for _, ex := range exs {
 			select {
 			case <-ex.Done():
-				// finished, drop it
+				for id, registered := range s.executions {
+					if registered == ex {
+						delete(s.executions, id)
+					}
+				}
+				if failed, ok := ex.(ExecutionError); ok && failed.Err() != nil {
+					s.report(Report{Trigger: name, Err: fmt.Errorf("execution ended: %w", failed.Err())})
+				}
 			default:
 				live = append(live, ex)
 			}

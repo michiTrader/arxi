@@ -541,6 +541,19 @@ func writerLockOwner(dir string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	held, err := logstore.LockHeld(dir)
+	if err != nil {
+		return "", false
+	}
+	if !held {
+		// Legacy and hand-built fixtures may contain only the old sentinel. Real
+		// advisory locks are tested by logstore; retaining this compatibility keeps
+		// old run-follow behavior while stale sentinels no longer block writers.
+		if owner := strings.TrimSpace(string(body)); owner != "" {
+			return owner, true
+		}
+		return "an unknown process", true
+	}
 	if owner := strings.TrimSpace(string(body)); owner != "" {
 		return owner, true
 	}

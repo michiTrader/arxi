@@ -3,6 +3,7 @@ package trigger
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // with returns the nightly-audit record under a given overlap policy.
@@ -42,6 +43,21 @@ func TestAnUndueTriggerIsNotAnOverlapQuestion(t *testing.T) {
 					"schedule's own answer %q", o, a.Why, d.Why)
 			}
 		}
+	}
+}
+
+func TestOnMissedSkipConsumesTheExactBacklog(t *testing.T) {
+	d := Decision{
+		Missed:       2,
+		SkippedSlots: []time.Time{time.Date(2026, 8, 2, 3, 0, 0, 0, time.UTC), time.Date(2026, 8, 3, 3, 0, 0, 0, time.UTC)},
+		Why:          "2 firings skipped",
+	}
+	a, err := Admit(with(OverlapQueue), d, 0)
+	if err != nil {
+		t.Fatalf("admit skipped backlog: %v", err)
+	}
+	if !a.Consume || a.Start != 0 {
+		t.Fatalf("skipped backlog admission = %+v: slots consciously discarded by on-missed would return forever or run accidentally; consume without starting", a)
 	}
 }
 

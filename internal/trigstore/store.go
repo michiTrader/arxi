@@ -133,6 +133,23 @@ func (s *Store) Save(r trigger.Record) error {
 		}
 		return fmt.Errorf("trigstore: stat %s: %w", s.Path(r.Name), err)
 	}
+	stored, err := s.Load(r.Name)
+	if err != nil {
+		return err
+	}
+	if stored.Identity() != r.Identity() ||
+		string(stored.CanonicalIdentitySource()) != string(r.CanonicalIdentitySource()) {
+		return fmt.Errorf("trigger %q changed immutable identity or definition from %q to %q.\n"+
+			"  pause and scheduler history updates must preserve the trigger identity; "+
+			"create a differently named trigger for a different definition",
+			r.Name, stored.Identity(), r.Identity())
+	}
+	// The first successful rewrite migrates a legacy record to an explicit ID.
+	// The derived value was checked against the stored definition above, so status
+	// and history changes cannot accidentally mint a new durable identity.
+	if r.ID == "" {
+		r.ID = stored.Identity()
+	}
 	return s.write(r)
 }
 

@@ -15,6 +15,7 @@ var phaseOneCapabilities = []capability.Name{
 	capability.Name(CapabilityAnswer),
 	capability.Name(CapabilityWait),
 	capability.Name(CapabilitySubscribe),
+	capability.Name(CapabilityRecover),
 }
 
 // capabilityResolver adapts host requests to internal capability resolution.

@@ -21,13 +21,18 @@ import (
 
 type storageBackend struct {
 	storage      JobStorage
+	coordination Coordination
+	heartbeat    time.Duration
 	provider     TextProvider
 	now          func() time.Time
 	capabilities *capabilityResolver
 
-	mu      sync.Mutex
-	workers map[JobID]*storageWorker
-	closed  bool
+	mu       sync.Mutex
+	workers  map[JobID]*storageWorker
+	closed   bool
+	recover  bool
+	recoverW sync.WaitGroup
+	recoverC chan struct{}
 }
 
 type storedJobMetadata struct {
@@ -45,17 +50,35 @@ func newBackend(options Options) backend {
 			installed[capability] = capability
 		}
 		if options.Provider != nil {
-			installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
+			if options.Coordination == nil {
+				installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
+			} else if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
+				installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
+				installed[CapabilityRecover] = CapabilityRecover
+			}
 		}
 	}
 	resolver, err := newCapabilityResolver(installed, options.Authorizer)
 	if err != nil {
 		panic(err)
 	}
-	return &storageBackend{
-		storage: options.Storage, provider: options.Provider, now: options.Now,
-		capabilities: resolver, workers: map[JobID]*storageWorker{},
+	heartbeat := options.CoordinationHeartbeat
+	if heartbeat <= 0 {
+		heartbeat = 10 * time.Second
 	}
+	backend := &storageBackend{
+		storage: options.Storage, coordination: options.Coordination, heartbeat: heartbeat,
+		provider: options.Provider, now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
+	}
+	if options.Provider != nil && options.Coordination != nil {
+		if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
+			backend.recover = true
+			backend.recoverC = make(chan struct{})
+			backend.recoverW.Add(1)
+			go backend.recoverLoop()
+		}
+	}
+	return backend
 }
 
 func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitResult, error) {
@@ -79,6 +102,30 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	actor := strings.TrimSpace(req.Actor)
 	if actor == "" {
 		actor = bp.Name
+	}
+	requestDigest, err := canonicalSubmitDigest(req, actor, bp.SHA)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "canonicalize submission: "+err.Error())
+	}
+	if key := strings.TrimSpace(req.IdempotencyKey); key != "" {
+		if b.coordination == nil {
+			return SubmitResult{}, invalidArgument(CapabilitySubmit, "idempotency key requires durable coordination")
+		}
+		bound, bindErr := b.coordination.BindSubmission(ctx, SubmissionBinding{
+			Key: key, RequestDigest: requestDigest, JobID: id,
+		})
+		if bindErr != nil {
+			return SubmitResult{}, adaptCoordinationError(CapabilitySubmit, id, bindErr)
+		}
+		id = bound.JobID
+	}
+	if b.coordination != nil {
+		if _, safe := b.storage.(CoordinatedJobStorageV1); !safe {
+			return SubmitResult{}, unavailable(CapabilitySubmit)
+		}
+		if registerErr := b.coordination.RegisterJob(ctx, id); registerErr != nil {
+			return SubmitResult{}, adaptCoordinationError(CapabilitySubmit, id, registerErr)
+		}
 	}
 	mode := "live"
 	if req.Simulated {
@@ -107,13 +154,41 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 		Records:   []StoredRecord{{Data: encoded}},
 	})
 	out := SubmitResult{JobID: id, AcceptedSeq: 1, Status: JobRunning}
+	if err != nil && strings.TrimSpace(req.IdempotencyKey) != "" && errors.Is(err, ErrStorageConflict) {
+		job, loadErr := b.inspect(ctx, CapabilitySubmit, id)
+		if loadErr == nil {
+			return SubmitResult{JobID: id, AcceptedSeq: 1, Status: job.Status}, nil
+		}
+	}
 	if err != nil {
 		return out, adaptStorageError(CapabilitySubmit, id, 0, err)
 	}
 	if created.Writer == nil {
 		return out, adaptStorageError(CapabilitySubmit, id, 0, errors.New("storage returned no exclusive writer"))
 	}
+	var executionClaim ExecutionClaim
+	if b.coordination != nil {
+		_ = created.Writer.Close()
+		claim, claimErr := b.coordination.Claim(ctx, id)
+		if claimErr != nil {
+			return out, adaptCoordinationError(CapabilitySubmit, id, claimErr)
+		}
+		storage, safe := b.storage.(CoordinatedJobStorageV1)
+		if !safe {
+			return out, adaptCoordinationError(CapabilitySubmit, id, errors.New("job storage cannot fence claimed writers"))
+		}
+		writer, openErr := storage.OpenClaimedWriter(ctx, claim)
+		if openErr != nil {
+			return out, adaptStorageError(CapabilitySubmit, id, 0, openErr)
+		}
+		executionClaim = claim
+		created.Writer = writer
+	}
 	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.now, start)
+	if b.coordination != nil {
+		worker.coordination = &workerCoordination{port: b.coordination, claim: executionClaim}
+		worker.heartbeat = b.heartbeat
+	}
 	if err := b.installWorker(worker); err != nil {
 		_ = created.Writer.Close()
 		return out, adaptStorageError(CapabilitySubmit, id, 0, err)
@@ -145,12 +220,34 @@ func (b *storageBackend) inspect(ctx context.Context, op Capability, id JobID) (
 	if err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
+	if coordination, ok := b.coordination.(CoordinationProjectionV1); ok {
+		coordinated, inspectErr := coordination.InspectJob(ctx, id)
+		if inspectErr != nil {
+			return Job{}, adaptCoordinationError(op, id, inspectErr)
+		}
+		projection.AttemptCount = coordinated.AttemptCount
+		projection.ReconciliationRequired = coordinated.ReconciliationRequired
+		projection.CancellationRequested = coordinated.CancellationRequested
+		if coordinated.Status.Terminal() {
+			projection.Status = coordinated.Status
+			projection.Terminal = true
+		}
+	}
 	return projection, nil
 }
 
 func (b *storageBackend) Cancel(ctx context.Context, req CancelRequest) (Job, error) {
 	if err := b.authorize(ctx, req.Principal, CapabilityCancel, req.JobID); err != nil {
 		return Job{}, err
+	}
+	if b.coordination != nil {
+		cancellation, ok := b.coordination.(CoordinationCancellationV1)
+		if !ok {
+			return Job{}, unavailable(CapabilityCancel)
+		}
+		if err := cancellation.RequestCancellation(ctx, req.JobID, strings.TrimSpace(req.Reason)); err != nil {
+			return Job{}, adaptCoordinationError(CapabilityCancel, req.JobID, err)
+		}
 	}
 	return b.mutate(ctx, CapabilityCancel, req.JobID, "", func(events []kernel.Event) (kernel.Event, error) {
 		state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
@@ -231,6 +328,13 @@ func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, it
 		}
 		return b.inspect(ctx, op, id)
 	}
+	if b.coordination != nil {
+		if op == CapabilityCancel {
+			return b.inspect(ctx, op, id)
+		}
+		return Job{}, mutationError(CodeConflict, op, id, itemID,
+			errors.New("job has no local claim owner; retry after recovery acquires the job"))
+	}
 	writer, err := b.storage.OpenWriter(ctx, id)
 	if err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
@@ -276,6 +380,28 @@ func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error)
 			}
 			continue
 		}
+		if b.coordination != nil {
+			claimed, claimErr := b.claimWorker(ctx, req.JobID)
+			if claimErr == nil {
+				if err := claimed.wait(ctx); err != nil && !errors.Is(err, errAlreadyTerminal) {
+					return Job{}, adaptCoordinationError(CapabilityWait, req.JobID, err)
+				}
+				continue
+			}
+			if isCoordinationConflict(claimErr) {
+				timer := time.NewTimer(25 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					return Job{}, ctx.Err()
+				case <-timer.C:
+					continue
+				}
+			}
+			return Job{}, adaptCoordinationError(CapabilityWait, req.JobID, claimErr)
+		}
 		return Job{}, adaptStorageError(CapabilityWait, req.JobID, job.Sequence,
 			errors.New("job is not resident in this host"))
 	}
@@ -313,14 +439,23 @@ func (b *storageBackend) Close() error {
 		return nil
 	}
 	b.closed = true
+	if b.recoverC != nil {
+		close(b.recoverC)
+	}
 	workers := make([]*storageWorker, 0, len(b.workers))
 	for _, worker := range b.workers {
 		workers = append(workers, worker)
 	}
 	b.mu.Unlock()
+	b.recoverW.Wait()
 	var closeErr error
 	for _, worker := range workers {
 		if err := worker.close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	if b.coordination != nil {
+		if err := b.coordination.Close(); err != nil && closeErr == nil {
 			closeErr = err
 		}
 	}
@@ -386,6 +521,59 @@ func (b *storageBackend) clock() time.Time {
 	return time.Now()
 }
 
+func (b *storageBackend) claimWorker(ctx context.Context, id JobID) (*storageWorker, error) {
+	storage, ok := b.storage.(CoordinatedJobStorageV1)
+	if !ok {
+		return nil, errors.New("job storage cannot fence claimed writers")
+	}
+	claim, err := b.coordination.Claim(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := storage.OpenClaimedWriter(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	record, err := b.storage.Load(ctx, id)
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	events, _, err := b.readEvents(ctx, id)
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	worker, err := newRecoveredStorageWorker(id, record, writer, b.provider, b.now, events,
+		&workerCoordination{port: b.coordination, claim: claim}, b.heartbeat)
+	if err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if cancellation, ok := b.coordination.(CoordinationCancellationV1); ok {
+		requested, cancellationErr := cancellation.CancellationRequested(ctx, id)
+		if cancellationErr != nil {
+			_ = writer.Close()
+			return nil, cancellationErr
+		}
+		if requested {
+			if appendErr := worker.appendRecoveredCancellation(ctx); appendErr != nil {
+				_ = writer.Close()
+				return nil, appendErr
+			}
+		}
+	}
+	if err := b.installWorker(worker); err != nil {
+		_ = writer.Close()
+		if existing := b.worker(id); existing != nil {
+			return existing, nil
+		}
+		return nil, err
+	}
+	worker.start()
+	return worker, nil
+}
+
 func (b *storageBackend) installWorker(worker *storageWorker) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -395,8 +583,56 @@ func (b *storageBackend) installWorker(worker *storageWorker) error {
 	if b.workers[worker.id] != nil {
 		return errors.New("job already has a resident writer")
 	}
+	worker.onExit = b.removeWorker
 	b.workers[worker.id] = worker
 	return nil
+}
+
+func (b *storageBackend) removeWorker(worker *storageWorker) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.workers[worker.id] == worker {
+		delete(b.workers, worker.id)
+	}
+}
+
+func (b *storageBackend) recoverLoop() {
+	defer b.recoverW.Done()
+	const retryDelay = 25 * time.Millisecond
+	for {
+		select {
+		case <-b.recoverC:
+			return
+		default:
+		}
+		records, err := b.storage.List(context.Background())
+		if err == nil {
+			for _, record := range records {
+				select {
+				case <-b.recoverC:
+					return
+				default:
+				}
+				job, inspectErr := b.inspect(context.Background(), CapabilityRecover, record.ID)
+				if inspectErr != nil || job.Terminal || b.worker(record.ID) != nil {
+					continue
+				}
+				_, claimErr := b.claimWorker(context.Background(), record.ID)
+				if claimErr != nil && !isCoordinationConflict(claimErr) {
+					continue
+				}
+			}
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-b.recoverC:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (b *storageBackend) worker(id JobID) *storageWorker {
@@ -472,6 +708,41 @@ func decodeStoredEvent(record StoredRecord) (kernel.Event, error) {
 	}
 	event.Seq = record.Sequence
 	return event, nil
+}
+
+func canonicalSubmitDigest(req SubmitRequest, actor, blueprintSHA string) (string, error) {
+	body, err := json.Marshal(struct {
+		Schema       string  `json:"schema"`
+		PrincipalID  string  `json:"principal_id"`
+		Actor        string  `json:"actor"`
+		BlueprintSHA string  `json:"blueprint_sha"`
+		Prompt       string  `json:"prompt"`
+		BudgetUSD    float64 `json:"budget_usd"`
+		MaxTurns     int     `json:"max_turns"`
+		Simulated    bool    `json:"simulated"`
+	}{"arxi.host.submit/v1", req.Principal.ID, actor, blueprintSHA, req.Prompt, req.BudgetUSD, req.MaxTurns, req.Simulated})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func isCoordinationConflict(err error) bool {
+	if errors.Is(err, ErrStorageConflict) {
+		return true
+	}
+	var hostErr *Error
+	return errors.As(err, &hostErr) && hostErr.Code == CodeConflict
+}
+
+func adaptCoordinationError(op Capability, id JobID, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	out := newError(CodeConflict, string(op), err.Error(), err)
+	out.JobID = id
+	return out
 }
 
 func newStorageJobID(now time.Time) string {

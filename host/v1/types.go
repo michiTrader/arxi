@@ -20,13 +20,14 @@ type Principal struct {
 // SubmitRequest contains source text and Phase 1 execution controls. Actor is a
 // logical name; resolving filesystem paths remains an adapter responsibility.
 type SubmitRequest struct {
-	Principal Principal `json:"principal"`
-	Actor     string    `json:"actor"`
-	Blueprint string    `json:"blueprint"`
-	Prompt    string    `json:"prompt"`
-	BudgetUSD float64   `json:"budget_usd,omitempty"`
-	MaxTurns  int       `json:"max_turns,omitempty"`
-	Simulated bool      `json:"simulated,omitempty"`
+	Principal      Principal `json:"principal"`
+	Actor          string    `json:"actor"`
+	Blueprint      string    `json:"blueprint"`
+	Prompt         string    `json:"prompt"`
+	BudgetUSD      float64   `json:"budget_usd,omitempty"`
+	MaxTurns       int       `json:"max_turns,omitempty"`
+	Simulated      bool      `json:"simulated,omitempty"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 }
 
 // SubmitResult confirms durable acceptance. AcceptedSeq is the confirmed
@@ -97,12 +98,13 @@ const (
 	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
 	JobExpired   JobStatus = "expired"
+	JobUnknown   JobStatus = "unknown"
 )
 
 // Terminal reports whether no further lifecycle mutation is accepted.
 func (s JobStatus) Terminal() bool {
 	switch s {
-	case JobSucceeded, JobFailed, JobCancelled, JobExpired:
+	case JobSucceeded, JobFailed, JobCancelled, JobExpired, JobUnknown:
 		return true
 	default:
 		return false
@@ -111,23 +113,26 @@ func (s JobStatus) Terminal() bool {
 
 // Job is the selected public projection of one job.
 type Job struct {
-	ID           JobID             `json:"id"`
-	Actor        string            `json:"actor,omitempty"`
-	Status       JobStatus         `json:"status"`
-	Terminal     bool              `json:"terminal"`
-	Sequence     int64             `json:"sequence"`
-	Stage        string            `json:"stage,omitempty"`
-	StageIndex   int               `json:"stage_index"`
-	Turns        int               `json:"turns"`
-	MaxTurns     int               `json:"max_turns,omitempty"`
-	Members      []Member          `json:"members,omitempty"`
-	SpentUSD     float64           `json:"spent_usd,omitempty"`
-	TreeSpentUSD float64           `json:"tree_spent_usd,omitempty"`
-	BudgetUSD    float64           `json:"budget_usd,omitempty"`
-	Simulated    bool              `json:"simulated,omitempty"`
-	Pending      []PendingDecision `json:"pending,omitempty"`
-	UnknownWork  int               `json:"unknown_work,omitempty"`
-	Result       string            `json:"result,omitempty"`
+	ID                     JobID             `json:"id"`
+	Actor                  string            `json:"actor,omitempty"`
+	Status                 JobStatus         `json:"status"`
+	Terminal               bool              `json:"terminal"`
+	Sequence               int64             `json:"sequence"`
+	Stage                  string            `json:"stage,omitempty"`
+	StageIndex             int               `json:"stage_index"`
+	Turns                  int               `json:"turns"`
+	MaxTurns               int               `json:"max_turns,omitempty"`
+	Members                []Member          `json:"members,omitempty"`
+	SpentUSD               float64           `json:"spent_usd,omitempty"`
+	TreeSpentUSD           float64           `json:"tree_spent_usd,omitempty"`
+	BudgetUSD              float64           `json:"budget_usd,omitempty"`
+	Simulated              bool              `json:"simulated,omitempty"`
+	Pending                []PendingDecision `json:"pending,omitempty"`
+	UnknownWork            int               `json:"unknown_work,omitempty"`
+	AttemptCount           uint64            `json:"attempt_count,omitempty"`
+	ReconciliationRequired bool              `json:"reconciliation_required,omitempty"`
+	CancellationRequested  bool              `json:"cancellation_requested,omitempty"`
+	Result                 string            `json:"result,omitempty"`
 }
 
 // Member is one participant in the selected job projection.

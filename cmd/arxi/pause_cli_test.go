@@ -220,7 +220,7 @@ func TestRunPauseTwiceRecordsOnePause(t *testing.T) {
 // The lock is written by hand with a pid that is not this test's, because the
 // alternative is racing a real driver, and a test that has to win a race to
 // assert a message is a test that fails for the wrong reason.
-func TestRunPauseOnADrivenRunDoesNotAdviseDeletingTheLock(t *testing.T) {
+func TestRunPauseIgnoresAnUnlockedLegacySentinel(t *testing.T) {
 	dir := t.TempDir()
 	const id = "rmthws2dz-93381f43"
 	pausableRun(t, dir, id)
@@ -231,25 +231,11 @@ func TestRunPauseOnADrivenRunDoesNotAdviseDeletingTheLock(t *testing.T) {
 	}
 
 	out, errb, code := arxiStreams(t, dir, "run", "pause", id)
-	if code != 1 {
-		t.Fatalf("exit %d, want 1\nstdout:\n%s\nstderr:\n%s", code, out, errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: an unlocked sentinel must not block recovery\nstdout:\n%s\nstderr:\n%s", code, out, errb)
 	}
-	if !strings.Contains(errb, "pid 424242") {
-		t.Errorf("the refusal does not name the process holding the run:\n%s", errb)
-	}
-	if strings.Contains(errb, "by hand") {
-		t.Errorf("the raw lock error reached the user:\n%s\n"+
-			"  consequence: it advises removing writer.lock after confirming no "+
-			"process is running, and this refusal happens precisely because one "+
-			"is. Two writers produce duplicate seq and an unfoldable log.", errb)
-	}
-	if _, err := os.Stat(lock); err != nil {
-		t.Errorf("the lock of a live writer was removed: %v", err)
-	}
-	for _, ev := range allEvents(t, dir, id) {
-		if ev["type"] == "run.paused" {
-			t.Fatalf("a run that could not be locked was paused anyway:\n%v", ev)
-		}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("inactive lock file survived successful pause: %v", err)
 	}
 }
 
