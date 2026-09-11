@@ -591,8 +591,10 @@ func (c *scheduledClaim) Finish(out arxiexec.Outcome, runErr error) error {
 	defer c.mu.Unlock()
 	attemptState, jobState := job.AttemptFailed, job.JobFailed
 	occurrenceState, settlement := job.OccurrenceCompleted, jobstore.SettlementSpend
-	if runErr != nil {
+	if arxiexec.ClassifyFailure(runErr) == arxiexec.FailureUnknown {
 		attemptState, jobState, occurrenceState, settlement = job.AttemptUnknown, job.JobUnknown, job.OccurrenceUnknown, jobstore.SettlementUnknown
+	} else if runErr != nil {
+		return nil
 	} else if out.State.Status == kernel.StatusCancelled {
 		attemptState, jobState = job.AttemptCancelled, job.JobCancelled
 	} else if out.State.Status == kernel.StatusSucceeded {
