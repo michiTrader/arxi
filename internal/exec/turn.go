@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/authorization"
@@ -176,6 +175,15 @@ func (r *Runner) runDurableTurn(ctx context.Context, w Work, e kernel.SpawnTurn,
 				policy = resolver.ResolveTurnToolPolicy(e, call)
 			}
 			if policy == "ask" {
+				if !r.exactAuthorizationEnabled() {
+					outcome, err := r.runStoppedToolChild(ctx, w, e, round, call, x, &progress)
+					if err != nil {
+						return nil, err
+					}
+					entry := TurnToolEntry{Call: call, Outcome: outcome}
+					trace = append(trace, TurnEntry{Tool: &entry})
+					return x.FinishTurn(e, trace)
+				}
 				if err := r.suspendAuthorization(w, e, round, callIndex, req, trace, seen, calls, call, &progress); err != nil {
 					return nil, err
 				}
@@ -399,6 +407,12 @@ func (r *Runner) runModelChild(ctx context.Context, parent Work, round int, req 
 	return resp, nil
 }
 
+func (r *Runner) exactAuthorizationEnabled() bool {
+	cfg := r.Authorization
+	return r.JobID != "" && r.RunID != "" && cfg.ToolSchemaVersion != "" && cfg.PolicyVersion != "" &&
+		cfg.WorkspaceProfileID != "" && cfg.TTLMS > 0 && r.Now != nil
+}
+
 func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effect kernel.ResumeAuthorization) ([]kernel.Event, error) {
 	events, err := r.Log.Read(1, 0)
 	if err != nil {
@@ -407,9 +421,8 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	state, _ := kernel.Fold(kernel.State{}, events, r.Config)
 	a := state.Authorization(effect.AuthorizationID)
 	if a == nil || a.Schema != "arxi.authorization/v1" || a.SuspensionID != effect.SuspensionID ||
-		a.ActionDigest != effect.ActionDigest || a.Decision != "granted" || a.GrantEventID == "" ||
-		a.ConsumingWorkID != "" {
-		return nil, NotDispatched(fmt.Errorf("authorization %s is not a current unconsumed exact grant", effect.AuthorizationID))
+		a.ActionDigest != effect.ActionDigest || a.Decision != "granted" || a.GrantEventID == "" {
+		return nil, NotDispatched(fmt.Errorf("authorization %s is not a current exact grant", effect.AuthorizationID))
 	}
 	var suspensionJSON, suspensionDigest string
 	for _, event := range events {
@@ -460,6 +473,12 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	if child.Status == "completed" {
 		return r.continueAuthorization(ctx, resumeWork, suspension, child)
 	}
+	if a.ConsumingWorkID != "" && a.ConsumingWorkID != child.ID {
+		return nil, NotDispatched(fmt.Errorf("authorization %s was consumed by different work %s", a.ID, a.ConsumingWorkID))
+	}
+	if a.ConsumingWorkID != "" && !child.Started {
+		return nil, NotDispatched(fmt.Errorf("authorization %s consumption has no matching started child", a.ID))
+	}
 	if child.Started {
 		if child.Status == "unknown" {
 			return nil, fmt.Errorf("%w: authorized child %s has a durable unknown outcome", ErrUnknownWork, child.ID)
@@ -494,6 +513,9 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	authorized, ok := r.Executor.(AuthorizedTurnToolExecutor)
 	if !ok {
 		return nil, NotDispatched(fmt.Errorf("executor cannot dispatch exact authorized native tools"))
+	}
+	if a.ConsumingWorkID != "" {
+		return nil, NotDispatched(fmt.Errorf("authorization %s was already consumed", a.ID))
 	}
 	head := r.Log.Head()
 	if err := r.register(childMetadata(r, &child, "tool", WorkNonIdempotent, false)); err != nil {

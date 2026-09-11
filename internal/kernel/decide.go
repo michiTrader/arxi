@@ -964,7 +964,6 @@ func applyAuthorizationConsumed(out *State, e Event) []Effect {
 		return nil
 	}
 	a.ConsumingWorkID = e.Str("work_id")
-	unblockAuthorizationMember(out, *a, e.Seq)
 	return []Effect{CancelTimer{ID: authorizationTimerID(a.ID)}}
 }
 

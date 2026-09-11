@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/michiTrader/arxi/internal/kernel"
@@ -105,8 +106,12 @@ func (x *nativeLoopExecutor) FinishTurn(e kernel.SpawnTurn, trace []TurnEntry) (
 }
 
 func exactTestRunner(log *memLog, x *nativeLoopExecutor) *Runner {
+	config := kernel.Config{Members: []kernel.MemberConfig{{Name: "backend"}}}
+	_, _ = log.Append([]kernel.Event{{ID: "run-started", Type: kernel.RunStarted, Source: kernel.SourceHuman,
+		Payload: map[string]any{"run_id": "run-exact", "actor": "backend"}}})
 	return &Runner{Log: log, Clock: NewVirtualClock(), Executor: x, RunID: "run-exact", JobID: "job-exact",
-		Now: func() string { return "2026-09-11T12:00:00Z" }, Authorization: AuthorizationConfig{
+		Config: config,
+		Now:    func() string { return "2026-09-11T12:00:00Z" }, Authorization: AuthorizationConfig{
 			ToolSchemaVersion: "arxi.tools/v1", PolicyVersion: "arxi.policy/v1",
 			WorkspaceProfileID: "workspace-profile-1", TTLMS: 60_000,
 		}}
@@ -123,29 +128,30 @@ func exactGrant(t *testing.T, r *Runner, log *memLog) kernel.ResumeAuthorization
 	if request.Type == "" {
 		t.Fatal("policy=ask did not persist authorization.requested: the exact call cannot be approved")
 	}
-	grant := kernel.Event{ID: "grant-exact", Type: kernel.AuthorizationGranted, Source: kernel.SourceHuman,
+	request.Seq = log.Head() + 1
+	grant := kernel.Event{Seq: request.Seq, ID: "grant-exact", Type: kernel.AuthorizationGranted, Source: kernel.SourceHuman,
 		Payload: map[string]any{"schema": "arxi.authorization/v1", "authorization_id": request.Str("authorization_id"),
 			"action_digest": request.Str("action_digest"), "approver_principal": "operator:alice",
 			"grant_event_id": "grant-exact", "expires_at": request.Str("expires_at")}}
 	if _, err := log.Append([]kernel.Event{grant}); err != nil {
 		t.Fatal(err)
 	}
-	state, effects := kernel.Decide(kernel.State{Members: []kernel.Member{{Name: "backend"}}, Authorizations: []kernel.Authorization{{
-		Schema: "arxi.authorization/v1", ID: request.Str("authorization_id"), InboxID: request.Str("inbox_id"),
-		RequesterPrincipal: request.Str("requester_principal"), SuspensionID: request.Str("suspension_id"),
-		ParentWorkID: request.Str("parent_work_id"), ProviderCallID: request.Str("provider_call_id"), Tool: request.Str("tool"),
-		ArgumentDigest: request.Str("argument_digest"), ActionDigest: request.Str("action_digest"),
-		ToolSchemaVersion: request.Str("tool_schema_version"), PolicyVersion: request.Str("policy_version"),
-		WorkspaceProfileID: request.Str("workspace_profile_id"), ExpiresAt: request.Str("expires_at"),
-	}}, Inbox: []kernel.InboxItem{{ID: request.Str("inbox_id"), Kind: "tool_approval", AuthorizationID: request.Str("authorization_id"), ActionDigest: request.Str("action_digest")}}}, grant, kernel.Config{})
-	_ = state
-	for _, effect := range effects {
-		if resume, ok := effect.(kernel.ResumeAuthorization); ok {
-			return resume
-		}
+	resume := kernel.ResumeAuthorization{AuthorizationID: request.Str("authorization_id"),
+		SuspensionID: request.Str("suspension_id"), ActionDigest: request.Str("action_digest")}
+	state := kernel.State{RunID: "run-exact", Status: kernel.StatusRunning,
+		Members: []kernel.Member{{Name: "backend", State: kernel.MemberWaiting}},
+		Inbox:   []kernel.InboxItem{{ID: request.Str("inbox_id"), Kind: "tool_approval", AuthorizationID: request.Str("authorization_id"), ActionDigest: request.Str("action_digest")}},
+		Authorizations: []kernel.Authorization{{Schema: "arxi.authorization/v1", ID: request.Str("authorization_id"), InboxID: request.Str("inbox_id"),
+			RequesterPrincipal: request.Str("requester_principal"), SuspensionID: request.Str("suspension_id"), ParentWorkID: request.Str("parent_work_id"),
+			ProviderCallID: request.Str("provider_call_id"), Tool: request.Str("tool"), ArgumentDigest: request.Str("argument_digest"),
+			ActionDigest: request.Str("action_digest"), ToolSchemaVersion: request.Str("tool_schema_version"), PolicyVersion: request.Str("policy_version"),
+			WorkspaceProfileID: request.Str("workspace_profile_id"), ExpiresAt: request.Str("expires_at")}},
 	}
-	t.Fatal("authorization.granted did not produce ResumeAuthorization: approval would never execute the original call")
-	return kernel.ResumeAuthorization{}
+	state, _ = kernel.Decide(state, log.events[len(log.events)-1], kernel.Config{})
+	if a := state.Authorization(resume.AuthorizationID); a == nil || a.Decision != "granted" {
+		t.Fatalf("authorization.granted did not fold into a current grant: exact resume would be refused; state=%#v", state.Authorizations)
+	}
+	return resume
 }
 
 func TestExactAuthorizationSuspendsBeforeToolStartAndResumesOriginalCall(t *testing.T) {
@@ -174,7 +180,7 @@ func TestExactAuthorizationSuspendsBeforeToolStartAndResumesOriginalCall(t *test
 	}
 	resume := exactGrant(t, r, log)
 	x.policies["provider-call-7"] = "deny"
-	if _, err := r.RunStep(context.Background(), kernel.Event{Seq: log.Head(), ID: "grant-exact", Type: kernel.AuthorizationGranted}, []kernel.Effect{resume}); err != nil {
+	if _, err := r.resumeAuthorization(context.Background(), Work{Source: kernel.Event{ID: "grant-exact"}}, resume); err != nil {
 		t.Fatal(err)
 	}
 	if x.authorizedToolRun != 1 || len(x.requests) != 2 {
