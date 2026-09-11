@@ -30,6 +30,7 @@ type storageWorker struct {
 	stop      chan struct{}
 	closeOnce sync.Once
 	err       error
+	onExit    func(*storageWorker)
 }
 
 type storageCommand struct {
@@ -64,6 +65,11 @@ func (w *storageWorker) start() { go w.run() }
 
 func (w *storageWorker) run() {
 	defer close(w.done)
+	defer func() {
+		if w.onExit != nil {
+			w.onExit(w)
+		}
+	}()
 	defer func() { w.setErr(w.writer.Close()) }()
 	metadata, err := decodeStoredMetadata(w.record)
 	if err != nil {
@@ -132,7 +138,8 @@ func (w *storageWorker) run() {
 		if runErr != nil {
 			w.setErr(runErr)
 		}
-		if w.coordination != nil && (runErr != nil || out.StoppedBy == exec.StopTerminal) {
+		terminal := out.StoppedBy == exec.StopTerminal || exec.ClassifyFailure(runErr) == exec.FailureUnknown
+		if w.coordination != nil && terminal {
 			if err := w.coordination.complete(out, runErr); err != nil {
 				w.setErr(err)
 			}
@@ -246,8 +253,10 @@ type workerCoordination struct {
 
 func (c *workerCoordination) complete(out exec.Outcome, runErr error) error {
 	outcome := ExecutionFailed
-	if runErr != nil {
+	if exec.ClassifyFailure(runErr) == exec.FailureUnknown {
 		outcome = ExecutionUnknown
+	} else if runErr != nil {
+		return nil
 	} else {
 		switch out.State.Status {
 		case kernel.StatusSucceeded:
