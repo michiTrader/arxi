@@ -406,7 +406,7 @@ func decideExactStore(store *logstore.Store, cfg kernel.Config, id string, reply
 		events[0].Payload["authorization_id"] = a.ID
 		events[0].Payload["action_digest"] = a.ActionDigest
 		authorization := authorizationDecisionEvent(*a, reply, principal, at)
-		events = append(events, authorization)
+		events = []kernel.Event{authorization, events[0]}
 	}
 	written, err := store.AppendIfSeq(st.Seq, events)
 	if err != nil {
@@ -415,9 +415,9 @@ func decideExactStore(store *logstore.Store, cfg kernel.Config, id string, reply
 	if len(written) != len(events) {
 		return DecisionResult{}, fmt.Errorf("inbox: appended %d decision records and the log reported %d", len(events), len(written))
 	}
-	result := DecisionResult{Reply: written[0]}
+	result := DecisionResult{Reply: written[len(written)-1]}
 	if len(written) == 2 {
-		result.Authorization = &written[1]
+		result.Authorization = &written[0]
 	}
 	return result, nil
 }

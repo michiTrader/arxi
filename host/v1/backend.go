@@ -346,7 +346,8 @@ func (b *storageBackend) decisionEvents(events []kernel.Event, principal string,
 	} else {
 		payload["principal"], payload["reason"] = principal, text
 	}
-	return []kernel.Event{reply, {ID: eventID, Type: typeName, Ts: at, Source: kernel.SourceHuman, Payload: payload}}, nil
+	authorization := kernel.Event{ID: eventID, Type: typeName, Ts: at, Source: kernel.SourceHuman, Payload: payload}
+	return []kernel.Event{authorization, reply}, nil
 }
 
 func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, itemID ItemID,
