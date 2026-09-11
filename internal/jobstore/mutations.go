@@ -30,7 +30,7 @@ func (s *state) dispatch(expected Revision, value job.PreparedDispatch, now time
 		return nil, err
 	}
 	if value.JobID == "" || value.AttemptID == "" || value.Fence == 0 || value.Provider == "" ||
-		value.DispatchKey == "" || value.WorkID == "" || value.RequestDigest == "" {
+		value.DispatchKey == "" || value.WorkID == "" || value.RequestDigest == "" || !validWorkClass(value.WorkClass) {
 		return nil, ErrConflict
 	}
 	if _, _, _, err := s.active(value.JobID, value.AttemptID, value.Fence, now); err != nil {
@@ -51,7 +51,8 @@ func (s *state) receipt(expected Revision, value job.Receipt, now time.Time) ([]
 	}
 	if value.JobID == "" || value.AttemptID == "" || value.Fence == 0 || value.Provider == "" || value.ExternalID == "" ||
 		value.DispatchKey == "" || value.WorkID == "" || value.RequestDigest == "" || value.ObservedAt.IsZero() ||
-		value.OutcomeDigest == "" || !validOutcome(value.Status) {
+		value.OutcomeDigest == "" || len(value.CanonicalOutcome) == 0 ||
+		value.OutcomeDigest != job.CanonicalOutcomeDigest(value.CanonicalOutcome) || !validOutcome(value.Status) {
 		return nil, ErrConflict
 	}
 	if _, _, _, err := s.active(value.JobID, value.AttemptID, value.Fence, now); err != nil {
@@ -69,6 +70,10 @@ func (s *state) receipt(expected Revision, value job.Receipt, now time.Time) ([]
 		return nil, ErrConflict
 	}
 	return []record{{Kind: kindReceipt, Data: encodeData(value)}}, nil
+}
+
+func validWorkClass(value job.WorkClass) bool {
+	return value == job.WorkIdempotent || value == job.WorkNonIdempotent
 }
 
 func validOutcome(value job.OutcomeStatus) bool {

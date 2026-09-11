@@ -217,13 +217,13 @@ func TestStoreContractRecordsReceiptsCancellationAndFencedCompletion(t *testing.
 			store := factory.open(t, clock.read)
 			defer store.Close()
 			claim, revision := seedClaim(t, store)
-			dispatch := job.PreparedDispatch{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request"}
+			dispatch := job.PreparedDispatch{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", WorkClass: job.WorkNonIdempotent}
 			var err error
 			revision, err = store.RegisterDispatch(revision, dispatch)
 			if err != nil {
 				t.Fatalf("register prepared dispatch: %v", err)
 			}
-			receipt := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", ObservedAt: clock.now, Status: job.OutcomeSucceeded, OutcomeDigest: "outcome"}
+			receipt := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", ObservedAt: clock.now, Status: job.OutcomeSucceeded, CanonicalOutcome: []byte(`{"ok":true}`), OutcomeDigest: job.CanonicalOutcomeDigest([]byte(`{"ok":true}`))}
 			revision, err = store.RecordReceipt(revision, receipt)
 			if err != nil {
 				t.Fatalf("record receipt evidence: %v", err)
@@ -258,11 +258,11 @@ func TestStoreContractReceiptsRequireMatchingPreparedDispatch(t *testing.T) {
 			store := factory.open(t, clock.read)
 			defer store.Close()
 			claim, revision := seedClaim(t, store)
-			valid := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", ObservedAt: clock.now, Status: job.OutcomeSucceeded, OutcomeDigest: "outcome"}
+			valid := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", ObservedAt: clock.now, Status: job.OutcomeSucceeded, CanonicalOutcome: []byte(`{"ok":true}`), OutcomeDigest: job.CanonicalOutcomeDigest([]byte(`{"ok":true}`))}
 			if _, err := store.RecordReceipt(revision, valid); !errors.Is(err, ErrConflict) {
 				t.Fatalf("unregistered receipt returned %v, want ErrConflict: provider evidence must bind to durable prepared work", err)
 			}
-			dispatch := job.PreparedDispatch{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request"}
+			dispatch := job.PreparedDispatch{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", WorkClass: job.WorkNonIdempotent}
 			var err error
 			revision, err = store.RegisterDispatch(revision, dispatch)
 			if err != nil {
