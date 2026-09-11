@@ -186,6 +186,80 @@ func TestExactAuthorizationSuspendsBeforeToolStartAndResumesOriginalCall(t *test
 	}
 }
 
+func TestExactAuthorizationResumeRaceConsumesAndRunsOnce(t *testing.T) {
+	log := newMemLog()
+	x := &nativeLoopExecutor{policies: map[string]string{"provider-call-7": "ask"}, toolResultText: "once"}
+	r := exactTestRunner(log, x)
+	if _, err := r.RunStep(context.Background(), testSource(23), []kernel.Effect{kernel.SpawnTurn{Agent: "backend"}}); err != nil {
+		t.Fatal(err)
+	}
+	resume := exactGrant(t, r, log)
+	x.policies["provider-call-7"] = "allow"
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = r.resumeAuthorization(context.Background(), Work{Source: kernel.Event{ID: "grant-exact"}}, resume)
+		}(i)
+	}
+	wg.Wait()
+	if x.authorizedToolRun != 1 {
+		t.Fatalf("racing resumes invoked the runner %d times, want one: grant consumption must be the dispatch lock", x.authorizedToolRun)
+	}
+	consumed, started := 0, 0
+	for _, event := range log.events {
+		if event.Type == kernel.AuthorizationConsumed {
+			consumed++
+		}
+		if event.Type == kernel.ExecWorkStarted && event.Str("work_scope") == "turn_child" {
+			for _, prepared := range log.events {
+				if prepared.Type == kernel.ExecWorkPrepared && prepared.Str("work_id") == event.Str("work_id") && prepared.Str("child_kind") == "tool" {
+					started++
+				}
+			}
+		}
+	}
+	if consumed != 1 || started != 1 {
+		t.Fatalf("racing resumes wrote consume/start = %d/%d, want 1/1: the authoritative CAS batch was not single-use", consumed, started)
+	}
+}
+
+func TestExactAuthorizationStartedCrashBecomesUnknownWithoutRedispatch(t *testing.T) {
+	log := newMemLog()
+	x := &nativeLoopExecutor{policies: map[string]string{"provider-call-7": "ask"}}
+	r := exactTestRunner(log, x)
+	if _, err := r.RunStep(context.Background(), testSource(24), []kernel.Effect{kernel.SpawnTurn{Agent: "backend"}}); err != nil {
+		t.Fatal(err)
+	}
+	resume := exactGrant(t, r, log)
+	var request kernel.Event
+	var childID, parentID string
+	for _, event := range log.events {
+		if event.Type == kernel.AuthorizationRequested {
+			request = event
+		}
+		if event.Type == kernel.ExecWorkPrepared && event.Str("child_kind") == "tool" {
+			childID, parentID = event.Str("work_id"), event.Str("parent_work_id")
+		}
+	}
+	_, err := log.AppendIfSeq(log.Head(), []kernel.Event{
+		{Type: kernel.AuthorizationConsumed, Payload: map[string]any{"schema": "arxi.authorization/v1", "authorization_id": request.Str("authorization_id"), "action_digest": request.Str("action_digest"), "grant_event_id": "grant-exact", "work_id": childID}},
+		{Type: kernel.ExecWorkStarted, Payload: map[string]any{"work_id": childID, "parent_work_id": parentID, "work_scope": "turn_child"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.resumeAuthorization(context.Background(), Work{}, resume)
+	if !errors.Is(err, ErrUnknownWork) {
+		t.Fatalf("resume after consume/start = %v, want ErrUnknownWork: non-idempotent work must not redispatch", err)
+	}
+	if x.authorizedToolRun != 0 {
+		t.Fatalf("resume after consume/start invoked runner %d times: crash recovery duplicated a potentially mutating call", x.authorizedToolRun)
+	}
+}
+
 func TestExactAuthorizationRejectsChangedSuspensionBytes(t *testing.T) {
 	log := newMemLog()
 	x := &nativeLoopExecutor{policies: map[string]string{"provider-call-7": "ask"}}
