@@ -127,10 +127,56 @@ func (c *hostCoordination) Complete(_ context.Context, claim hostv1.ExecutionCla
 	}
 }
 
+func (c *hostCoordination) InspectJob(_ context.Context, id hostv1.JobID) (hostv1.CoordinationJob, error) {
+	stored, ok := c.store.View().Jobs[job.JobID(id)]
+	if !ok {
+		return hostv1.CoordinationJob{}, hostv1.ErrJobNotFound
+	}
+	status := hostv1.JobRunning
+	switch stored.State {
+	case job.JobAccepted:
+		status = hostv1.JobQueued
+	case job.JobSucceeded:
+		status = hostv1.JobSucceeded
+	case job.JobFailed:
+		status = hostv1.JobFailed
+	case job.JobCancelled:
+		status = hostv1.JobCancelled
+	case job.JobUnknown:
+		status = hostv1.JobUnknown
+	}
+	return hostv1.CoordinationJob{Status: status, AttemptCount: stored.AttemptCount,
+		ReconciliationRequired: stored.State == job.JobUnknown,
+		CancellationRequested:  stored.CancellationRequested}, nil
+}
+
+func (c *hostCoordination) RequestCancellation(_ context.Context, id hostv1.JobID, reason string) error {
+	for {
+		view := c.store.View()
+		_, err := c.store.Cancel(view.Revision, jobstore.Cancellation{JobID: job.JobID(id), Actor: "host", Reason: reason})
+		if errors.Is(err, jobstore.ErrRevision) {
+			continue
+		}
+		return err
+	}
+}
+
+func (c *hostCoordination) CancellationRequested(_ context.Context, id hostv1.JobID) (bool, error) {
+	stored, ok := c.store.View().Jobs[job.JobID(id)]
+	if !ok {
+		return false, hostv1.ErrJobNotFound
+	}
+	return stored.CancellationRequested, nil
+}
+
 func (c *hostCoordination) Close() error { return c.store.Close() }
 
 func publicExecutionClaim(claim job.Claim) hostv1.ExecutionClaim {
 	return hostv1.ExecutionClaim{JobID: hostv1.JobID(claim.JobID), AttemptID: string(claim.AttemptID), Fence: uint64(claim.Fence)}
 }
 
-var _ hostv1.Coordination = (*hostCoordination)(nil)
+var (
+	_ hostv1.Coordination               = (*hostCoordination)(nil)
+	_ hostv1.CoordinationProjectionV1   = (*hostCoordination)(nil)
+	_ hostv1.CoordinationCancellationV1 = (*hostCoordination)(nil)
+)

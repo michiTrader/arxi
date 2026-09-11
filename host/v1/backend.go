@@ -240,6 +240,15 @@ func (b *storageBackend) Cancel(ctx context.Context, req CancelRequest) (Job, er
 	if err := b.authorize(ctx, req.Principal, CapabilityCancel, req.JobID); err != nil {
 		return Job{}, err
 	}
+	if b.coordination != nil {
+		cancellation, ok := b.coordination.(CoordinationCancellationV1)
+		if !ok {
+			return Job{}, unavailable(CapabilityCancel)
+		}
+		if err := cancellation.RequestCancellation(ctx, req.JobID, strings.TrimSpace(req.Reason)); err != nil {
+			return Job{}, adaptCoordinationError(CapabilityCancel, req.JobID, err)
+		}
+	}
 	return b.mutate(ctx, CapabilityCancel, req.JobID, "", func(events []kernel.Event) (kernel.Event, error) {
 		state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
 		if state.Status.Terminal() {
@@ -321,13 +330,6 @@ func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, it
 	}
 	if b.coordination != nil {
 		if op == CapabilityCancel {
-			cancellation, ok := b.coordination.(CoordinationCancellationV1)
-			if !ok {
-				return Job{}, unavailable(op)
-			}
-			if err := cancellation.RequestCancellation(ctx, id, "external host request"); err != nil {
-				return Job{}, adaptCoordinationError(op, id, err)
-			}
 			return b.inspect(ctx, op, id)
 		}
 		return Job{}, mutationError(CodeConflict, op, id, itemID,
