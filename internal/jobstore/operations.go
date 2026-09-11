@@ -82,14 +82,24 @@ func (s *state) admit(expected Revision, value Admission) ([]record, job.Occurre
 		o.NominalAt.IsZero() || o.State != job.OccurrenceAdmitted ||
 		value.Window.TriggerID == "" || value.Window.Period == "" || value.Window.StartsAt.IsZero() ||
 		value.Window.TriggerID != o.TriggerID || !validPeriod(value.Window.Period) ||
+		!value.Window.StartsAt.Equal(canonicalWindowStart(o.NominalAt, value.Window.Period)) ||
+		value.Window.StartsAt.Location() != time.UTC || o.NominalAt.Location() != time.UTC ||
 		o.ID != job.OccurrenceIdentity(o.TriggerID, o.NominalAt) ||
 		!value.Ceiling.Canonical() || value.Ceiling.Coefficient == 0 ||
 		!value.Reserved.Canonical() || value.Reserved.Coefficient == 0 {
 		return nil, job.Occurrence{}, ErrConflict
 	}
 	if old, ok := s.view.Occurrences[o.ID]; ok {
-		if old == o {
-			return nil, old, nil
+		if old.State == job.OccurrenceAdmitted {
+			reservation, exists := s.view.Reservations[o.ReservationID]
+			if old == o && exists && reservation.ID == o.ReservationID && reservation.OccurrenceID == o.ID &&
+				reservation.JobID == o.JobID && reservation.Window == value.Window && reservation.Reserved == value.Reserved {
+				ledger, ledgerExists := s.view.Ledgers[windowKey(value.Window)]
+				if ledgerExists && ledger.Window == value.Window && ledger.Ceiling == value.Ceiling {
+					return nil, old, nil
+				}
+			}
+			return nil, job.Occurrence{}, ErrConflict
 		}
 		if old.State != job.OccurrencePending || old.TriggerID != o.TriggerID || !old.NominalAt.Equal(o.NominalAt) {
 			return nil, job.Occurrence{}, ErrConflict
@@ -170,6 +180,24 @@ func (s *state) heartbeat(expected Revision, jobID job.JobID, attemptID job.Atte
 	}
 	claim.ExpiresAt = now.Add(duration).UTC()
 	return []record{{Kind: kindHeartbeat, Data: encodeData(claim)}}, claim, nil
+}
+
+func canonicalWindowStart(nominal time.Time, period job.PeriodKind) time.Time {
+	nominal = nominal.UTC()
+	switch period {
+	case job.PeriodHour:
+		return nominal.Truncate(time.Hour)
+	case job.PeriodDay:
+		return time.Date(nominal.Year(), nominal.Month(), nominal.Day(), 0, 0, 0, 0, time.UTC)
+	case job.PeriodWeek:
+		day := time.Date(nominal.Year(), nominal.Month(), nominal.Day(), 0, 0, 0, 0, time.UTC)
+		offset := (int(day.Weekday()) + 6) % 7
+		return day.AddDate(0, 0, -offset)
+	case job.PeriodMonth:
+		return time.Date(nominal.Year(), nominal.Month(), 1, 0, 0, 0, 0, time.UTC)
+	default:
+		return time.Time{}
+	}
 }
 
 func validPeriod(period job.PeriodKind) bool {

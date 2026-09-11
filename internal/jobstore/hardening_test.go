@@ -144,6 +144,14 @@ func TestAdmissionRejectsMalformedBindingsBeforeJournalWrite(t *testing.T) {
 				"missing window":            func(value *Admission) { value.Window = job.LedgerWindow{} },
 				"mismatched trigger":        func(value *Admission) { value.Window.TriggerID = "other" },
 				"wrong occurrence identity": func(value *Admission) { value.Occurrence.ID = "invented" },
+				"split daily window":        func(value *Admission) { value.Window.StartsAt = value.Window.StartsAt.Add(time.Hour) },
+				"non-UTC nominal instant": func(value *Admission) {
+					value.Occurrence.NominalAt = value.Occurrence.NominalAt.In(time.FixedZone("other", 3600))
+					value.Occurrence.ID = job.OccurrenceIdentity(value.Occurrence.TriggerID, value.Occurrence.NominalAt)
+				},
+				"non-UTC window boundary": func(value *Admission) {
+					value.Window.StartsAt = value.Window.StartsAt.In(time.FixedZone("other", 3600))
+				},
 			}
 			for name, mutate := range cases {
 				value := admission("occurrence", "job", 100)

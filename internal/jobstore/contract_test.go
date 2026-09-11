@@ -32,7 +32,7 @@ func factories() []storeFactory {
 }
 
 func admission(id, jobID string, amount uint64) Admission {
-	windowStart := time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC)
+	windowStart := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
 	var slotOffset int
 	for _, value := range []byte(id) {
 		slotOffset += int(value)
@@ -156,6 +156,35 @@ func TestStoreContractEnforcesBudgetAndPreservesUnknownHolds(t *testing.T) {
 			}
 			if _, _, err := store.Admit(revision, admission("occurrence-2", "job-2", 500)); !errors.Is(err, ErrBudgetExceeded) {
 				t.Fatalf("unknown hold was released with error %v: ambiguous spend must retain its full reservation until evidence reconciles it", err)
+			}
+		})
+	}
+}
+
+func TestStoreContractDuplicateAdmissionRequiresTheFullAccountingBinding(t *testing.T) {
+	for _, factory := range factories() {
+		t.Run(factory.name, func(t *testing.T) {
+			store := factory.open(t, func() time.Time { return time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC) })
+			defer store.Close()
+			original := admission("occurrence-1", "job-1", 400)
+			_, revision, err := store.Admit(0, original)
+			if err != nil {
+				t.Fatalf("seed admission: %v", err)
+			}
+			cases := map[string]func(*Admission){
+				"window": func(value *Admission) {
+					value.Window.Period = job.PeriodHour
+					value.Window.StartsAt = value.Occurrence.NominalAt.Truncate(time.Hour)
+				},
+				"ceiling":     func(value *Admission) { value.Ceiling = job.NewAmount(900, 2) },
+				"reservation": func(value *Admission) { value.Reserved = job.NewAmount(300, 2) },
+			}
+			for name, mutate := range cases {
+				value := original
+				mutate(&value)
+				if _, _, err := store.Admit(revision, value); !errors.Is(err, ErrConflict) {
+					t.Fatalf("duplicate admission with changed %s returned %v, want ErrConflict: occurrence identity must not conceal a different accounting binding", name, err)
+				}
 			}
 		})
 	}
