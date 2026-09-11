@@ -217,8 +217,13 @@ func TestStoreContractRecordsReceiptsCancellationAndFencedCompletion(t *testing.
 			store := factory.open(t, clock.read)
 			defer store.Close()
 			claim, revision := seedClaim(t, store)
-			receipt := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", ObservedAt: clock.now, Status: job.OutcomeSucceeded, OutcomeDigest: "outcome"}
+			dispatch := job.PreparedDispatch{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request"}
 			var err error
+			revision, err = store.RegisterDispatch(revision, dispatch)
+			if err != nil {
+				t.Fatalf("register prepared dispatch: %v", err)
+			}
+			receipt := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", ObservedAt: clock.now, Status: job.OutcomeSucceeded, OutcomeDigest: "outcome"}
 			revision, err = store.RecordReceipt(revision, receipt)
 			if err != nil {
 				t.Fatalf("record receipt evidence: %v", err)
@@ -246,6 +251,43 @@ func TestStoreContractRecordsReceiptsCancellationAndFencedCompletion(t *testing.
 	}
 }
 
+func TestStoreContractReceiptsRequireMatchingPreparedDispatch(t *testing.T) {
+	for _, factory := range factories() {
+		t.Run(factory.name, func(t *testing.T) {
+			clock := &testClock{now: time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)}
+			store := factory.open(t, clock.read)
+			defer store.Close()
+			claim, revision := seedClaim(t, store)
+			valid := job.Receipt{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", ExternalID: "external", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request", ObservedAt: clock.now, Status: job.OutcomeSucceeded, OutcomeDigest: "outcome"}
+			if _, err := store.RecordReceipt(revision, valid); !errors.Is(err, ErrConflict) {
+				t.Fatalf("unregistered receipt returned %v, want ErrConflict: provider evidence must bind to durable prepared work", err)
+			}
+			dispatch := job.PreparedDispatch{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, Provider: "provider", DispatchKey: "dispatch", WorkID: "work", RequestDigest: "request"}
+			var err error
+			revision, err = store.RegisterDispatch(revision, dispatch)
+			if err != nil {
+				t.Fatalf("register dispatch: %v", err)
+			}
+			cases := map[string]func(*job.Receipt){
+				"empty external id": func(value *job.Receipt) { value.ExternalID = "" },
+				"cross-job":         func(value *job.Receipt) { value.JobID = "other" },
+				"provider":          func(value *job.Receipt) { value.Provider = "other" },
+				"work":              func(value *job.Receipt) { value.WorkID = "other" },
+				"request":           func(value *job.Receipt) { value.RequestDigest = "other" },
+				"status":            func(value *job.Receipt) { value.Status = "invented" },
+				"outcome digest":    func(value *job.Receipt) { value.OutcomeDigest = "" },
+			}
+			for name, mutate := range cases {
+				value := valid
+				mutate(&value)
+				if _, err := store.RecordReceipt(revision, value); err == nil {
+					t.Fatalf("receipt with mismatched %s succeeded: unrelated or malformed evidence could settle the wrong external action", name)
+				}
+			}
+		})
+	}
+}
+
 func TestStoreContractFinalizesOccurrenceSettlementAndJobAtomically(t *testing.T) {
 	for _, factory := range factories() {
 		t.Run(factory.name, func(t *testing.T) {
@@ -267,6 +309,31 @@ func TestStoreContractFinalizesOccurrenceSettlementAndJobAtomically(t *testing.T
 				view.Occurrences[occurrence].State != job.OccurrenceCompleted || view.Reservations[final.Settlement.ReservationID].State != job.ReservationSettled {
 				t.Fatalf("terminal projection is partial: job=%s attempt=%s occurrence=%s reservation=%s; one crash-safe batch must publish all terminal truth",
 					view.Jobs[claim.JobID].State, view.Attempts[claim.AttemptID].State, view.Occurrences[occurrence].State, view.Reservations[final.Settlement.ReservationID].State)
+			}
+		})
+	}
+}
+
+func TestStoreContractRejectsIncompatibleTerminalAndSettlementStates(t *testing.T) {
+	for _, factory := range factories() {
+		t.Run(factory.name, func(t *testing.T) {
+			clock := &testClock{now: time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)}
+			store := factory.open(t, clock.read)
+			defer store.Close()
+			claim, revision := seedClaim(t, store)
+			if _, err := store.Complete(revision, Completion{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, AttemptState: job.AttemptUnknown, JobState: job.JobSucceeded}); !errors.Is(err, job.ErrIllegalTransition) {
+				t.Fatalf("unknown attempt with succeeded job returned %v, want illegal transition: unknown evidence must remain unknown", err)
+			}
+			final := Finalization{
+				Completion: Completion{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, AttemptState: job.AttemptUnknown, JobState: job.JobUnknown},
+				Settlement: Settlement{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, ReservationID: "reservation-occurrence-1", Kind: SettlementSpend, Spent: job.NewAmount(1, 2)},
+				Occurrence: admission("occurrence-1", "job-1", 400).Occurrence.ID, State: job.OccurrenceUnknown,
+			}
+			if _, err := store.Finalize(revision, final); !errors.Is(err, ErrConflict) {
+				t.Fatalf("unknown finalization with spend settlement returned %v, want ErrConflict: ambiguous work must hold the full reservation", err)
+			}
+			if _, err := store.Settle(revision, Settlement{JobID: claim.JobID, AttemptID: claim.AttemptID, Fence: claim.Fence, ReservationID: "reservation-occurrence-1", Kind: SettlementRelease}); !errors.Is(err, ErrConflict) {
+				t.Fatalf("unevidenced reservation release returned %v, want ErrConflict: worker intent is not durable proof that dispatch never happened", err)
 			}
 		})
 	}

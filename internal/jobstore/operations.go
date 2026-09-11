@@ -16,6 +16,7 @@ const (
 	kindClaimed         = "attempt.claimed"
 	kindHeartbeat       = "attempt.heartbeat"
 	kindCheckpoint      = "attempt.checkpointed"
+	kindDispatch        = "external.dispatch_registered"
 	kindReceipt         = "external.receipt_recorded"
 	kindSettlement      = "budget.settled"
 	kindCancellation    = "job.cancel_requested"

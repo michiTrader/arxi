@@ -81,6 +81,12 @@ func (s *state) apply(records []record) error {
 				return err
 			}
 			s.view.Checkpoints[value.JobID] = value
+		case kindDispatch:
+			var value job.PreparedDispatch
+			if err := decodeData(entry.Data, &value); err != nil {
+				return err
+			}
+			s.view.Dispatches[value.DispatchKey] = value
 		case kindReceipt:
 			var value job.Receipt
 			if err := decodeData(entry.Data, &value); err != nil {

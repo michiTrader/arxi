@@ -392,6 +392,11 @@ func (f *File) Checkpoint(expected Revision, value job.Checkpoint) (Revision, er
 	defer f.mu.Unlock()
 	return transactRevision(f, func() ([]record, error) { return f.state.checkpoint(expected, value, f.clock()) })
 }
+func (f *File) RegisterDispatch(expected Revision, value job.PreparedDispatch) (Revision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return transactRevision(f, func() ([]record, error) { return f.state.dispatch(expected, value, f.clock()) })
+}
 func (f *File) RecordReceipt(expected Revision, value job.Receipt) (Revision, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

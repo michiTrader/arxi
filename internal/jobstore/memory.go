@@ -127,6 +127,19 @@ func (m *Memory) Checkpoint(expected Revision, value job.Checkpoint) (Revision, 
 	}
 	return m.commit(records)
 }
+func (m *Memory) RegisterDispatch(expected Revision, value job.PreparedDispatch) (Revision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now, clockErr := m.now()
+	if clockErr != nil {
+		return m.state.view.Revision, clockErr
+	}
+	records, err := m.state.dispatch(expected, value, now)
+	if err != nil {
+		return m.state.view.Revision, err
+	}
+	return m.commit(records)
+}
 func (m *Memory) RecordReceipt(expected Revision, value job.Receipt) (Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -25,12 +25,42 @@ func (s *state) checkpoint(expected Revision, value job.Checkpoint, now time.Tim
 	return []record{{Kind: kindCheckpoint, Data: encodeData(value)}}, nil
 }
 
+func (s *state) dispatch(expected Revision, value job.PreparedDispatch, now time.Time) ([]record, error) {
+	if err := s.checkRevision(expected); err != nil {
+		return nil, err
+	}
+	if value.JobID == "" || value.AttemptID == "" || value.Fence == 0 || value.Provider == "" ||
+		value.DispatchKey == "" || value.WorkID == "" || value.RequestDigest == "" {
+		return nil, ErrConflict
+	}
+	if _, _, _, err := s.active(value.JobID, value.AttemptID, value.Fence, now); err != nil {
+		return nil, err
+	}
+	if old, ok := s.view.Dispatches[value.DispatchKey]; ok {
+		if old == value {
+			return nil, nil
+		}
+		return nil, ErrConflict
+	}
+	return []record{{Kind: kindDispatch, Data: encodeData(value)}}, nil
+}
+
 func (s *state) receipt(expected Revision, value job.Receipt, now time.Time) ([]record, error) {
 	if err := s.checkRevision(expected); err != nil {
 		return nil, err
 	}
+	if value.JobID == "" || value.AttemptID == "" || value.Fence == 0 || value.Provider == "" || value.ExternalID == "" ||
+		value.DispatchKey == "" || value.WorkID == "" || value.RequestDigest == "" || value.ObservedAt.IsZero() ||
+		value.OutcomeDigest == "" || !validOutcome(value.Status) {
+		return nil, ErrConflict
+	}
 	if _, _, _, err := s.active(value.JobID, value.AttemptID, value.Fence, now); err != nil {
 		return nil, err
+	}
+	prepared, ok := s.view.Dispatches[value.DispatchKey]
+	if !ok || prepared.JobID != value.JobID || prepared.AttemptID != value.AttemptID || prepared.Fence != value.Fence ||
+		prepared.Provider != value.Provider || prepared.WorkID != value.WorkID || prepared.RequestDigest != value.RequestDigest {
+		return nil, ErrConflict
 	}
 	if old, ok := s.view.Receipts[value.DispatchKey]; ok {
 		if reflect.DeepEqual(old, value) {
@@ -39,6 +69,30 @@ func (s *state) receipt(expected Revision, value job.Receipt, now time.Time) ([]
 		return nil, ErrConflict
 	}
 	return []record{{Kind: kindReceipt, Data: encodeData(value)}}, nil
+}
+
+func validOutcome(value job.OutcomeStatus) bool {
+	switch value {
+	case job.OutcomeSucceeded, job.OutcomeFailed, job.OutcomeCancelled, job.OutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func completionCompatible(attempt job.AttemptState, result job.JobState) bool {
+	switch attempt {
+	case job.AttemptSucceeded:
+		return result == job.JobSucceeded
+	case job.AttemptFailed:
+		return result == job.JobFailed
+	case job.AttemptCancelled:
+		return result == job.JobCancelled
+	case job.AttemptUnknown:
+		return result == job.JobUnknown
+	default:
+		return false
+	}
 }
 
 func (s *state) cancel(expected Revision, value Cancellation) ([]record, error) {
@@ -79,10 +133,7 @@ func (s *state) settle(expected Revision, value Settlement, now time.Time) ([]re
 			return nil, ErrBudgetExceeded
 		}
 	case SettlementRelease:
-		wanted = job.ReservationReleased
-		if value.Spent.Coefficient != 0 {
-			return nil, ErrConflict
-		}
+		return nil, ErrConflict
 	case SettlementUnknown:
 		wanted = job.ReservationUnknown
 		if value.Spent.Coefficient != 0 {
@@ -112,7 +163,9 @@ func (s *state) completionRecords(value Completion, now time.Time) ([]record, er
 	if err != nil {
 		return nil, err
 	}
-	if !job.AttemptTerminal(value.AttemptState) || !job.JobTerminal(value.JobState) {
+	if !completionCompatible(value.AttemptState, value.JobState) ||
+		job.ValidateAttemptTransition(a.State, value.AttemptState) != nil ||
+		job.ValidateJobTransition(j.State, value.JobState) != nil {
 		return nil, job.ErrIllegalTransition
 	}
 	if a.State == value.AttemptState && j.State == value.JobState {
@@ -137,10 +190,14 @@ func (s *state) finalize(expected Revision, value Finalization, now time.Time) (
 	if !ok || occurrence.JobID != completion.JobID || occurrence.State != job.OccurrenceAdmitted {
 		return nil, ErrNotFound
 	}
-	if value.State != job.OccurrenceCompleted && value.State != job.OccurrenceUnknown {
-		return nil, job.ErrIllegalTransition
+	if err := job.ValidateOccurrenceTransition(occurrence.State, value.State); err != nil {
+		return nil, err
 	}
-	if value.State == job.OccurrenceUnknown && (completion.JobState != job.JobUnknown || value.Settlement.Kind != SettlementUnknown) {
+	if value.State == job.OccurrenceUnknown {
+		if completion.JobState != job.JobUnknown || completion.AttemptState != job.AttemptUnknown || value.Settlement.Kind != SettlementUnknown {
+			return nil, ErrConflict
+		}
+	} else if completion.JobState == job.JobUnknown || completion.AttemptState == job.AttemptUnknown || value.Settlement.Kind != SettlementSpend {
 		return nil, ErrConflict
 	}
 	settlementRecords, err := s.settle(expected, value.Settlement, now)

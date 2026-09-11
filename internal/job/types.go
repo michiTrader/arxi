@@ -123,6 +123,16 @@ const (
 	OutcomeUnknown   OutcomeStatus = "unknown"
 )
 
+type PreparedDispatch struct {
+	JobID         JobID       `json:"job_id"`
+	AttemptID     AttemptID   `json:"attempt_id"`
+	Fence         Fence       `json:"fence"`
+	Provider      string      `json:"provider"`
+	DispatchKey   DispatchKey `json:"dispatch_key"`
+	WorkID        WorkID      `json:"work_id"`
+	RequestDigest Digest      `json:"request_digest"`
+}
+
 type Receipt struct {
 	JobID         JobID         `json:"job_id"`
 	AttemptID     AttemptID     `json:"attempt_id"`
@@ -130,6 +140,8 @@ type Receipt struct {
 	Provider      string        `json:"provider"`
 	ExternalID    string        `json:"external_id"`
 	DispatchKey   DispatchKey   `json:"dispatch_key"`
+	WorkID        WorkID        `json:"work_id"`
+	RequestDigest Digest        `json:"request_digest"`
 	ObservedAt    time.Time     `json:"observed_at"`
 	Status        OutcomeStatus `json:"status"`
 	OutcomeDigest Digest        `json:"outcome_digest"`

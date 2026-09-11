@@ -114,6 +114,7 @@ type View struct {
 	Attempts      map[job.AttemptID]job.Attempt
 	Claims        map[job.JobID]job.Claim
 	Checkpoints   map[job.JobID]job.Checkpoint
+	Dispatches    map[job.DispatchKey]job.PreparedDispatch
 	Receipts      map[job.DispatchKey]job.Receipt
 	Reservations  map[string]job.LedgerReservation
 	Ledgers       map[string]job.Ledger
@@ -135,6 +136,7 @@ type Store interface {
 	Claim(Revision, job.JobID, string, time.Duration) (job.Claim, Revision, error)
 	Heartbeat(Revision, job.JobID, job.AttemptID, job.Fence, time.Duration) (job.Claim, Revision, error)
 	Checkpoint(Revision, job.Checkpoint) (Revision, error)
+	RegisterDispatch(Revision, job.PreparedDispatch) (Revision, error)
 	RecordReceipt(Revision, job.Receipt) (Revision, error)
 	Cancel(Revision, Cancellation) (Revision, error)
 	Settle(Revision, Settlement) (Revision, error)

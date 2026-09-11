@@ -23,7 +23,7 @@ func newState() *state {
 		Submissions: make(map[string]Submission), Jobs: make(map[job.JobID]job.Job),
 		Occurrences: make(map[job.OccurrenceID]job.Occurrence), Attempts: make(map[job.AttemptID]job.Attempt),
 		Claims: make(map[job.JobID]job.Claim), Checkpoints: make(map[job.JobID]job.Checkpoint),
-		Receipts: make(map[job.DispatchKey]job.Receipt), Reservations: make(map[string]job.LedgerReservation),
+		Dispatches: make(map[job.DispatchKey]job.PreparedDispatch), Receipts: make(map[job.DispatchKey]job.Receipt), Reservations: make(map[string]job.LedgerReservation),
 		Ledgers: make(map[string]job.Ledger), Cancellations: make(map[job.JobID]Cancellation),
 	}}
 }
@@ -81,6 +81,9 @@ func cloneView(in View) View {
 	}
 	for k, v := range in.Checkpoints {
 		out.Checkpoints[k] = v
+	}
+	for k, v := range in.Dispatches {
+		out.Dispatches[k] = v
 	}
 	for k, v := range in.Receipts {
 		out.Receipts[k] = v
