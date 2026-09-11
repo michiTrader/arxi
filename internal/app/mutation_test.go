@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/inbox"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runread"
@@ -52,19 +53,22 @@ func appErrorKind(t *testing.T, err error, want ErrorKind) {
 	}
 }
 
+func TestLegacyPendingApprovalFailsClosedForLiveMutation(t *testing.T) {
+	s, _ := mutationFixture(t)
+	_, err := s.Approve(Decision{JobID: "r1", ItemID: "approval-1", Principal: "operator:alice"})
+	appErrorKind(t, err, InvalidArgument)
+	if !errors.Is(err, inbox.ErrAuthorizationBinding) {
+		t.Fatalf("legacy approval error = %v: historical logs must remain readable but live mutation cannot invent exact authority; return the missing-binding refusal", err)
+	}
+}
+
 func TestExactDecisionServicesValidateKindAndReturnRefold(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		call func(MutationServices) (MutationResult, error)
 	}{
-		{"approve approval", func(s MutationServices) (MutationResult, error) {
-			return s.Approve(Decision{JobID: "r1", ItemID: "approval-1"})
-		}},
-		{"reject approval", func(s MutationServices) (MutationResult, error) {
-			return s.Reject(Decision{JobID: "r1", ItemID: "approval-1", Text: "unsafe target"})
-		}},
 		{"answer question", func(s MutationServices) (MutationResult, error) {
-			return s.Answer(Decision{JobID: "r1", ItemID: "question-1", Text: "staging"})
+			return s.Answer(Decision{JobID: "r1", ItemID: "question-1", Text: "staging", Principal: "operator:alice"})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
