@@ -219,6 +219,80 @@ func question(t *testing.T) string {
 	return dir
 }
 
+func exactApproval(t *testing.T, mutate func(*kernel.Event)) string {
+	t.Helper()
+	dir := question(t)
+	store, err := logstore.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := kernel.Event{ID: "authorization-request", Type: kernel.AuthorizationRequested, Actor: "worker", Payload: map[string]any{
+		"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "inbox_id": "approval-1",
+		"requester_principal": "agent:worker", "suspension_id": "suspension-1", "parent_work_id": "parent-1",
+		"provider_call_id": "call-1", "tool": "bash", "argument_digest": strings.Repeat("a", 64),
+		"action_digest": strings.Repeat("b", 64), "tool_schema_version": "bash/v1", "policy_version": "policy-1",
+		"workspace_profile_id": "workspace-1", "expires_at": "2026-09-12T00:00:00Z", "after_ms": int64(60000),
+	}}
+	if mutate != nil {
+		mutate(&request)
+	}
+	if _, err := store.Append([]kernel.Event{request}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestExactApprovalRecordsPrincipalAndDecisionInOneBatch(t *testing.T) {
+	dir := exactApproval(t, nil)
+	oldNow := now
+	now = func() time.Time { return time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC) }
+	defer func() { now = oldNow }()
+	if _, err := AnswerExact(dir, "approval-1", Reply{Decision: DecisionApprove, Principal: "operator:alice"}); err != nil {
+		t.Fatalf("a valid exact approval failed: suspended work cannot resume; commit its grant and reply together: %v", err)
+	}
+	read, err := logstore.ReadConfirmed(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := decodeEvents(dir, read.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events[len(events)-2:]
+	if last[0].Type != kernel.AuthorizationGranted || last[1].Type != kernel.InboxReplied {
+		t.Fatalf("exact approval appended %q then %q: the grant must fold before the reply and share its batch; append authorization.granted followed by inbox.replied", last[0].Type, last[1].Type)
+	}
+	if last[0].Str("approver_principal") != "operator:alice" || last[1].Str("principal") != "operator:alice" {
+		t.Fatalf("decision principals = %q/%q: audit cannot identify who authorized the mutation; record the authenticated principal on both records", last[0].Str("approver_principal"), last[1].Str("principal"))
+	}
+}
+
+func TestExactApprovalFailsClosedOnPrincipalAndBindingErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		principal string
+		mutate    func(*kernel.Event)
+		want      error
+	}{
+		{"empty principal", "", nil, ErrInvalidPrincipal},
+		{"self approval", "agent:worker", nil, ErrInvalidPrincipal},
+		{"mismatched digest", "operator:alice", func(e *kernel.Event) { e.Payload["action_digest"] = strings.Repeat("c", 64) }, ErrAuthorizationBinding},
+		{"missing binding", "operator:alice", func(e *kernel.Event) { e.Payload["authorization_id"] = "" }, ErrAuthorizationBinding},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := exactApproval(t, tt.mutate)
+			_, err := AnswerExact(dir, "approval-1", Reply{Decision: DecisionApprove, Principal: tt.principal})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("exact approval error = %v, want %v: ambiguous authority could execute unintended work; refuse before appending either decision record", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDecisionVerbsRequireTheirExactItemKind(t *testing.T) {
 	dir := blocked(t)
 	if _, err := AnswerExact(dir, "inbox-1", Reply{Decision: DecisionAnswer, Text: "staging"}); !errors.Is(err, ErrWrongDecisionKind) {
