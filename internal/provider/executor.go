@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/michiTrader/arxi/internal/exec"
-	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
 	"github.com/michiTrader/arxi/internal/surface"
@@ -310,15 +309,15 @@ func (x *Executor) PrepareTurn(ctx context.Context, e kernel.SpawnTurn) (turn.Re
 // ClassifyModelDispatch is deliberately non-idempotent. The implemented OpenAI
 // Chat Completions and Anthropic Messages transports neither send an externally
 // honored idempotency key nor provide trustworthy response lookup.
-func (x *Executor) ClassifyModelDispatch(req turn.Request) (string, job.WorkClass, bool) {
-	return req.Provider, job.WorkNonIdempotent, false
+func (x *Executor) ClassifyModelDispatch(req turn.Request) (string, exec.WorkClass, bool) {
+	return req.Provider, exec.WorkNonIdempotent, false
 }
 
 // ClassifyToolDispatch is deliberately non-idempotent. Tool names such as read
 // do not prove that the concrete runner honors an external dispatch key, and
 // generic mutating tools must never gain retry safety by classification alone.
-func (x *Executor) ClassifyToolDispatch(_ kernel.SpawnTurn, _ turn.ToolCall) (string, job.WorkClass, bool) {
-	return "tool-runner", job.WorkNonIdempotent, false
+func (x *Executor) ClassifyToolDispatch(_ kernel.SpawnTurn, _ turn.ToolCall) (string, exec.WorkClass, bool) {
+	return "tool-runner", exec.WorkNonIdempotent, false
 }
 
 // CompleteTurn translates one committed canonical request to the provider wire.

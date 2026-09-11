@@ -592,7 +592,7 @@ func (c *scheduledClaim) RegisterDispatch(meta arxiexec.DispatchMetadata) error 
 	view := c.store.View()
 	_, err := c.store.RegisterDispatch(view.Revision, job.PreparedDispatch{JobID: c.claim.JobID,
 		AttemptID: c.claim.AttemptID, Fence: c.claim.Fence, Provider: meta.Provider,
-		DispatchKey: meta.DispatchKey, WorkID: meta.WorkID, RequestDigest: meta.RequestDigest, WorkClass: meta.WorkClass})
+		DispatchKey: job.DispatchKey(meta.DispatchKey), WorkID: job.WorkID(meta.WorkID), RequestDigest: job.Digest(meta.RequestDigest), WorkClass: job.WorkClass(meta.WorkClass)})
 	return err
 }
 
@@ -601,8 +601,8 @@ func (c *scheduledClaim) RecordReceipt(meta arxiexec.DispatchMetadata, receipt a
 	defer c.mu.Unlock()
 	view := c.store.View()
 	_, err := c.store.RecordReceipt(view.Revision, job.Receipt{JobID: c.claim.JobID, AttemptID: c.claim.AttemptID,
-		Fence: c.claim.Fence, Provider: meta.Provider, ExternalID: receipt.ExternalID, DispatchKey: meta.DispatchKey,
-		WorkID: meta.WorkID, RequestDigest: meta.RequestDigest, ObservedAt: nowFunc().UTC(), Status: receipt.Status,
+		Fence: c.claim.Fence, Provider: meta.Provider, ExternalID: receipt.ExternalID, DispatchKey: job.DispatchKey(meta.DispatchKey),
+		WorkID: job.WorkID(meta.WorkID), RequestDigest: job.Digest(meta.RequestDigest), ObservedAt: nowFunc().UTC(), Status: job.OutcomeStatus(receipt.Status),
 		OutcomeDigest: job.CanonicalOutcomeDigest(receipt.CanonicalOutcome), CanonicalOutcome: receipt.CanonicalOutcome})
 	return err
 }
@@ -610,14 +610,14 @@ func (c *scheduledClaim) RecordReceipt(meta arxiexec.DispatchMetadata, receipt a
 func (c *scheduledClaim) Receipt(meta arxiexec.DispatchMetadata) (arxiexec.DispatchReceipt, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	stored, ok := c.store.View().Receipts[meta.DispatchKey]
+	stored, ok := c.store.View().Receipts[job.DispatchKey(meta.DispatchKey)]
 	if !ok {
 		return arxiexec.DispatchReceipt{}, false, nil
 	}
-	if stored.Provider != meta.Provider || stored.WorkID != meta.WorkID || stored.RequestDigest != meta.RequestDigest {
+	if stored.Provider != meta.Provider || string(stored.WorkID) != meta.WorkID || string(stored.RequestDigest) != meta.RequestDigest {
 		return arxiexec.DispatchReceipt{}, false, jobstore.ErrConflict
 	}
-	return arxiexec.DispatchReceipt{ExternalID: stored.ExternalID, Status: stored.Status, CanonicalOutcome: stored.CanonicalOutcome}, true, nil
+	return arxiexec.DispatchReceipt{ExternalID: stored.ExternalID, Status: arxiexec.OutcomeStatus(stored.Status), CanonicalOutcome: stored.CanonicalOutcome}, true, nil
 }
 
 func (c *scheduledClaim) Finish(out arxiexec.Outcome, runErr error) error {

@@ -7,13 +7,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
 type dispatchCoordinatorFake struct {
 	registered []DispatchMetadata
-	receipts   map[job.DispatchKey]DispatchReceipt
+	receipts   map[string]DispatchReceipt
 }
 
 func (c *dispatchCoordinatorFake) RegisterDispatch(meta DispatchMetadata) error {
@@ -22,7 +21,7 @@ func (c *dispatchCoordinatorFake) RegisterDispatch(meta DispatchMetadata) error 
 }
 func (c *dispatchCoordinatorFake) RecordReceipt(meta DispatchMetadata, receipt DispatchReceipt) error {
 	if c.receipts == nil {
-		c.receipts = map[job.DispatchKey]DispatchReceipt{}
+		c.receipts = map[string]DispatchReceipt{}
 	}
 	c.receipts[meta.DispatchKey] = receipt
 	return nil
@@ -34,7 +33,7 @@ func (c *dispatchCoordinatorFake) Receipt(meta DispatchMetadata) (DispatchReceip
 
 type keyedExecutorFake struct {
 	invocations []DispatchMetadata
-	logical     map[job.DispatchKey][]kernel.Event
+	logical     map[string][]kernel.Event
 }
 
 func (x *keyedExecutorFake) SpawnTurn(context.Context, kernel.SpawnTurn) ([]kernel.Event, error) {
@@ -46,13 +45,13 @@ func (x *keyedExecutorFake) CallTool(context.Context, kernel.CallTool) ([]kernel
 func (x *keyedExecutorFake) AskHuman(context.Context, kernel.AskHuman) ([]kernel.Event, error) {
 	panic("metadata dispatch must be used")
 }
-func (x *keyedExecutorFake) ClassifyDispatch(kernel.Effect) (string, job.WorkClass, bool) {
-	return "keyed-fake", job.WorkIdempotent, true
+func (x *keyedExecutorFake) ClassifyDispatch(kernel.Effect) (string, WorkClass, bool) {
+	return "keyed-fake", WorkIdempotent, true
 }
 func (x *keyedExecutorFake) Dispatch(_ context.Context, _ kernel.Effect, meta DispatchMetadata) ([]kernel.Event, *DispatchReceipt, error) {
 	x.invocations = append(x.invocations, meta)
 	if x.logical == nil {
-		x.logical = map[job.DispatchKey][]kernel.Event{}
+		x.logical = map[string][]kernel.Event{}
 	}
 	events, exists := x.logical[meta.DispatchKey]
 	if !exists {
@@ -60,7 +59,7 @@ func (x *keyedExecutorFake) Dispatch(_ context.Context, _ kernel.Effect, meta Di
 			Payload: map[string]any{"tool": "fake", "result": "exact"}}}
 		x.logical[meta.DispatchKey] = events
 	}
-	return events, &DispatchReceipt{ExternalID: "fake-" + string(meta.DispatchKey), Status: job.OutcomeSucceeded}, nil
+	return events, &DispatchReceipt{ExternalID: "fake-" + meta.DispatchKey, Status: OutcomeSucceeded}, nil
 }
 
 func seedStartedDispatch(t *testing.T, runner *Runner, source kernel.Event, effect kernel.Effect) Work {
@@ -87,14 +86,14 @@ func TestPreparedExternalWorkPersistsStableDispatchIdentityAndClass(t *testing.T
 		t.Fatal(err)
 	}
 	prepared := log.events[0]
-	if prepared.Str("work_class") != string(job.WorkIdempotent) || prepared.Str("dispatch_key") == "" || prepared.Str("request_digest") == "" {
+	if prepared.Str("work_class") != string(WorkIdempotent) || prepared.Str("dispatch_key") == "" || prepared.Str("request_digest") == "" {
 		t.Fatalf("prepared payload = %#v: external recovery needs its stable key, request binding, and honest adapter class before start", prepared.Payload)
 	}
 }
 
 func TestStartedIdempotentDispatchReusesKeyWithoutDuplicatingLogicalAction(t *testing.T) {
 	log := newMemLog()
-	x := &keyedExecutorFake{logical: map[job.DispatchKey][]kernel.Event{}}
+	x := &keyedExecutorFake{logical: map[string][]kernel.Event{}}
 	coord := &dispatchCoordinatorFake{}
 	runner := &Runner{Log: log, Clock: NewVirtualClock(), Executor: x, RunID: "run", JobID: "job", Dispatches: coord}
 	source, effect := testSource(31), kernel.CallTool{Agent: "a", Tool: "fake"}
@@ -176,13 +175,13 @@ func TestRegisteredButUnstartedDispatchRunsAfterRecovery(t *testing.T) {
 func TestCommittedReceiptReconcilesExactCanonicalOutcomeWithoutRedispatch(t *testing.T) {
 	log := newMemLog()
 	x := &keyedExecutorFake{}
-	coord := &dispatchCoordinatorFake{receipts: map[job.DispatchKey]DispatchReceipt{}}
+	coord := &dispatchCoordinatorFake{receipts: map[string]DispatchReceipt{}}
 	runner := &Runner{Log: log, Clock: NewVirtualClock(), Executor: x, RunID: "run", JobID: "job", Dispatches: coord}
 	source, effect := testSource(32), kernel.CallTool{Agent: "a", Tool: "fake"}
 	work := seedStartedDispatch(t, runner, source, effect)
 	want := []kernel.Event{{Type: kernel.ToolCallCompleted, Source: kernel.SourceAgent, Payload: map[string]any{"result": "receipt-exact"}}}
 	body, _ := json.Marshal(want)
-	coord.receipts[runner.metadataFor(work).DispatchKey] = DispatchReceipt{ExternalID: "lookup-1", Status: job.OutcomeSucceeded, CanonicalOutcome: body}
+	coord.receipts[runner.metadataFor(work).DispatchKey] = DispatchReceipt{ExternalID: "lookup-1", Status: OutcomeSucceeded, CanonicalOutcome: body}
 
 	result, err := runner.RunStep(context.Background(), source, []kernel.Effect{effect})
 	if err != nil {

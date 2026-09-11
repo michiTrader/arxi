@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/turn"
 )
@@ -259,7 +258,7 @@ func (r *Runner) runModelChild(ctx context.Context, parent Work, round int, req 
 	if child.Status == "unknown" {
 		return turn.Response{}, fmt.Errorf("%w: child work %s has no committed model outcome", ErrUnknownWork, child.ID)
 	}
-	provider, class, honors := req.Provider, job.WorkNonIdempotent, false
+	provider, class, honors := req.Provider, WorkNonIdempotent, false
 	if classifier, ok := x.(TurnDispatchClassifier); ok {
 		provider, class, honors = classifier.ClassifyModelDispatch(req)
 	}
@@ -286,7 +285,7 @@ func (r *Runner) runModelChild(ctx context.Context, parent Work, round int, req 
 			return resp, nil
 		}
 	}
-	if child.Started && (meta.WorkClass != job.WorkIdempotent || !meta.SupportsIdempotency) {
+	if child.Started && (meta.WorkClass != WorkIdempotent || !meta.SupportsIdempotency) {
 		return turn.Response{}, fmt.Errorf("%w: child work %s has no committed model outcome", ErrUnknownWork, child.ID)
 	}
 	if !child.Started {
@@ -363,7 +362,7 @@ func (r *Runner) runToolChild(ctx context.Context, parent Work, effect kernel.Sp
 	if child.Status == "unknown" {
 		return TurnToolOutcome{}, fmt.Errorf("%w: child work %s has no committed tool outcome", ErrUnknownWork, child.ID)
 	}
-	provider, class, honors := "tool", job.WorkNonIdempotent, false
+	provider, class, honors := "tool", WorkNonIdempotent, false
 	if classifier, ok := x.(TurnDispatchClassifier); ok {
 		provider, class, honors = classifier.ClassifyToolDispatch(effect, call)
 	}
@@ -390,7 +389,7 @@ func (r *Runner) runToolChild(ctx context.Context, parent Work, effect kernel.Sp
 			return outcome, nil
 		}
 	}
-	if child.Started && (meta.WorkClass != job.WorkIdempotent || !meta.SupportsIdempotency) {
+	if child.Started && (meta.WorkClass != WorkIdempotent || !meta.SupportsIdempotency) {
 		return TurnToolOutcome{}, fmt.Errorf("%w: child work %s has no committed tool outcome", ErrUnknownWork, child.ID)
 	}
 	if !child.Started {
@@ -486,7 +485,7 @@ func (r *Runner) ensureTurnChild(parent Work, id, kind, slot, prepared string, p
 		return existing, nil
 	}
 	child := &turnChild{ID: id, Kind: kind, Slot: slot, PreparedJSON: prepared}
-	provider, class, honors := "external", job.WorkNonIdempotent, false
+	provider, class, honors := "external", WorkNonIdempotent, false
 	if classifier, ok := r.Executor.(TurnDispatchClassifier); ok {
 		if kind == "model" {
 			var request turn.Request

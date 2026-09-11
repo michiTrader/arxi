@@ -2,22 +2,37 @@ package exec
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 
-	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/turn"
+)
+
+type WorkClass string
+
+type OutcomeStatus string
+
+const (
+	WorkIdempotent    WorkClass     = "idempotent"
+	WorkNonIdempotent WorkClass     = "non_idempotent"
+	OutcomeSucceeded  OutcomeStatus = "succeeded"
+	OutcomeFailed     OutcomeStatus = "failed"
+	OutcomeCancelled  OutcomeStatus = "cancelled"
+	OutcomeUnknown    OutcomeStatus = "unknown"
 )
 
 // DispatchMetadata is immutable external-call identity. A key is useful only
 // when SupportsIdempotency is true; otherwise it remains correlation evidence.
 type DispatchMetadata struct {
-	JobID               job.JobID
-	WorkID              job.WorkID
+	JobID               string
+	WorkID              string
 	Provider            string
-	RequestDigest       job.Digest
-	DispatchKey         job.DispatchKey
-	WorkClass           job.WorkClass
+	RequestDigest       string
+	DispatchKey         string
+	WorkClass           WorkClass
 	SupportsIdempotency bool
 }
 
@@ -25,7 +40,7 @@ type DispatchMetadata struct {
 // outcome returned by an adapter.
 type DispatchReceipt struct {
 	ExternalID       string
-	Status           job.OutcomeStatus
+	Status           OutcomeStatus
 	CanonicalOutcome json.RawMessage
 }
 
@@ -40,7 +55,7 @@ type DispatchCoordinator interface {
 // DispatchClassifier is optional. Without an explicit adapter declaration,
 // external work is non-idempotent even when its operation looks read-only.
 type DispatchClassifier interface {
-	ClassifyDispatch(kernel.Effect) (provider string, class job.WorkClass, honorsKey bool)
+	ClassifyDispatch(kernel.Effect) (provider string, class WorkClass, honorsKey bool)
 }
 
 // MetadataExecutor additively lets a legacy effect adapter receive the key it
@@ -51,8 +66,8 @@ type MetadataExecutor interface {
 
 // TurnDispatchClassifier classifies concrete native model and tool adapters.
 type TurnDispatchClassifier interface {
-	ClassifyModelDispatch(turn.Request) (provider string, class job.WorkClass, honorsKey bool)
-	ClassifyToolDispatch(kernel.SpawnTurn, turn.ToolCall) (provider string, class job.WorkClass, honorsKey bool)
+	ClassifyModelDispatch(turn.Request) (provider string, class WorkClass, honorsKey bool)
+	ClassifyToolDispatch(kernel.SpawnTurn, turn.ToolCall) (provider string, class WorkClass, honorsKey bool)
 }
 
 // MetadataTurnExecutor is the additive native-call form. The original
@@ -63,29 +78,48 @@ type MetadataTurnExecutor interface {
 }
 
 func (r *Runner) metadataFor(w Work) DispatchMetadata {
-	meta := DispatchMetadata{JobID: job.JobID(r.JobID), WorkID: job.WorkID(w.ID), Provider: "executor",
-		RequestDigest: job.Digest(w.Digest), WorkClass: job.WorkNonIdempotent}
+	meta := DispatchMetadata{JobID: r.JobID, WorkID: w.ID, Provider: "executor",
+		RequestDigest: w.Digest, WorkClass: WorkNonIdempotent}
 	if classifier, ok := r.Executor.(DispatchClassifier); ok {
 		provider, class, honors := classifier.ClassifyDispatch(w.Effect)
 		if provider != "" {
 			meta.Provider = provider
 		}
-		if class == job.WorkIdempotent && honors {
+		if class == WorkIdempotent && honors {
 			meta.WorkClass, meta.SupportsIdempotency = class, true
 		}
 	}
-	meta.DispatchKey = job.DispatchIdentity(meta.JobID, meta.WorkID, meta.RequestDigest)
+	meta.DispatchKey = dispatchIdentity(meta.JobID, meta.WorkID, meta.RequestDigest)
 	return meta
 }
 
-func childMetadata(r *Runner, child *turnChild, provider string, class job.WorkClass, honors bool) DispatchMetadata {
-	meta := DispatchMetadata{JobID: job.JobID(r.JobID), WorkID: job.WorkID(child.ID), Provider: provider,
-		RequestDigest: job.RequestDigest([]byte(child.PreparedJSON)), WorkClass: job.WorkNonIdempotent}
-	if class == job.WorkIdempotent && honors {
+func childMetadata(r *Runner, child *turnChild, provider string, class WorkClass, honors bool) DispatchMetadata {
+	meta := DispatchMetadata{JobID: r.JobID, WorkID: child.ID, Provider: provider,
+		RequestDigest: requestDigest([]byte(child.PreparedJSON)), WorkClass: WorkNonIdempotent}
+	if class == WorkIdempotent && honors {
 		meta.WorkClass, meta.SupportsIdempotency = class, true
 	}
-	meta.DispatchKey = job.DispatchIdentity(meta.JobID, meta.WorkID, meta.RequestDigest)
+	meta.DispatchKey = dispatchIdentity(meta.JobID, meta.WorkID, meta.RequestDigest)
 	return meta
+}
+
+func dispatchIdentity(jobID, workID, digest string) string {
+	return hashDispatchParts("arxi.dispatch/v1", jobID, workID, digest)
+}
+
+func requestDigest(body []byte) string {
+	return hashDispatchParts("arxi.request/v1", string(body))
+}
+
+func hashDispatchParts(parts ...string) string {
+	h := sha256.New()
+	var size [8]byte
+	for _, part := range parts {
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write([]byte(part))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (r *Runner) register(meta DispatchMetadata) error {

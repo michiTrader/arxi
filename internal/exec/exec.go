@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
@@ -344,7 +343,7 @@ func (r *Runner) RunStep(ctx context.Context, source kernel.Event, fx []kernel.E
 						continue
 					}
 				}
-				if meta.WorkClass != job.WorkIdempotent || !meta.SupportsIdempotency {
+				if meta.WorkClass != WorkIdempotent || !meta.SupportsIdempotency {
 					if err := r.finishUnknown(w, &res); err != nil {
 						return res, err
 					}
