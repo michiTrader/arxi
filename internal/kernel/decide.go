@@ -964,6 +964,7 @@ func applyAuthorizationConsumed(out *State, e Event) []Effect {
 		return nil
 	}
 	a.ConsumingWorkID = e.Str("work_id")
+	unblockAuthorizationMember(out, *a, e.Seq)
 	return []Effect{CancelTimer{ID: authorizationTimerID(a.ID)}}
 }
 
@@ -1040,6 +1041,13 @@ func applyInboxReplied(out *State, e Event, c Config) []Effect {
 		if out.Inbox[i].ID == id {
 			out.Inbox[i].Replied = true
 		}
+	}
+	// Exact authorization decisions have their own lifecycle event in the same
+	// atomic mutation batch. Treating the companion inbox reply as a legacy
+	// approval would spawn a fresh model turn that can only approximate the call
+	// the human approved.
+	if e.Str("authorization_id") != "" || e.Str("action_digest") != "" {
+		return nil
 	}
 	var fx []Effect
 	for i := range out.Members {
