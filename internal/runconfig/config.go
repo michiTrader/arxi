@@ -24,6 +24,11 @@ const (
 	Schema           = "arxi.effective-config/v1"
 	SimulationLegacy = 1
 	SimulationNative = 2
+
+	DefaultToolSchemaVersion  = "arxi.tools/v1"
+	DefaultPolicyVersion      = "arxi.tool-policy/v1"
+	DefaultWorkspaceProfileID = "arxi.workspace/legacy-v1"
+	DefaultAuthorizationTTLMS = int64(30 * 60 * 1000)
 )
 
 type Contracts struct {
@@ -43,17 +48,22 @@ type Route struct {
 }
 
 type Artifact struct {
-	Schema       string                               `json:"schema"`
-	RunID        string                               `json:"run_id"`
-	Mode         string                               `json:"mode"`
-	BlueprintSHA string                               `json:"blueprint_sha"`
-	Config       kernel.Config                        `json:"config"`
-	Prompt       string                               `json:"prompt"`
-	DefaultModel string                               `json:"default_model,omitempty"`
-	Routes       []Route                              `json:"routes,omitempty"`
-	ToolPolicy   map[string]map[string]surface.Policy `json:"tool_policy,omitempty"`
-	SimVersion   int                                  `json:"sim_version,omitempty"`
-	Contracts    Contracts                            `json:"contracts"`
+	Schema              string                               `json:"schema"`
+	RunID               string                               `json:"run_id"`
+	Mode                string                               `json:"mode"`
+	BlueprintSHA        string                               `json:"blueprint_sha"`
+	Config              kernel.Config                        `json:"config"`
+	Prompt              string                               `json:"prompt"`
+	DefaultModel        string                               `json:"default_model,omitempty"`
+	Routes              []Route                              `json:"routes,omitempty"`
+	ToolPolicy          map[string]map[string]surface.Policy `json:"tool_policy,omitempty"`
+	SimVersion          int                                  `json:"sim_version,omitempty"`
+	ToolSchemaVersion   string                               `json:"tool_schema_version,omitempty"`
+	PolicyVersion       string                               `json:"policy_version,omitempty"`
+	WorkspaceProfileID  string                               `json:"workspace_profile_id,omitempty"`
+	AuthorizationTTLMS  int64                                `json:"authorization_ttl_ms,omitempty"`
+	Contracts           Contracts                            `json:"contracts"`
+	legacyAuthorization bool
 }
 
 func New(runID, mode, blueprintSHA, prompt, defaultModel string, cfg kernel.Config,
@@ -62,6 +72,8 @@ func New(runID, mode, blueprintSHA, prompt, defaultModel string, cfg kernel.Conf
 		Schema: Schema, RunID: runID, Mode: mode, BlueprintSHA: blueprintSHA,
 		Config: cfg, Prompt: prompt, DefaultModel: defaultModel,
 		Routes: routes, ToolPolicy: policy, SimVersion: SimulationNative,
+		ToolSchemaVersion: DefaultToolSchemaVersion, PolicyVersion: DefaultPolicyVersion,
+		WorkspaceProfileID: DefaultWorkspaceProfileID, AuthorizationTTLMS: DefaultAuthorizationTTLMS,
 		Contracts: Contracts{Kernel: 1, Effects: 1, Surface: surface.SurfaceVersion},
 	}
 }
@@ -143,6 +155,13 @@ func Load(dir string) (Artifact, string, error) {
 	if err := requireEOF(dec); err != nil {
 		return Artifact{}, "", fmt.Errorf("decode %s: %w", path, err)
 	}
+	if a.ToolSchemaVersion == "" && a.PolicyVersion == "" && a.WorkspaceProfileID == "" && a.AuthorizationTTLMS == 0 {
+		a.legacyAuthorization = true
+		a.ToolSchemaVersion = DefaultToolSchemaVersion
+		a.PolicyVersion = DefaultPolicyVersion
+		a.WorkspaceProfileID = DefaultWorkspaceProfileID
+		a.AuthorizationTTLMS = DefaultAuthorizationTTLMS
+	}
 	if err := Validate(a); err != nil {
 		return Artifact{}, "", fmt.Errorf("validate %s: %w", path, err)
 	}
@@ -193,6 +212,11 @@ func VerifyBinding(dir, runID string, events []kernel.Event) (Artifact, error) {
 	return a, nil
 }
 
+// SupportsExactAuthorization reports whether these exact bindings were present
+// in the persisted artifact. Legacy artifacts decode with defaults for replay,
+// but those defaults cannot retroactively authorize an old unanswered action.
+func (a Artifact) SupportsExactAuthorization() bool { return !a.legacyAuthorization }
+
 func requireEOF(dec *json.Decoder) error {
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
@@ -228,6 +252,9 @@ func Validate(a Artifact) error {
 	if a.Contracts.Kernel != 1 || a.Contracts.Effects != 1 || a.Contracts.Surface != surface.SurfaceVersion {
 		return fmt.Errorf("unsupported contracts kernel=%d effects=%d surface=%d",
 			a.Contracts.Kernel, a.Contracts.Effects, a.Contracts.Surface)
+	}
+	if a.ToolSchemaVersion == "" || a.PolicyVersion == "" || a.WorkspaceProfileID == "" || a.AuthorizationTTLMS <= 0 {
+		return fmt.Errorf("authorization defaults require tool schema, policy, workspace profile, and positive ttl")
 	}
 	seen := map[string]bool{}
 	for _, r := range a.Routes {
