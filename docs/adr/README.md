@@ -19,6 +19,8 @@ has to decide which — not ignore the contradiction.
 | [0007](0007-go-instead-of-rust.md) | Go instead of Rust, with tests covering what the compiler does not give | accepted |
 | [0008](0008-terse-invocation.md) | A terse invocation is a declared alias, not a second code path | accepted |
 | [0009](0009-provider-neutral-native-turns.md) | Native model/tool loops use one durable provider-neutral turn contract | accepted |
+| [0010](0010-durable-jobs-attempts-and-scheduling.md) | Durable work uses occurrences, fenced attempts and explicit outcomes | accepted |
+| [0011](0011-exact-single-use-authorization.md) | Authorization binds and consumes one exact action | accepted |
 
 ## Format
 
