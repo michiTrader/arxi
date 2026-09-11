@@ -471,6 +471,30 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 		return nil, NotDispatched(fmt.Errorf("executor cannot dispatch exact authorized native tools"))
 	}
 	head := r.Log.Head()
+	if r.Clock.NowMs() > 0 {
+		expires, parseErr := time.Parse(time.RFC3339Nano, a.ExpiresAt)
+		if parseErr != nil {
+			return nil, NotDispatched(fmt.Errorf("authorization %s has invalid expiry: %w", a.ID, parseErr))
+		}
+		if r.Now == nil {
+			return nil, NotDispatched(fmt.Errorf("authorization %s cannot verify live expiry without an injected clock", a.ID))
+		}
+		now, parseErr := time.Parse(time.RFC3339Nano, r.Now())
+		if parseErr != nil {
+			return nil, NotDispatched(fmt.Errorf("authorization %s current time is invalid: %w", a.ID, parseErr))
+		}
+		if !now.Before(expires) {
+			expired := kernel.Event{ID: "authorization-expired-" + a.ID, Type: kernel.AuthorizationExpired,
+				Ts: now.UTC().Format(time.RFC3339Nano), Source: kernel.SourceRuntime, Payload: map[string]any{
+					"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+					"expired_at": a.ExpiresAt,
+				}}
+			if _, err := r.Log.AppendIfSeq(head, r.stamp([]kernel.Event{expired})); err != nil {
+				return nil, NotDispatched(fmt.Errorf("materialize expired authorization %s: %w", a.ID, err))
+			}
+			return nil, NotDispatched(fmt.Errorf("authorization %s expired before consumption", a.ID))
+		}
+	}
 	consumed := kernel.Event{ID: "authorization-consumed-" + a.ID, Type: kernel.AuthorizationConsumed,
 		Source: kernel.SourceRuntime, Actor: suspension.Effect.Agent, Payload: map[string]any{
 			"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
@@ -520,6 +544,11 @@ func (r *Runner) validateAuthorizationSuspension(a kernel.Authorization, s autho
 		s.ActionDigest != a.ActionDigest || r.Authorization.ToolSchemaVersion != a.ToolSchemaVersion ||
 		r.Authorization.PolicyVersion != a.PolicyVersion || r.Authorization.WorkspaceProfileID != a.WorkspaceProfileID {
 		return fmt.Errorf("authorization %s bindings changed from the persisted exact suspension", a.ID)
+	}
+	if len(s.PendingCalls) == 0 || s.CallIndex < 0 || s.CallIndex >= len(s.PendingCalls) ||
+		s.PendingCalls[s.CallIndex].ID != s.Call.ID || s.PendingCalls[s.CallIndex].Name != s.Call.Name ||
+		s.PendingCalls[s.CallIndex].ArgumentDigest != s.Call.ArgumentDigest {
+		return fmt.Errorf("authorization %s provider call order changed in the exact suspension", a.ID)
 	}
 	if err := turn.ValidateToolCall(s.Call); err != nil {
 		return fmt.Errorf("authorization %s call is invalid: %w", a.ID, err)
