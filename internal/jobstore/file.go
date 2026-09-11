@@ -317,6 +317,11 @@ func (f *File) View() View {
 	_ = f.transaction(func() error { return nil })
 	return cloneView(f.state.view)
 }
+func (f *File) RegisterJob(expected Revision, value JobRegistration) (Revision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return transactRevision(f, func() ([]record, error) { return f.state.registerJob(expected, value) })
+}
 func (f *File) BindSubmission(expected Revision, value Submission) (result Submission, revision Revision, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

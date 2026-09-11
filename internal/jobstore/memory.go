@@ -47,6 +47,15 @@ func (m *Memory) commit(records []record) (Revision, error) {
 	return m.state.view.Revision, nil
 }
 
+func (m *Memory) RegisterJob(expected Revision, value JobRegistration) (Revision, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	records, err := m.state.registerJob(expected, value)
+	if err != nil {
+		return m.state.view.Revision, err
+	}
+	return m.commit(records)
+}
 func (m *Memory) BindSubmission(expected Revision, value Submission) (Submission, Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

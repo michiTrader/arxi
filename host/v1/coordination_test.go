@@ -11,6 +11,7 @@ import (
 type memoryCoordination struct {
 	mu          sync.Mutex
 	bindings    map[string]SubmissionBinding
+	jobs        map[JobID]bool
 	claims      map[JobID]ExecutionClaim
 	nextFence   uint64
 	claimErr    error
@@ -18,7 +19,14 @@ type memoryCoordination struct {
 }
 
 func newMemoryCoordination() *memoryCoordination {
-	return &memoryCoordination{bindings: map[string]SubmissionBinding{}, claims: map[JobID]ExecutionClaim{}}
+	return &memoryCoordination{bindings: map[string]SubmissionBinding{}, jobs: map[JobID]bool{}, claims: map[JobID]ExecutionClaim{}}
+}
+
+func (c *memoryCoordination) RegisterJob(_ context.Context, id JobID) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.jobs[id] = true
+	return nil
 }
 
 func (c *memoryCoordination) BindSubmission(_ context.Context, wanted SubmissionBinding) (SubmissionBinding, error) {
@@ -38,6 +46,9 @@ func (c *memoryCoordination) Claim(_ context.Context, id JobID) (ExecutionClaim,
 	defer c.mu.Unlock()
 	if c.claimErr != nil {
 		return ExecutionClaim{}, c.claimErr
+	}
+	if !c.jobs[id] {
+		return ExecutionClaim{}, ErrJobNotFound
 	}
 	if _, active := c.claims[id]; active {
 		return ExecutionClaim{}, ErrStorageConflict
@@ -106,6 +117,23 @@ func (w *validatingMemoryWriter) WriteSnapshot(ctx context.Context, snapshot Sna
 	return w.JobWriter.WriteSnapshot(ctx, snapshot)
 }
 
+func TestCoordinatedSubmitRegistersEveryJobBeforeClaim(t *testing.T) {
+	coordination := newMemoryCoordination()
+	storage := &coordinatedMemoryStorage{memoryStorage: newMemoryStorage(), coordination: coordination}
+	h := New(Options{Storage: storage, Coordination: coordination, Provider: textProviderStub{}, CoordinationHeartbeat: time.Hour})
+	defer h.Close()
+	result, err := h.Submit(context.Background(), SubmitRequest{Blueprint: testBlueprint, Prompt: "work", BudgetUSD: 1, Simulated: true})
+	if err != nil {
+		t.Fatalf("coordinated submission without a caller key failed: %v: every accepted job needs durable registration before it can be claimed", err)
+	}
+	coordination.mu.Lock()
+	registered := coordination.jobs[result.JobID]
+	coordination.mu.Unlock()
+	if !registered {
+		t.Fatal("submitted job was claimed without durable registration: restart recovery would lose an accepted unkeyed job")
+	}
+}
+
 func TestSubmitIdempotencyBindsCanonicalRequest(t *testing.T) {
 	coordination := newMemoryCoordination()
 	storage := &coordinatedMemoryStorage{memoryStorage: newMemoryStorage(), coordination: coordination}
@@ -123,6 +151,19 @@ func TestSubmitIdempotencyBindsCanonicalRequest(t *testing.T) {
 	req.Prompt = "different"
 	if _, err := h.Submit(context.Background(), req); !IsCode(err, CodeConflict) {
 		t.Fatalf("conflicting submission error = %v, want conflict: one key cannot authorize different work", err)
+	}
+}
+
+func TestCoordinatedSubmitCapabilityRequiresFenceableStorage(t *testing.T) {
+	coordination := newMemoryCoordination()
+	unsafe := New(Options{Storage: newMemoryStorage(), Coordination: coordination, Provider: textProviderStub{}})
+	defer unsafe.Close()
+	set, err := unsafe.Capabilities(context.Background(), CapabilitiesRequest{})
+	if err != nil || set.Has(CapabilitySubmit) || set.Has(CapabilityRecover) {
+		t.Fatalf("unsafe coordinated capabilities = %#v, %v: Submit and Recover must not be advertised when storage cannot fence writers", set, err)
+	}
+	if _, err := unsafe.Submit(context.Background(), SubmitRequest{Blueprint: testBlueprint, Prompt: "work", BudgetUSD: 1}); !IsCode(err, CodeCapabilityUnavailable) {
+		t.Fatalf("unsafe coordinated Submit returned %v: capability validation must fail before publishing an accepted job", err)
 	}
 }
 

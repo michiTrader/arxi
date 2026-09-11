@@ -211,6 +211,7 @@ const (
 // Coordination installs restart recovery without changing JobStorage. The
 // implementation owns lease duration, clock judgments, and optimistic retries.
 type Coordination interface {
+	RegisterJob(context.Context, JobID) error
 	BindSubmission(context.Context, SubmissionBinding) (SubmissionBinding, error)
 	Claim(context.Context, JobID) (ExecutionClaim, error)
 	Validate(context.Context, ExecutionClaim) error

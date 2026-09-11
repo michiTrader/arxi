@@ -25,6 +25,17 @@ func openHostCoordination(runsRoot string) (*hostCoordination, error) {
 	return &hostCoordination{store: store}, nil
 }
 
+func (c *hostCoordination) RegisterJob(_ context.Context, id hostv1.JobID) error {
+	for {
+		view := c.store.View()
+		_, err := c.store.RegisterJob(view.Revision, jobstore.JobRegistration{JobID: job.JobID(id)})
+		if errors.Is(err, jobstore.ErrRevision) {
+			continue
+		}
+		return err
+	}
+}
+
 func (c *hostCoordination) BindSubmission(_ context.Context, wanted hostv1.SubmissionBinding) (hostv1.SubmissionBinding, error) {
 	for {
 		view := c.store.View()

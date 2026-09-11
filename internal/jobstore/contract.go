@@ -47,6 +47,10 @@ type Submission struct {
 	JobID         job.JobID  `json:"job_id"`
 }
 
+type JobRegistration struct {
+	JobID job.JobID `json:"job_id"`
+}
+
 type Admission struct {
 	Occurrence job.Occurrence   `json:"occurrence"`
 	Window     job.LedgerWindow `json:"window"`
@@ -124,6 +128,7 @@ type View struct {
 // cache-coherence guarantees across machines sharing a network filesystem.
 type Store interface {
 	View() View
+	RegisterJob(Revision, JobRegistration) (Revision, error)
 	BindSubmission(Revision, Submission) (Submission, Revision, error)
 	RecordOccurrence(Revision, job.Occurrence) (job.Occurrence, Revision, error)
 	Admit(Revision, Admission) (job.Occurrence, Revision, error)

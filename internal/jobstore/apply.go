@@ -12,13 +12,18 @@ func (s *state) apply(records []record) error {
 			return fmt.Errorf("journal revision %d follows %d", entry.Revision, s.view.Revision)
 		}
 		switch entry.Kind {
+		case kindJobRegistered:
+			var value JobRegistration
+			if err := decodeData(entry.Data, &value); err != nil {
+				return err
+			}
+			s.view.Jobs[value.JobID] = job.Job{ID: value.JobID, State: job.JobAccepted}
 		case kindSubmission:
 			var value Submission
 			if err := decodeData(entry.Data, &value); err != nil {
 				return err
 			}
 			s.view.Submissions[value.Key] = value
-			s.view.Jobs[value.JobID] = job.Job{ID: value.JobID, State: job.JobAccepted}
 		case kindOccurrence:
 			var value job.Occurrence
 			if err := decodeData(entry.Data, &value); err != nil {

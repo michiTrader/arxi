@@ -47,11 +47,11 @@ func newBackend(options Options) backend {
 			installed[capability] = capability
 		}
 		if options.Provider != nil {
-			installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
-			if options.Coordination != nil {
-				if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
-					installed[CapabilityRecover] = CapabilityRecover
-				}
+			if options.Coordination == nil {
+				installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
+			} else if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
+				installed[CapabilitySubmit], installed[CapabilityWait] = CapabilitySubmit, CapabilityWait
+				installed[CapabilityRecover] = CapabilityRecover
 			}
 		}
 	}
@@ -106,6 +106,14 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 			return SubmitResult{}, adaptCoordinationError(CapabilitySubmit, id, bindErr)
 		}
 		id = bound.JobID
+	}
+	if b.coordination != nil {
+		if _, safe := b.storage.(CoordinatedJobStorageV1); !safe {
+			return SubmitResult{}, unavailable(CapabilitySubmit)
+		}
+		if registerErr := b.coordination.RegisterJob(ctx, id); registerErr != nil {
+			return SubmitResult{}, adaptCoordinationError(CapabilitySubmit, id, registerErr)
+		}
 	}
 	mode := "live"
 	if req.Simulated {

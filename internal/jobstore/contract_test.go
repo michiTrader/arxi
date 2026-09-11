@@ -59,6 +59,26 @@ func seedClaim(t *testing.T, store Store) (job.Claim, Revision) {
 	return claim, revision
 }
 
+func TestStoreContractRegistersUnkeyedJobsForRecovery(t *testing.T) {
+	for _, factory := range factories() {
+		t.Run(factory.name, func(t *testing.T) {
+			store := factory.open(t, func() time.Time { return time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC) })
+			defer store.Close()
+			revision, err := store.RegisterJob(0, JobRegistration{JobID: "job-unkeyed"})
+			if err != nil || revision != 1 {
+				t.Fatalf("register unkeyed job revision/error = %d/%v: every coordinated acceptance must be recoverable without inventing an idempotency key", revision, err)
+			}
+			repeated, err := store.RegisterJob(revision, JobRegistration{JobID: "job-unkeyed"})
+			if err != nil || repeated != revision {
+				t.Fatalf("repeat registration revision/error = %d/%v: acceptance recovery must be idempotent", repeated, err)
+			}
+			if _, _, err := store.Claim(revision, "job-unkeyed", "worker", time.Minute); err != nil {
+				t.Fatalf("claim registered job: %v: durable registration must make an unkeyed accepted job executable after restart", err)
+			}
+		})
+	}
+}
+
 func TestStoreContractBindsIdempotencyAndRejectsConflicts(t *testing.T) {
 	for _, factory := range factories() {
 		t.Run(factory.name, func(t *testing.T) {

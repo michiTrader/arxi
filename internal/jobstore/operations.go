@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	kindJobRegistered   = "job.registered"
 	kindSubmission      = "submission.bound"
 	kindOccurrence      = "occurrence.recorded"
 	kindReservation     = "budget.reserved"
@@ -21,6 +22,19 @@ const (
 	kindAttemptFinished = "attempt.finished"
 	kindJobFinished     = "job.finished"
 )
+
+func (s *state) registerJob(expected Revision, value JobRegistration) ([]record, error) {
+	if err := s.checkRevision(expected); err != nil {
+		return nil, err
+	}
+	if value.JobID == "" {
+		return nil, ErrConflict
+	}
+	if _, ok := s.view.Jobs[value.JobID]; ok {
+		return nil, nil
+	}
+	return []record{{Kind: kindJobRegistered, Data: encodeData(value)}}, nil
+}
 
 func (s *state) bind(expected Revision, value Submission) ([]record, Submission, error) {
 	if err := s.checkRevision(expected); err != nil {
