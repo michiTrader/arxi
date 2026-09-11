@@ -190,7 +190,10 @@ func TestFilesystemClaimedWriterRejectsStaleFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	coordination := jobstore.NewMemory(nowFunc)
-	if _, _, err := coordination.BindSubmission(0, jobstore.Submission{Key: "key", RequestDigest: "digest", JobID: "r1"}); err != nil {
+	if _, err := coordination.RegisterJob(0, jobstore.JobRegistration{JobID: "r1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := coordination.BindSubmission(coordination.View().Revision, jobstore.Submission{Key: "key", RequestDigest: "digest", JobID: "r1"}); err != nil {
 		t.Fatal(err)
 	}
 	first, _, err := coordination.Claim(coordination.View().Revision, "r1", "first", time.Second)
