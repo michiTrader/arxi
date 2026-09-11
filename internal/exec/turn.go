@@ -411,7 +411,7 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 		a.ConsumingWorkID != "" {
 		return nil, NotDispatched(fmt.Errorf("authorization %s is not a current unconsumed exact grant", effect.AuthorizationID))
 	}
-	var suspensionJSON string
+	var suspensionJSON, suspensionDigest string
 	for _, event := range events {
 		if event.Type == kernel.ExecWorkPrepared && event.Str("child_kind") == "authorization" {
 			var candidate authorizationSuspension
@@ -419,12 +419,15 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 				if suspensionJSON != "" {
 					return nil, NotDispatched(fmt.Errorf("authorization %s has duplicate suspension records", effect.AuthorizationID))
 				}
-				suspensionJSON = event.Str("request_json")
+				suspensionJSON, suspensionDigest = event.Str("request_json"), event.Str("request_digest")
 			}
 		}
 	}
 	if suspensionJSON == "" {
 		return nil, NotDispatched(fmt.Errorf("authorization %s has no exact suspension bytes", effect.AuthorizationID))
+	}
+	if requestDigest([]byte(suspensionJSON)) != suspensionDigest {
+		return nil, NotDispatched(fmt.Errorf("authorization %s suspension bytes do not match their persisted digest", effect.AuthorizationID))
 	}
 	var suspension authorizationSuspension
 	if err := json.Unmarshal([]byte(suspensionJSON), &suspension); err != nil {

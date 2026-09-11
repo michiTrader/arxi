@@ -13,13 +13,15 @@ import (
 )
 
 type nativeLoopExecutor struct {
-	log            *memLog
-	requests       []turn.Request
-	toolCalls      int
-	toolCallIDs    []string
-	toolResultText string
-	callsPerRound  int
-	outcomes       map[string]TurnToolOutcome
+	log               *memLog
+	requests          []turn.Request
+	toolCalls         int
+	toolCallIDs       []string
+	toolResultText    string
+	callsPerRound     int
+	outcomes          map[string]TurnToolOutcome
+	policies          map[string]string
+	authorizedToolRun int
 }
 
 func (x *nativeLoopExecutor) SpawnTurn(context.Context, kernel.SpawnTurn) ([]kernel.Event, error) {
@@ -71,6 +73,19 @@ func (x *nativeLoopExecutor) CompleteTurn(_ context.Context, req turn.Request) (
 		Content:      []turn.ContentBlock{{Type: turn.BlockText, Text: "done"}},
 		FinishReason: turn.FinishStop, Usage: turn.Usage{InputTokens: 14, OutputTokens: 1}}, nil
 }
+func (x *nativeLoopExecutor) ResolveTurnToolPolicy(_ kernel.SpawnTurn, call turn.ToolCall) string {
+	if policy := x.policies[call.ID]; policy != "" {
+		return policy
+	}
+	return "allow"
+}
+func (x *nativeLoopExecutor) ExecuteAuthorizedTurnTool(_ context.Context, _ kernel.SpawnTurn, call turn.ToolCall) (TurnToolOutcome, error) {
+	x.authorizedToolRun++
+	x.toolCalls++
+	x.toolCallIDs = append(x.toolCallIDs, call.ID)
+	return TurnToolOutcome{Policy: "allow", Continue: true, Result: turn.ToolResult{CallID: call.ID,
+		Content: []turn.ContentBlock{{Type: turn.BlockText, Text: x.toolResultText}}}}, nil
+}
 func (x *nativeLoopExecutor) ExecuteTurnTool(_ context.Context, _ kernel.SpawnTurn, call turn.ToolCall) (TurnToolOutcome, error) {
 	x.toolCalls++
 	x.toolCallIDs = append(x.toolCallIDs, call.ID)
@@ -87,6 +102,110 @@ func (x *nativeLoopExecutor) FinishTurn(e kernel.SpawnTurn, trace []TurnEntry) (
 		{Type: kernel.LLMResponse, Actor: e.Agent, Payload: map[string]any{"ok": true, "text": "done"}},
 		{Type: kernel.AgentTurnDone, Actor: e.Agent},
 	}, nil
+}
+
+func exactTestRunner(log *memLog, x *nativeLoopExecutor) *Runner {
+	return &Runner{Log: log, Clock: NewVirtualClock(), Executor: x, RunID: "run-exact", JobID: "job-exact",
+		Now: func() string { return "2026-09-11T12:00:00Z" }, Authorization: AuthorizationConfig{
+			ToolSchemaVersion: "arxi.tools/v1", PolicyVersion: "arxi.policy/v1",
+			WorkspaceProfileID: "workspace-profile-1", TTLMS: 60_000,
+		}}
+}
+
+func exactGrant(t *testing.T, r *Runner, log *memLog) kernel.ResumeAuthorization {
+	t.Helper()
+	var request kernel.Event
+	for _, event := range log.events {
+		if event.Type == kernel.AuthorizationRequested {
+			request = event
+		}
+	}
+	if request.Type == "" {
+		t.Fatal("policy=ask did not persist authorization.requested: the exact call cannot be approved")
+	}
+	grant := kernel.Event{ID: "grant-exact", Type: kernel.AuthorizationGranted, Source: kernel.SourceHuman,
+		Payload: map[string]any{"schema": "arxi.authorization/v1", "authorization_id": request.Str("authorization_id"),
+			"action_digest": request.Str("action_digest"), "approver_principal": "operator:alice",
+			"grant_event_id": "grant-exact", "expires_at": request.Str("expires_at")}}
+	if _, err := log.Append([]kernel.Event{grant}); err != nil {
+		t.Fatal(err)
+	}
+	state, effects := kernel.Decide(kernel.State{Members: []kernel.Member{{Name: "backend"}}, Authorizations: []kernel.Authorization{{
+		Schema: "arxi.authorization/v1", ID: request.Str("authorization_id"), InboxID: request.Str("inbox_id"),
+		RequesterPrincipal: request.Str("requester_principal"), SuspensionID: request.Str("suspension_id"),
+		ParentWorkID: request.Str("parent_work_id"), ProviderCallID: request.Str("provider_call_id"), Tool: request.Str("tool"),
+		ArgumentDigest: request.Str("argument_digest"), ActionDigest: request.Str("action_digest"),
+		ToolSchemaVersion: request.Str("tool_schema_version"), PolicyVersion: request.Str("policy_version"),
+		WorkspaceProfileID: request.Str("workspace_profile_id"), ExpiresAt: request.Str("expires_at"),
+	}}, Inbox: []kernel.InboxItem{{ID: request.Str("inbox_id"), Kind: "tool_approval", AuthorizationID: request.Str("authorization_id"), ActionDigest: request.Str("action_digest")}}}, grant, kernel.Config{})
+	_ = state
+	for _, effect := range effects {
+		if resume, ok := effect.(kernel.ResumeAuthorization); ok {
+			return resume
+		}
+	}
+	t.Fatal("authorization.granted did not produce ResumeAuthorization: approval would never execute the original call")
+	return kernel.ResumeAuthorization{}
+}
+
+func TestExactAuthorizationSuspendsBeforeToolStartAndResumesOriginalCall(t *testing.T) {
+	log := newMemLog()
+	x := &nativeLoopExecutor{log: log, toolResultText: "exact result", policies: map[string]string{"provider-call-7": "ask"}}
+	r := exactTestRunner(log, x)
+	source := testSource(21)
+	if _, err := r.RunStep(context.Background(), source, []kernel.Effect{kernel.SpawnTurn{Agent: "backend"}}); err != nil {
+		t.Fatal(err)
+	}
+	if x.toolCalls != 0 {
+		t.Fatalf("policy=ask reached the runner %d times: approval must precede every external dispatch", x.toolCalls)
+	}
+	var toolStarts int
+	for _, event := range log.events {
+		if event.Type == kernel.ExecWorkStarted && event.Str("work_scope") == "turn_child" && event.Str("parent_work_id") != "" {
+			for _, prepared := range log.events {
+				if prepared.Type == kernel.ExecWorkPrepared && prepared.Str("work_id") == event.Str("work_id") && prepared.Str("child_kind") == "tool" {
+					toolStarts++
+				}
+			}
+		}
+	}
+	if toolStarts != 0 {
+		t.Fatalf("policy=ask wrote %d tool child starts before approval: crash recovery would claim unapproved work began", toolStarts)
+	}
+	resume := exactGrant(t, r, log)
+	x.policies["provider-call-7"] = "deny"
+	if _, err := r.RunStep(context.Background(), kernel.Event{Seq: log.Head(), ID: "grant-exact", Type: kernel.AuthorizationGranted}, []kernel.Effect{resume}); err != nil {
+		t.Fatal(err)
+	}
+	if x.authorizedToolRun != 1 || len(x.requests) != 2 {
+		t.Fatalf("authorized tool/model calls = %d/%d, want 1/2: resume must execute once then continue the exact transcript", x.authorizedToolRun, len(x.requests))
+	}
+	result := x.requests[1].Messages[len(x.requests[1].Messages)-1].Content[0].ToolResult
+	if result == nil || result.CallID != "provider-call-7" || result.Content[0].Text != "exact result" {
+		t.Fatalf("reinjected authorized result = %#v: original provider call id and exact result were not preserved", result)
+	}
+}
+
+func TestExactAuthorizationRejectsChangedSuspensionBytes(t *testing.T) {
+	log := newMemLog()
+	x := &nativeLoopExecutor{policies: map[string]string{"provider-call-7": "ask"}}
+	r := exactTestRunner(log, x)
+	if _, err := r.RunStep(context.Background(), testSource(22), []kernel.Effect{kernel.SpawnTurn{Agent: "backend"}}); err != nil {
+		t.Fatal(err)
+	}
+	resume := exactGrant(t, r, log)
+	for i := range log.events {
+		if log.events[i].Type == kernel.ExecWorkPrepared && log.events[i].Str("child_kind") == "authorization" {
+			log.events[i].Payload["request_json"] = log.events[i].Str("request_json") + " "
+		}
+	}
+	_, err := r.RunStep(context.Background(), kernel.Event{Seq: log.Head(), ID: "grant-exact", Type: kernel.AuthorizationGranted}, []kernel.Effect{resume})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x.authorizedToolRun != 0 {
+		t.Fatalf("changed suspension bytes reached runner %d times: recovery must fail closed", x.authorizedToolRun)
+	}
 }
 
 func TestDurableNativeTurnReinjectsExactResultUnderProviderCallID(t *testing.T) {
