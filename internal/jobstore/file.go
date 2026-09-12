@@ -9,11 +9,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/advisorylock"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/job"
 )
 
@@ -278,15 +278,7 @@ func truncateSync(path string, size int64) error {
 }
 
 func syncDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	opened, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("jobstore: open directory for sync: %w", err)
-	}
-	defer opened.Close()
-	if err := opened.Sync(); err != nil {
+	if err := fsdurability.SyncDirectory(dir); err != nil {
 		return fmt.Errorf("jobstore: sync directory: %w", err)
 	}
 	return nil
