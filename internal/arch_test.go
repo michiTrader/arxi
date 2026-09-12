@@ -177,24 +177,42 @@ func TestSurfaceDoesNotImportTheExecutor(t *testing.T) {
 // fsync policy, torn-write recovery) would start leaking into the run loop,
 // where nobody would think to look for them.
 //
-// The kernel and the provider-neutral turn contract are the two exceptions:
-// exec needs kernel effects/events and durably coordinates canonical model/tool
-// calls without importing any provider adapter or wire format.
-func TestExecutorDependsOnlyOnTheKernelAndTurnContract(t *testing.T) {
+// The kernel, provider-neutral turn contract, and pure authorization identity
+// are the exceptions: exec needs kernel effects/events, durably coordinates
+// canonical model/tool calls, and derives exact action digests without owning a
+// second canonicalization path.
+func TestExecutorDependsOnlyOnTheKernelTurnAndAuthorizationContracts(t *testing.T) {
 	p := list(t, mod+"internal/exec")
 	for _, d := range p.Deps {
 		if !strings.HasPrefix(d, mod) {
 			continue
 		}
-		if d == mod+"internal/kernel" || d == mod+"internal/turn" {
+		if d == mod+"internal/kernel" || d == mod+"internal/turn" || d == mod+"internal/authorization" {
 			continue
 		}
 		t.Errorf("internal/exec depends on %s.\n"+
-			"  why this is wrong: the executor may depend only on kernel vocabulary and "+
-			"the provider-neutral turn leaf contract. Provider adapters, storage, and "+
-			"wire formats must remain behind interfaces declared by exec.\n"+
+			"  why this is wrong: the executor may depend only on kernel vocabulary, "+
+			"the provider-neutral turn leaf contract, and the pure exact-action identity. "+
+			"Provider adapters, storage, and wire formats must remain behind interfaces "+
+			"declared by exec.\n"+
 			"  what to do: add the methods you need to an interface inside "+
 			"internal/exec and let the concrete type satisfy it at the wiring site in cmd/arxi.", d)
+	}
+}
+
+func TestAuthorizationIsPureAndIndependent(t *testing.T) {
+	for _, p := range ownClosure(t, mod+"internal/authorization") {
+		for _, imp := range p.Imports {
+			if why, bad := forbidden[imp]; bad {
+				t.Errorf("%s imports %q.\n  why this is wrong: %s. Exact action identity must be derived solely from supplied bindings, or persisted grants can change meaning between request and dispatch.\n  what to do: pass every binding into internal/authorization and perform clocks, storage, execution, and I/O in the caller.", p.ImportPath, imp, why)
+			}
+		}
+	}
+
+	for _, d := range list(t, mod+"internal/authorization").Deps {
+		if strings.HasPrefix(d, mod) {
+			t.Errorf("internal/authorization depends on %s.\n  why this is wrong: authorization identity is a pure leaf shared by request and dispatch; importing the executor, kernel, or an adapter would invert that boundary and make the canonical digest depend on runtime machinery.\n  what to do: keep exact action fields and validation in internal/authorization and let callers map their own records into ActionInput.", d)
+		}
 	}
 }
 

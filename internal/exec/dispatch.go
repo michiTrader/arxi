@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
+	"github.com/michiTrader/arxi/internal/authorization"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/turn"
 )
@@ -123,8 +124,22 @@ func hashDispatchParts(parts ...string) string {
 }
 
 func exactActionDigest(jobID, runID, requester, parentWorkID, providerCallID, toolName, argumentDigest, toolSchemaVersion, policyVersion, workspaceProfileID string) string {
-	return hashDispatchParts("arxi.authorization-action/v1", jobID, runID, requester, parentWorkID,
-		providerCallID, toolName, argumentDigest, toolSchemaVersion, policyVersion, workspaceProfileID)
+	action, err := authorization.NewAction(authorization.ActionInput{
+		JobID:                 jobID,
+		RunID:                 runID,
+		RequesterPrincipal:    requester,
+		SuspendedParentWorkID: parentWorkID,
+		ProviderCallID:        providerCallID,
+		ToolName:              toolName,
+		ArgumentDigest:        argumentDigest,
+		ToolSchemaVersion:     toolSchemaVersion,
+		PolicyVersion:         policyVersion,
+		WorkspaceProfileID:    workspaceProfileID,
+	})
+	if err != nil {
+		return ""
+	}
+	return action.Digest()
 }
 
 func (r *Runner) register(meta DispatchMetadata) error {
