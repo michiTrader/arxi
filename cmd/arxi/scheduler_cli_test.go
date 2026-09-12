@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -137,17 +136,7 @@ func arxiBounded(t *testing.T, dir string, d time.Duration, args ...string) stri
 
 	cmd := exec.CommandContext(ctx, buildIash(t), args...)
 	cmd.Dir = dir
-
-	// Its own process group, and killed as a group. `trigger run` spawns
-	// children; killing only the parent would leave them running past the end
-	// of the test, writing into a t.TempDir() that is being deleted.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	configureBoundedTestProcess(cmd)
 
 	out, _ := cmd.CombinedOutput()
 	return string(out)
