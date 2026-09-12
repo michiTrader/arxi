@@ -263,7 +263,7 @@ turn generated prose into trusted user truth.
 | Context overflow | `on_overflow: summarize` is declared but not executed | Tested compaction with an intact source transcript |
 | Scheduling | Temporal triggers exist, while in-flight execution state is process-local | Recoverable, idempotent scheduled and background work |
 | Service integration | The declared protocol surface is broader than its implemented handlers | One honest capability implementation projected across adapters |
-| Workspace isolation | Requested modes currently resolve to weaker runtime behavior than some names imply | Provisioned and verifiably isolated workspace adapters |
+| Workspace isolation | Exact requirements, platform decisions and pre-accept lifecycle are implemented and fail closed. Native Windows advertises only `none`/`no-tools`; native Linux adds `direct-files` but advertises no source-backed mode. Internal shared/copy/worktree provisioners and process containment components are not production availability. | Advertise source-backed and contained-process profiles only after the production capability decision can prove the complete contract on each supported platform |
 
 This table is deliberately about architectural gaps rather than a count of
 commands or tools. Volatile counts belong beside the tests that keep them current.
