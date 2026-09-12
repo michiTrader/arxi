@@ -256,30 +256,42 @@ An earlier version of this table counted subtests for two packages and top-level
 functions for the rest, and the total it summed to was a number no command could
 reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
-| package | what it owns | tests |
+| package | what it owns | Linux test cases |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 67 |
-| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 64 |
-| `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
-| `internal/blueprint` | YAML loading, validation, and freezing by digest | 69 |
-| `internal/surface` | the capability manifest every command is checked against | 31 |
-| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 152 |
-| `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
-| `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
-| `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
-| `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
-| `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
-| `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
-| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 24 |
-| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 16 |
-| `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
-| `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 23 |
-| `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
+| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 652 |
+| `host/v1` | the public host lifecycle and extension ports | 37 |
+| `internal` (arch) | purity, layering, and ownership boundaries | 23 |
 | `internal/agentstore` | stored agents and teams: one file each, and which names a team may compose | 31 |
-| `internal/rolestore` | roles on disk: the defaults `agent create --role` copies once | 14 |
-| `internal/designer` | the designer as a pure function: a model in, a key in, a frame out | 38 |
-| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 602 |
-| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 20 |
+| `internal/app` | durable acceptance, inspection, mutation, and cancellation services | 42 |
+| `internal/authorization` | exact action binding and digest identity | 29 |
+| `internal/blueprint` | YAML loading, validation, and freezing by digest | 70 |
+| `internal/capability` | installed and authorized capability resolution | 15 |
+| `internal/designer` | the designer as pure update and rendering functions | 38 |
+| `internal/eval` | suite files, the fold over cases, and pass-rate denominators | 106 |
+| `internal/evalstore` | eval runs on disk: never rewritten, never pruned, newest first by id | 28 |
+| `internal/exec` | the durable run loop, effect runner, canonical turns, fake executor, and clock | 107 |
+| `internal/fsdurability` | portable directory durability behavior | 2 |
+| `internal/inbox` | durable questions, exact decisions, and answer validation | 35 |
+| `internal/job` | job identity and pure transition validation | 10 |
+| `internal/jobstore` | coordination journal, claims, fencing, receipts, and ledger | 54 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 86 |
+| `internal/logstore` | append-only events, confirmed prefixes, CAS, and recovery | 42 |
+| `internal/model` | model resolution, protocol selection, and turn pricing | 48 |
+| `internal/modelstore` | provider records written atomically | 19 |
+| `internal/provider` | OpenAI and Anthropic native protocol adapters | 43 |
+| `internal/rolestore` | role defaults copied once into stored agents | 14 |
+| `internal/runconfig` | immutable effective configuration and workspace contracts | 9 |
+| `internal/scheduler` | durable trigger occurrence admission and execution | 36 |
+| `internal/supervisor` | resident lifecycle, recovery, and workspace retention | 18 |
+| `internal/surface` | the capability manifest and use-case coverage | 32 |
+| `internal/tool` | allow, ask, or deny policy resolved per tool | 16 |
+| `internal/toolrun` | direct files, search, edit, command profiles, and negative isolation checks | 89 |
+| `internal/toolstore` | per-agent policy overrides written atomically | 20 |
+| `internal/trigger` | schedules, action boundaries, and firing decisions | 167 |
+| `internal/trigstore` | trigger records written atomically | 28 |
+| `internal/turn` | canonical provider-neutral turn values | 5 |
+| `internal/workspace` | pure requirements, profiles, capability decisions, and preflight | 8 |
+| `internal/workspacefs` | source probing and internal source-session lifecycle | 21 |
 
 Those cells add up to the total, and that is the only reason to print them: an
 earlier version of this table did **not** sum to the figure above it — the total
