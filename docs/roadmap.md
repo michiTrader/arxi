@@ -102,6 +102,24 @@ occurrence is not silently duplicated; unknown external outcomes remain visible.
 
 ## Phase 4 — Exact authorization and honest workspaces
 
+**Status:** exact authorization is implemented: immutable grants bind principal,
+call, canonical arguments, schema, policy, expiry and workspace profile, and one
+writer CAS durably appends consumption with the matching work start before
+dispatch. The honest provisioning framework is also implemented: requirements,
+platform decisions, source identity and pre-accept prepared/started/finished
+lifecycle fail closed and survive recovery.
+
+Native availability remains deliberately narrower than the internal adapters and
+tests. Windows advertises only `none` with `no-tools`. Linux advertises that pair
+plus `direct-files`, but no native source-backed mode, so the profile cannot yet
+form an accepted file-using combination. Native `shared`, `copy`, `worktree` and
+`contained-process` are not advertised on either platform. Their internal
+implementations and negative tests are evidence toward the contract, not a claim
+that production provisioners are generally available. They remain preflight
+unavailable until the production capability decision can guarantee source,
+lifecycle, file, descendant, environment, filesystem and network behavior as one
+complete platform contract.
+
 Bind approvals to principal, call ID, canonical arguments or action digest, tool
 schema version, policy version, expiry and single-use consumption. Validate that
 the decision verb matches the pending item kind. Changing any bound field
