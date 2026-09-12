@@ -13,6 +13,7 @@ import (
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 const DefaultCommandLimit = 32
@@ -469,6 +470,15 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 	if err != nil {
 		return fail(fmt.Errorf("verify immutable execution config: %w", err))
 	}
+	if effective.SupportsWorkspaceContract() {
+		current, verifyErr := currentWorkspaceContract(effective.Config, effective.WorkspaceContract.Source, effective.WorkspaceContract.Decisions[0].Platform)
+		if verifyErr != nil {
+			return fail(fmt.Errorf("verify live workspace capabilities: %w", verifyErr))
+		}
+		if verifyErr := effective.VerifyWorkspaceContract(current); verifyErr != nil {
+			return fail(fmt.Errorf("verify live workspace contract: %w", verifyErr))
+		}
+	}
 	recovery, err := exec.Recover(events)
 	if err != nil {
 		return fail(fmt.Errorf("recover durable execution progress: %w", err))
@@ -553,6 +563,26 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		loop.Progress = w.opts.Claim.Checkpoint
 	}
 	return store, effective, loop, nil
+}
+
+func currentWorkspaceContract(config kernel.Config, source workspace.SourceIdentity, platform string) (runconfig.WorkspaceContract, error) {
+	members := make([]workspace.Member, len(config.Members))
+	for i, member := range config.Members {
+		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
+	}
+	stages := make([]workspace.Stage, len(config.Stages))
+	for i, stage := range config.Stages {
+		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
+	}
+	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(config.Workspace), Members: members, Stages: stages})
+	if err != nil {
+		return runconfig.WorkspaceContract{}, err
+	}
+	decisions, err := workspace.Preflight(requirements, workspace.CurrentCapabilities(platform))
+	if err != nil {
+		return runconfig.WorkspaceContract{}, err
+	}
+	return runconfig.WorkspaceContract{Schema: workspace.SchemaV1, Source: source, Requirements: requirements, Decisions: decisions}, nil
 }
 
 func (w *worker) heartbeat(stop <-chan struct{}, done chan<- struct{}) {
