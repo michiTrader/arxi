@@ -33,6 +33,16 @@ func (p *recordingProvisioner) Provision(_ context.Context, req WorkspaceRequest
 	}
 	return p.handles[req.Actor], nil
 }
+func (p *recordingProvisioner) ProvisionSession(ctx context.Context, req WorkspaceRequest) (WorkspaceSessionV1, error) {
+	handle, err := p.Provision(ctx, req)
+	if err != nil {
+		return WorkspaceSessionV1{}, err
+	}
+	return WorkspaceSessionV1{ID: "session:" + string(req.JobID) + ":" + req.Actor, Workspace: handle}, nil
+}
+func (p *recordingProvisioner) RecoverSession(_ context.Context, req WorkspaceRecoveryRequestV1) (WorkspaceSessionV1, error) {
+	return WorkspaceSessionV1{ID: req.SessionID, Workspace: req.Workspace}, nil
+}
 func (p *recordingProvisioner) Release(_ context.Context, handle Workspace) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -77,7 +87,7 @@ func TestPreparedOpaqueHandleIsReusedWithoutProvisioning(t *testing.T) {
 	tools := &recordingTools{}
 	handle := Workspace("opaque:prepared")
 	x := &textExecutor{tools: tools, workspaces: spaces, jobID: "job-prepared",
-		handles: map[string]Workspace{"writer": handle}}
+		sessions: map[string]WorkspaceSessionV1{"writer": {ID: "session:prepared", Workspace: handle}}}
 	if _, err := x.CallTool(context.Background(), kernel.CallTool{Agent: "writer", Tool: "read"}); err != nil {
 		t.Fatal(err)
 	}
@@ -97,3 +107,37 @@ func TestWorkspaceProvisionFailurePreventsToolDispatch(t *testing.T) {
 		t.Fatalf("tool calls = %#v: provisioning refusal must prevent all external tool dispatch", tools.calls)
 	}
 }
+
+func TestRecoveredWorkspaceSessionMustMatchIdentityAndExactHandleBeforeDispatch(t *testing.T) {
+	frozen := map[string]WorkspaceSessionV1{"writer": {ID: "stable-session", Workspace: "opaque:exact"}}
+	for _, test := range []struct {
+		name    string
+		changed WorkspaceSessionV1
+	}{
+		{name: "session identity", changed: WorkspaceSessionV1{ID: "other-session", Workspace: "opaque:exact"}},
+		{name: "opaque handle", changed: WorkspaceSessionV1{ID: "stable-session", Workspace: "opaque:other"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spaces := &changingRecoveryProvisioner{recovered: test.changed}
+			got, err := recoverWorkspaceSessions(context.Background(), "job-recovered", spaces, frozen)
+			if err == nil || got != nil {
+				t.Fatalf("changed %s recovered as %#v, %v: recovery must verify durable session identity and the exact opaque handle before any dispatch", test.name, got, err)
+			}
+		})
+	}
+}
+
+type changingRecoveryProvisioner struct {
+	recovered WorkspaceSessionV1
+}
+
+func (p *changingRecoveryProvisioner) Provision(context.Context, WorkspaceRequest) (Workspace, error) {
+	return p.recovered.Workspace, nil
+}
+func (p *changingRecoveryProvisioner) ProvisionSession(context.Context, WorkspaceRequest) (WorkspaceSessionV1, error) {
+	return p.recovered, nil
+}
+func (p *changingRecoveryProvisioner) RecoverSession(context.Context, WorkspaceRecoveryRequestV1) (WorkspaceSessionV1, error) {
+	return p.recovered, nil
+}
+func (*changingRecoveryProvisioner) Release(context.Context, Workspace) error { return nil }
