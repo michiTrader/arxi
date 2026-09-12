@@ -96,6 +96,9 @@ func buildIash(t *testing.T) string {
 		return arxiBin
 	}
 	bin := filepath.Join(binDir, "arxi")
+	if ext := testExecutableExtension(); ext != "" {
+		bin += ext
+	}
 	out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput()
 	if err != nil {
 		t.Fatalf("building arxi: %v\n%s", err, out)
