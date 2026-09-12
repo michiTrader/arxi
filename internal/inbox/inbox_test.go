@@ -262,6 +262,65 @@ func exactApproval(t *testing.T, mutate func(*kernel.Event)) string {
 	return dir
 }
 
+func readExactApprovalState(t *testing.T, dir string) ([]kernel.Event, kernel.State) {
+	t.Helper()
+	read, err := logstore.ReadConfirmed(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := decodeEvents(dir, read.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{Members: []kernel.MemberConfig{{Name: "worker"}}})
+	return events, state
+}
+
+func TestDueExactDecisionsPersistOneExpiryAndReplayTheRefusal(t *testing.T) {
+	for _, decision := range []Reply{
+		{Decision: DecisionApprove, Principal: "operator:alice"},
+		{Decision: DecisionReject, Text: "unsafe", Principal: "operator:alice"},
+	} {
+		t.Run(decision.Decision, func(t *testing.T) {
+			dir := exactApproval(t, nil)
+			observed := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+			result, err := DecideExact(dir, "approval-1", decision, observed)
+			if !errors.Is(err, ErrAuthorizationExpired) {
+				t.Fatalf("due %s error = %v, want ErrAuthorizationExpired: elapsed authority must fail closed after recording expiry", decision.Decision, err)
+			}
+			if result.Reply.Type != "" || result.Authorization == nil || result.Authorization.Type != kernel.AuthorizationExpired {
+				t.Fatalf("due %s result = %#v: failure must persist only authorization.expired, never a reply or terminal human decision", decision.Decision, result)
+			}
+			events, state := readExactApprovalState(t, dir)
+			last := events[len(events)-1]
+			a := state.Authorization("authorization-1")
+			if last.Type != kernel.AuthorizationExpired || last.Source != kernel.SourceRuntime || last.Str("expired_at") != "2026-09-12T00:00:00Z" {
+				t.Fatalf("persisted expiry = %+v: replay needs the immutable deadline judgment in a runtime event", last)
+			}
+			if a == nil || a.Decision != "expired" || !state.InboxItem("approval-1").Replied {
+				t.Fatalf("replayed authorization/inbox = %+v/%+v: restart could expose elapsed authority again; fold the durable expiry as terminal", a, state.InboxItem("approval-1"))
+			}
+		})
+	}
+}
+
+func TestAlreadyRecordedExpiryIsStableAndIdempotent(t *testing.T) {
+	dir := exactApproval(t, nil)
+	at := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+	if _, err := DecideExact(dir, "approval-1", Reply{Decision: DecisionApprove, Principal: "operator:alice"}, at); !errors.Is(err, ErrAuthorizationExpired) {
+		t.Fatalf("first due approval error = %v, want ErrAuthorizationExpired", err)
+	}
+	eventsBefore, _ := readExactApprovalState(t, dir)
+	_, err := DecideExact(dir, "approval-1", Reply{Decision: DecisionReject, Text: "still unsafe", Principal: "operator:bob"}, at.Add(time.Hour))
+	if !errors.Is(err, ErrAlreadyAnswered) {
+		t.Fatalf("decision after recorded expiry = %v, want ErrAlreadyAnswered: the durable terminal fact must win without another expiry append", err)
+	}
+	eventsAfter, _ := readExactApprovalState(t, dir)
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("recorded expiry grew log from %d to %d events: retries must not duplicate terminal judgments", len(eventsBefore), len(eventsAfter))
+	}
+}
+
 func TestExactApprovalRecordsPrincipalAndDecisionInOneBatch(t *testing.T) {
 	dir := exactApproval(t, nil)
 	oldNow := now
