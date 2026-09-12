@@ -117,8 +117,16 @@ for another agent, which is a deadlock the budget pays for by the second.
 
 ## 20.2 UC-2 — The tool that needs permission
 
-The first time the tool is not merely convenient. The agent needs `bash`, which
-nobody authorized.
+This scenario describes the exact-authorization lifecycle, but its native
+execution prerequisites are not currently advertised. A text-only run can start
+on Windows or Linux. Linux additionally advertises the `direct-files` profile,
+but no native source-backed mode; Windows does not advertise direct files at all.
+Neither platform advertises `contained-process`, so this `bash` run fails
+preflight before `run.started` rather than reaching the inbox. The request,
+grant, durable consume/start, and resumed-call semantics below are implemented
+and tested through explicit adapters; the transcript becomes a native CLI path
+only after the production capability decision can guarantee the complete
+workspace and process contract.
 
 ```
 $ arxi agent create backend --model claude-sonnet-4-6 --tools read,write,bash
