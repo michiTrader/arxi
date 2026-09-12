@@ -17,6 +17,7 @@ import (
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
 	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 type lifecycleStub struct {
@@ -49,6 +50,54 @@ func (s *submissionCoordinatorStub) BindSubmission(value SubmissionBinding) (Sub
 		return SubmissionBinding{}, ErrSubmissionConflict
 	}
 	return s.binding, nil
+}
+
+func TestWorkspacePreflightRejectsBeforePublishingOrLaunching(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		blueprint string
+		want      string
+	}{
+		{name: "copy provisioner", blueprint: "name: worker\nworkspace: copy\nmembers:\n  - {name: writer, tools: [write]}\n", want: "copy"},
+		{name: "worktree provisioner", blueprint: "name: worker\nworkspace: worktree\nmembers:\n  - {name: writer, tools: [write]}\n", want: "worktree"},
+		{name: "process containment", blueprint: "name: worker\nworkspace: none\nmembers:\n  - {name: shell, tools: [bash]}\n", want: "requests workspace none"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			lifecycle := &lifecycleStub{}
+			service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle, Platform: "linux", NewID: func() string { return "refused" }}
+			_, err := service.Submit(context.Background(), SubmitRequest{Blueprint: []byte(test.blueprint), Prompt: "work", BudgetUSD: 1, Simulated: true})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("preflight error = %v, want %q: unsupported guarantees must be named before acceptance so the operator can select a realizable contract", err, test.want)
+			}
+			if lifecycle.launches != 0 {
+				t.Fatalf("lifecycle launched %d times after workspace refusal: provider dispatch can spend or mutate before the promised workspace exists", lifecycle.launches)
+			}
+			entries, readErr := os.ReadDir(root)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("run root after workspace refusal = %v / %v: preflight must happen before a run directory, log, or effective artifact becomes visible", entries, readErr)
+			}
+		})
+	}
+}
+
+func TestAcceptedTextOnlyRunFreezesNoToolsProfileForAuthorization(t *testing.T) {
+	root := t.TempDir()
+	lifecycle := &lifecycleStub{launchErr: errors.New("stop after acceptance")}
+	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle, Platform: "windows", NewID: func() string { return "text-only" }}
+	_, err := service.Submit(context.Background(), SubmitRequest{
+		Blueprint: []byte("name: worker\nmembers:\n  - {name: text}\n"), Prompt: "work", BudgetUSD: 1, Simulated: true,
+	})
+	if err == nil {
+		t.Fatal("lifecycle failure was hidden: this test must inspect the artifact after the acceptance boundary")
+	}
+	artifact, _, loadErr := runconfig.Load(filepath.Join(root, "text-only"))
+	if loadErr != nil {
+		t.Skipf("native Windows cannot fsync directories in this test environment: %v", loadErr)
+	}
+	if artifact.WorkspaceProfileID != workspace.NoToolsProfileID || artifact.WorkspaceContract == nil || artifact.WorkspaceContract.Decisions[0].Platform != "windows" {
+		t.Fatalf("frozen workspace identity = profile %q contract %#v: exact authorization must bind the selected profile and platform decision, not the legacy label", artifact.WorkspaceProfileID, artifact.WorkspaceContract)
+	}
 }
 
 func TestSubmitPreparedPublishesExactArtifactAndCallbackBoundary(t *testing.T) {
