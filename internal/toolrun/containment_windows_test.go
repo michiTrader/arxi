@@ -20,7 +20,8 @@ var workspaceCommandForWindowsTest = workspace.CommandProfile{
 }
 
 func TestWindowsRefusesCommandBeforeExecutionWithoutJobContainment(t *testing.T) {
-	w := ws(t)
+	root := t.TempDir()
+	w := &Workspace{Root: root, Member: "windows-refusal"}
 	w.command = &workspaceCommandForWindowsTest
 	marker := filepath.Join(w.Root, "must-not-run.txt")
 	_, err := w.Bash(context.Background(), "echo escaped > must-not-run.txt", time.Second)
