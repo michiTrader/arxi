@@ -124,7 +124,7 @@ func (v *validator) config(root map[string]any) kernel.Config {
 
 	var cfg kernel.Config
 	cfg.Blueprint = v.str("blueprint", root, "name")
-	cfg.Workspace = v.enum("blueprint", root, "workspace", "none", "shared", "worktree")
+	cfg.Workspace = v.enum("blueprint", root, "workspace", "none", "shared", "copy", "worktree")
 	cfg.ResultFrom = v.str("blueprint", root, "result_from")
 
 	if raw, ok := root["budget_warn_pct"]; ok && raw != nil {
@@ -298,7 +298,7 @@ func (v *validator) stages(raw any, members []kernel.MemberConfig) []kernel.Stag
 		sc := kernel.StageConfig{
 			Name:       v.str(where, m, "name"),
 			OnTimeout:  v.enum(where, m, "on_timeout", "escalate", "advance", "fail", "ask"),
-			Workspace:  v.enum(where, m, "workspace", "none", "shared", "worktree"),
+			Workspace:  v.enum(where, m, "workspace", "none", "shared", "copy", "worktree"),
 			OnConflict: v.enum(where, m, "on_conflict", "queue", "steer", "reject"),
 		}
 		if sc.Name == "" {
