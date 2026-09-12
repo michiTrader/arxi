@@ -143,11 +143,18 @@ possible remedies:
   $ arxi agent tool policy --agent backend --allow bash
 ```
 
-**The defaults are security decisions.** If any member can write files, the
-workspace becomes a `worktree` per member: two agents in the same directory
-overwrite each other and the result is garbage that is hard to attribute. A
-stage timeout escalates, it does not fail — failing by default trains the user
-to set absurd timeouts. Mutating tools do not authorize themselves.
+**Workspace and tool authority fail closed.** Source layout and execution
+containment are separate contracts, and the native builds advertise only what
+their platform adapters can prove. Windows currently advertises `none` with the
+`no-tools` profile. Linux advertises that same combination plus the
+`direct-files` profile, but no native source-backed mode yet, so file-using runs
+still fail preflight. `shared`, `copy`, `worktree`, and the `contained-process`
+profile are not advertised on native Windows or Linux; `bash` therefore cannot
+run there under the Phase 4 contract. Internal provisioner and containment code
+is test evidence, not production availability: those capabilities stay
+unavailable until the production capability decision can guarantee source
+identity, lifecycle, handle-relative access, descendant control, environment,
+filesystem reach, and network policy together.
 
 **Spending is auditable.** The budget belongs to the tree (`TreeSpentUSD`), so a
 nested spawn cannot multiply the ceiling of the root. And when N causes are
