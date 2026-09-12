@@ -36,6 +36,7 @@ type storageWorker struct {
 type storageCommand struct {
 	ctx        context.Context
 	makeEvents func([]kernel.Event) ([]kernel.Event, error)
+	persistOn  func(error) bool
 	reply      chan error
 }
 
@@ -167,7 +168,8 @@ func (w *storageWorker) run() {
 }
 
 func (w *storageWorker) command(ctx context.Context, makeEvents func([]kernel.Event) ([]kernel.Event, error)) error {
-	command := storageCommand{ctx: ctx, makeEvents: makeEvents, reply: make(chan error, 1)}
+	command := storageCommand{ctx: ctx, makeEvents: makeEvents,
+		persistOn: func(err error) bool { return errors.Is(err, errAuthorizationExpired) }, reply: make(chan error, 1)}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -203,9 +205,9 @@ func (w *storageWorker) applyCommand(command storageCommand) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	events, err := command.makeEvents(append([]kernel.Event(nil), w.events...))
-	if err != nil {
-		return err
+	events, commandErr := command.makeEvents(append([]kernel.Event(nil), w.events...))
+	if commandErr != nil && (command.persistOn == nil || !command.persistOn(commandErr) || len(events) == 0) {
+		return commandErr
 	}
 	records := make([]StoredRecord, len(events))
 	for i, event := range events {
@@ -228,7 +230,7 @@ func (w *storageWorker) applyCommand(command storageCommand) error {
 		w.events = append(w.events, decoded)
 	}
 	w.signalChanged()
-	return nil
+	return commandErr
 }
 
 func (w *storageWorker) appendRecoveredCancellation(ctx context.Context) error {

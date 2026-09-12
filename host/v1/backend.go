@@ -315,6 +315,9 @@ func (b *storageBackend) decisionEvents(events []kernel.Event, config kernel.Con
 		return nil, errItemNotFound
 	}
 	if item.Replied {
+		if a := state.Authorization(item.AuthorizationID); a != nil && a.Decision == "expired" {
+			return nil, errAuthorizationExpired
+		}
 		return nil, errAlreadyDecided
 	}
 	approval := item.Kind == "tool_approval"
@@ -345,8 +348,14 @@ func (b *storageBackend) decisionEvents(events []kernel.Event, config kernel.Con
 		return nil, errInvalidPrincipal
 	}
 	expires, err := time.Parse(time.RFC3339, a.ExpiresAt)
-	if err != nil || !b.clock().Before(expires) {
+	if err != nil {
 		return nil, errAuthorizationExpired
+	}
+	if observedAt := b.clock(); !observedAt.Before(expires) {
+		// The failed mutation must leave its clock judgment in the same log the
+		// decision would have changed. Otherwise restart could forget the refusal
+		// and expose the exact action as pending again.
+		return []kernel.Event{authorizationExpiredEvent(*a, observedAt)}, errAuthorizationExpired
 	}
 	reply.Payload["authorization_id"], reply.Payload["action_digest"] = a.ID, a.ActionDigest
 	payload := map[string]any{"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest}
@@ -359,6 +368,14 @@ func (b *storageBackend) decisionEvents(events []kernel.Event, config kernel.Con
 	}
 	authorization := kernel.Event{ID: eventID, Type: typeName, Ts: at, Source: kernel.SourceHuman, Payload: payload}
 	return []kernel.Event{authorization, reply}, nil
+}
+
+func authorizationExpiredEvent(a kernel.Authorization, observedAt time.Time) kernel.Event {
+	return kernel.Event{ID: "authorization-expired-" + a.ID, Type: kernel.AuthorizationExpired,
+		Ts: observedAt.UTC().Format(time.RFC3339Nano), Source: kernel.SourceRuntime, Payload: map[string]any{
+			"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+			"expired_at": a.ExpiresAt,
+		}}
 }
 
 func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, itemID ItemID,
@@ -395,20 +412,30 @@ func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, it
 	}
 	eventsToAppend, err := makeEvents(events)
 	if err != nil {
+		if errors.Is(err, errAuthorizationExpired) && len(eventsToAppend) > 0 {
+			if appendErr := b.appendMutationEvents(ctx, writer, record.Revision, eventsToAppend); appendErr != nil {
+				return Job{}, adaptStorageError(op, id, 0, appendErr)
+			}
+		}
 		return Job{}, adaptMutationFailure(op, id, itemID, err)
 	}
-	records := make([]StoredRecord, len(eventsToAppend))
-	for i, event := range eventsToAppend {
-		encoded, encodeErr := encodeStoredEvent(event)
-		if encodeErr != nil {
-			return Job{}, adaptStorageError(op, id, 0, encodeErr)
-		}
-		records[i] = StoredRecord{Data: encoded}
-	}
-	if _, err = writer.Append(ctx, AppendBatch{Expected: record.Revision, Records: records}); err != nil {
+	if err := b.appendMutationEvents(ctx, writer, record.Revision, eventsToAppend); err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
 	return b.inspect(ctx, op, id)
+}
+
+func (b *storageBackend) appendMutationEvents(ctx context.Context, writer JobWriter, revision Revision, events []kernel.Event) error {
+	records := make([]StoredRecord, len(events))
+	for i, event := range events {
+		encoded, err := encodeStoredEvent(event)
+		if err != nil {
+			return err
+		}
+		records[i] = StoredRecord{Data: encoded}
+	}
+	_, err := writer.Append(ctx, AppendBatch{Expected: revision, Records: records})
+	return err
 }
 
 func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error) {
