@@ -156,10 +156,11 @@ digests, changed bindings, elapsed grants and a second consumption fail closed.
 fresh model turn. Immediately before dispatch the fenced worker re-folds the
 confirmed prefix and verifies the grant and continuation. It atomically appends
 `authorization.consumed` and the exact child's `exec.work_started`; only then may
-the runner see the call. A crash after that boundary is handled as started work:
-a trustworthy receipt may reconcile it, otherwise a non-idempotent outcome is
-`unknown`. Recovery never restores the grant or guesses that the external action
-did not happen.
+the runner see the call. The consume/start pair is therefore the durable point of
+no return, not evidence that the external action completed. A crash after that
+boundary is handled as started work: a trustworthy receipt may reconcile it,
+otherwise a non-idempotent outcome is `unknown`. Recovery never restores the grant
+or guesses that the external action did not happen.
 
 Authorization expiry uses timer id `authorization:<authorization_id>`. A grant
 remains subject to the timer until consumption. `timer.tick` records
