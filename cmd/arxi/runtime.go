@@ -270,8 +270,16 @@ func runtimeExecutor(dir string, a runconfig.Artifact, provisioners ...workspace
 	if a.WorkspaceContract == nil {
 		return nil, fmt.Errorf("live execution requires a frozen workspace contract")
 	}
-	if _, err := workspacefs.Verify(context.Background(), a.WorkspaceContract.Source); err != nil {
-		return nil, fmt.Errorf("verify frozen workspace source: %w", err)
+	if a.WorkspaceContract.Source.Kind == "git" {
+		if _, err := workspacefs.Verify(context.Background(), a.WorkspaceContract.Source); err != nil {
+			return nil, fmt.Errorf("verify frozen workspace source: %w", err)
+		}
+	} else {
+		for _, requirement := range a.WorkspaceContract.Requirements {
+			if requirement.RequiresSource {
+				return nil, fmt.Errorf("member %q requires source, but frozen source kind is %q", requirement.Member, a.WorkspaceContract.Source.Kind)
+			}
+		}
 	}
 	requests := map[string]workspacefs.Request{}
 	prepared, err := workspaceRequests(a)
