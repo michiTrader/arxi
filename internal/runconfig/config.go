@@ -228,6 +228,24 @@ func (a Artifact) SupportsExactAuthorization() bool { return !a.legacyAuthorizat
 
 func (a Artifact) SupportsWorkspaceContract() bool { return a.WorkspaceContract != nil }
 
+func (a Artifact) VerifyWorkspaceContract(current WorkspaceContract) error {
+	if a.WorkspaceContract == nil {
+		return fmt.Errorf("effective config predates the workspace contract; replay remains valid but live resume cannot infer source or containment guarantees")
+	}
+	frozen, err := json.Marshal(a.WorkspaceContract)
+	if err != nil {
+		return fmt.Errorf("encode frozen workspace contract: %w", err)
+	}
+	observed, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("encode current workspace contract: %w", err)
+	}
+	if !bytes.Equal(frozen, observed) {
+		return fmt.Errorf("current workspace contract does not match the frozen effective configuration")
+	}
+	return nil
+}
+
 func requireEOF(dec *json.Decoder) error {
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
