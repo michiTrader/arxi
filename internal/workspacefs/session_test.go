@@ -86,9 +86,6 @@ func TestSourceLayoutsExposeFrozenTrackedTreeWithPromisedVisibility(t *testing.T
 				t.Fatalf("read tracked source: %v", err)
 			}
 			want := "frozen\n"
-			if mode == workspace.ModeShared {
-				want = "dirty\n"
-			}
 			if strings.ReplaceAll(string(body), "\r\n", "\n") != want {
 				t.Fatalf("%s tracked source = %q, want %q: layouts must expose exactly their declared source view", mode, body, want)
 			}

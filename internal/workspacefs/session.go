@@ -95,7 +95,13 @@ func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 	case workspace.ModeNone:
 		got = session{id: key}
 	case workspace.ModeShared:
-		got, err = m.provisionShared(ctx, req, key)
+		shared := req
+		shared.Member = "shared"
+		key = sessionKey(shared)
+		if existing := m.live[key]; existing != nil {
+			return existing, nil
+		}
+		got, err = m.provisionShared(ctx, shared, key)
 	case workspace.ModeCopy:
 		got, err = m.provisionCopy(ctx, req, key)
 	case workspace.ModeWorktree:
@@ -114,16 +120,40 @@ func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 }
 
 func (m *Manager) provisionShared(ctx context.Context, req Request, key string) (Session, error) {
-	root, err := canonical(req.Source.CanonicalRoot)
-	if err != nil {
-		return nil, fmt.Errorf("verify shared source root: %w", err)
+	shared := req
+	shared.Mode = workspace.ModeCopy
+	root := m.path(shared)
+	if exists(root) {
+		if err := verifyMarker(root, req); err != nil {
+			return nil, err
+		}
+		if err := verifySnapshot(ctx, root, req); err != nil {
+			return nil, err
+		}
+		return session{id: key, root: root, hasRoot: true}, nil
 	}
-	if root != req.Source.CanonicalRoot {
-		return nil, fmt.Errorf("shared source root %q disagrees with frozen canonical root %q", root, req.Source.CanonicalRoot)
+	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+		return nil, fmt.Errorf("create shared workspace parent: %w", err)
 	}
-	commit, err := gitOutput(ctx, root, "rev-parse", "HEAD^{commit}")
-	if err != nil || strings.TrimSpace(commit) != req.Source.Commit {
-		return nil, fmt.Errorf("shared source HEAD does not match frozen commit %s", req.Source.Commit)
+	tmp := root + ".partial"
+	if exists(tmp) {
+		if err := os.RemoveAll(tmp); err != nil {
+			return nil, fmt.Errorf("reconcile partial shared workspace: %w", err)
+		}
+	}
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		return nil, fmt.Errorf("create shared workspace: %w", err)
+	}
+	if err := copyTrackedTree(ctx, tmp, req.Source); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, err
+	}
+	if err := writeMarker(tmp, req); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, err
+	}
+	if err := os.Rename(tmp, root); err != nil {
+		return nil, fmt.Errorf("publish shared workspace: %w", err)
 	}
 	return session{id: key, root: root, hasRoot: true}, nil
 }
