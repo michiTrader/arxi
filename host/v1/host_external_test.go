@@ -118,3 +118,27 @@ func TestPhaseOneStatusAndCapabilities(t *testing.T) {
 		t.Fatal("capability membership is wrong")
 	}
 }
+
+func TestExternalWorkspacePortsWithoutDeclarationFailClosed(t *testing.T) {
+	h := host.New(host.Options{Provider: textProvider{}, Storage: newMemoryStorage(), Tools: tools{}, Workspaces: workspaces{}})
+	defer h.Close()
+	_, err := h.Submit(context.Background(), host.SubmitRequest{
+		Blueprint: "name: example\nworkspace: shared\nmembers:\n  - {name: reader, tools: [read]}\n",
+		Prompt:    "inspect", BudgetUSD: 1, Simulated: true,
+	})
+	if err == nil {
+		t.Fatal("unspecified external workspace ports accepted direct files: non-nil ports are implementations, not declarations of handle-relative safety")
+	}
+}
+
+func TestExternalLegacyOptionsRemainSourceCompatibleForTextOnlyJobs(t *testing.T) {
+	options := host.Options{Provider: textProvider{}, Storage: newMemoryStorage(), Tools: tools{}, Workspaces: workspaces{}}
+	h := host.New(options)
+	defer h.Close()
+	result, err := h.Submit(context.Background(), host.SubmitRequest{
+		Blueprint: "name: example\nmembers:\n  - {name: text}\n", Prompt: "write text", BudgetUSD: 1, Simulated: true,
+	})
+	if err != nil || result.JobID == "" {
+		t.Fatalf("text-only submission with legacy options = %#v, %v: additive workspace declarations must not break existing source or text behavior", result, err)
+	}
+}
