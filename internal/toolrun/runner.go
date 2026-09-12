@@ -38,8 +38,9 @@ type Runner struct {
 	Requests map[string]workspacefs.Request
 	Timeout  time.Duration
 
-	mu     sync.Mutex
-	spaces map[string]*Workspace
+	mu       sync.Mutex
+	spaces   map[string]*Workspace
+	sessions map[string]workspacefs.Session
 }
 
 // workspaceFor obtains the stable session and opens its verified root once.
@@ -75,7 +76,11 @@ func (r *Runner) workspaceFor(member string) (*Workspace, error) {
 	if r.spaces == nil {
 		r.spaces = map[string]*Workspace{}
 	}
+	if r.sessions == nil {
+		r.sessions = map[string]workspacefs.Session{}
+	}
 	r.spaces[member] = w
+	r.sessions[member] = session
 	return w, nil
 }
 
@@ -264,14 +269,38 @@ func formatBash(res BashResult) string {
 	return b.String()
 }
 
-// Release explicitly releases owned managed sessions. Callers must use it only
-// after the durable run outcome makes cleanup safe.
+// Close releases process-local root handles but preserves managed workspace
+// evidence. It is safe for failed, cancelled, idle and unknown outcomes.
+func (r *Runner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var closeErr error
+	for member, space := range r.spaces {
+		if err := space.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close workspace root for %s: %w", member, err))
+		}
+	}
+	r.spaces = nil
+	return closeErr
+}
+
+// Release closes roots and releases exactly owned managed sessions. Callers must
+// use it only after a durable successful terminal outcome.
 func (r *Runner) Release(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var releaseErr error
+	for member, space := range r.spaces {
+		if err := space.Close(); err != nil {
+			releaseErr = errors.Join(releaseErr, fmt.Errorf("close workspace root for %s: %w", member, err))
+		}
+	}
 	for member, req := range r.Requests {
-		session, err := r.Sessions.Provision(ctx, req)
+		session := r.sessions[member]
+		var err error
+		if session == nil {
+			session, err = r.Sessions.Provision(ctx, req)
+		}
 		if err == nil {
 			err = r.Sessions.Release(ctx, req, session)
 		}
@@ -281,6 +310,7 @@ func (r *Runner) Release(ctx context.Context) error {
 	}
 	if releaseErr == nil {
 		r.spaces = nil
+		r.sessions = nil
 	}
 	return releaseErr
 }
