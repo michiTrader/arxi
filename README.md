@@ -552,8 +552,8 @@ directions. Four things are being built, and they are at very different stages:
 Read together they say something a single percentage cannot: **what is declared
 is finished, and what is declared is not everything a person could want.** The
 reducer, the log, the fold, the budget arithmetic and the trigger/eval/model
-layers are complete and heavily tested — that is where most of the 1542 tests
-live. What used to be missing was the last mile, CLI verbs that would read state
+layers are complete and heavily tested — that is where most of the 1980 Linux test
+cases live. What used to be missing was the last mile, CLI verbs that would read state
 the runners already produced, and the last mile is walked: the four rows above are
 the four things this project set out to build, and each is now at its declared
 size. What none of them measures is scale — every number here is coverage of a
