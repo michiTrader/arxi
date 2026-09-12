@@ -118,6 +118,20 @@ type Executor struct {
 	ids map[string]int
 }
 
+func (x *Executor) CloseWorkspaces() error {
+	if lifecycle, ok := x.Tools.(interface{ Close() error }); ok {
+		return lifecycle.Close()
+	}
+	return nil
+}
+
+func (x *Executor) ReleaseWorkspaces(ctx context.Context) error {
+	if lifecycle, ok := x.Tools.(interface{ Release(context.Context) error }); ok {
+		return lifecycle.Release(ctx)
+	}
+	return nil
+}
+
 // SpawnTurn calls the model and reports what it cost.
 //
 // The event order is copied from exec.Fake and every step of it is load-bearing
