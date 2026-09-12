@@ -23,6 +23,7 @@ import (
 	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/runread"
 	"github.com/michiTrader/arxi/internal/supervisor"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 // Lifecycle is the narrow handoff between durable acceptance and a process
@@ -119,6 +120,8 @@ type AcceptanceServices struct {
 	Now          func() time.Time
 	DefaultModel string
 	Routes       []runconfig.Route
+	Platform     string
+	Source       workspace.SourceIdentity
 }
 
 // Submit validates and durably accepts one job. Before run.started is confirmed,
@@ -163,7 +166,17 @@ func (s AcceptanceServices) Submit(ctx context.Context, req SubmitRequest) (Subm
 		mode = "sim"
 	}
 	artifact := runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil)
-	digest, err := submissionDigest(actor, bp.Raw, artifact, req.BudgetUSD, req.MaxTurns)
+	legacyDigest, err := submissionDigest(actor, bp.Raw, artifact, req.BudgetUSD, req.MaxTurns)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
+	}
+	artifact, err = s.freezeWorkspace(artifact)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
+	}
+	artifactForDigest := artifact
+	artifactForDigest.RunID = ""
+	digest, err := submissionDigest(actor, bp.Raw, artifactForDigest, req.BudgetUSD, req.MaxTurns)
 	if err != nil {
 		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
 	}
@@ -171,19 +184,27 @@ func (s AcceptanceServices) Submit(ctx context.Context, req SubmitRequest) (Subm
 		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("supplied request digest disagrees with canonical submission")}
 	}
 	if req.IdempotencyKey != "" {
-		bound, err := s.bindSubmission(SubmissionBinding{Key: req.IdempotencyKey, RequestDigest: digest, JobID: job.JobID(id)})
+		bindingDigest := digest
+		// A durable key created before workspace contracts landed keeps naming its
+		// original request. Accepting that exact legacy digest prevents an upgrade
+		// from inventing a second job while the new artifact still freezes the
+		// stronger contract before publication.
+		if req.RequestDigest == "" {
+			bindingDigest = legacyDigest
+		}
+		bound, err := s.bindSubmission(SubmissionBinding{Key: req.IdempotencyKey, RequestDigest: bindingDigest, JobID: job.JobID(id)})
 		if err != nil {
 			return SubmitResult{}, err
 		}
 		id = string(bound.JobID)
-		artifact = runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil)
+		artifact.RunID = id
 	}
 	prepared := PreparedSubmission{
 		JobID: id, Actor: actor, Blueprint: bp.Raw,
 		Artifact:      artifact,
 		BudgetUSD:     req.BudgetUSD,
 		MaxTurns:      req.MaxTurns,
-		RequestDigest: digest,
+		RequestDigest: "",
 	}
 	submission, err := s.SubmitPrepared(ctx, prepared)
 	return submission.Result, err
@@ -458,6 +479,48 @@ func Wait(ctx context.Context, submission Submission, policy WaitPolicy) (WaitRe
 			return WaitResult{Outcome: result.Outcome, Err: result.Err}, nil
 		}
 	}
+}
+
+func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runconfig.Artifact, error) {
+	members := make([]workspace.Member, len(artifact.Config.Members))
+	for i, member := range artifact.Config.Members {
+		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
+	}
+	stages := make([]workspace.Stage, len(artifact.Config.Stages))
+	for i, stage := range artifact.Config.Stages {
+		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
+	}
+	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(artifact.Config.Workspace), Members: members, Stages: stages})
+	if err != nil {
+		return artifact, fmt.Errorf("resolve workspace requirements: %w", err)
+	}
+	platform := s.Platform
+	if platform == "" {
+		platform = "unknown"
+	}
+	decisions, err := workspace.Preflight(requirements, workspace.CurrentCapabilities(platform))
+	if err != nil {
+		return artifact, fmt.Errorf("workspace preflight: %w", err)
+	}
+	source := s.Source
+	if source.Schema == "" {
+		source = workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none",
+			DirtyPolicy: "excluded", UntrackedPolicy: "excluded", IgnoredPolicy: "excluded",
+			SubmodulePolicy: "refused", SymlinkPolicy: "internal-relative-only", SpecialFilePolicy: "refused"}
+	}
+	artifact.WorkspaceContract = &runconfig.WorkspaceContract{Schema: workspace.SchemaV1, Source: source,
+		Requirements: requirements, Decisions: decisions}
+	if len(requirements) > 0 {
+		profile := requirements[0].ProfileID
+		for _, requirement := range requirements[1:] {
+			if requirement.ProfileID != profile {
+				profile = "arxi.workspace/mixed-v1"
+				break
+			}
+		}
+		artifact.WorkspaceProfileID = profile
+	}
+	return artifact, nil
 }
 
 func (s AcceptanceServices) newID() string {

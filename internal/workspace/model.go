@@ -77,7 +77,7 @@ type Profile struct {
 func CurrentCapabilities(platform string) Capabilities {
 	return Capabilities{
 		Schema: SchemaV1, CapabilityVersion: "arxi.workspace-capabilities/initial-v1", Platform: platform,
-		Modes: []Mode{ModeNone, ModeShared},
+		Modes: []Mode{ModeNone},
 		Profiles: []Profile{
 			{Schema: ProfileSchemaV1, ID: NoToolsProfileID, FileAccess: FileAccessNone,
 				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
@@ -85,7 +85,7 @@ func CurrentCapabilities(platform string) Capabilities {
 				HandleRelative: true, FinalLinkRaceFree: platform != "windows",
 				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
 		},
-		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1", ModeShared: "arxi.workspace.shared-current-directory/v1"},
+		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1"},
 	}
 }
 

@@ -30,8 +30,8 @@ func TestCurrentLinuxAndWindowsCapabilitiesReportOnlyProvenGuarantees(t *testing
 		if err := ValidateCapabilities(capabilities); err != nil {
 			t.Fatalf("%s current capabilities are internally invalid: an adapter cannot make an honest preflight decision: %v", platform, err)
 		}
-		if len(capabilities.Modes) != 2 || capabilities.Modes[0] != ModeNone || capabilities.Modes[1] != ModeShared {
-			t.Errorf("%s modes = %v: copy and worktree must stay unadvertised until their real provisioners land", platform, capabilities.Modes)
+		if len(capabilities.Modes) != 1 || capabilities.Modes[0] != ModeNone {
+			t.Errorf("%s modes = %v: shared cannot claim a verified source view yet, and copy/worktree must stay unadvertised until their real provisioners land", platform, capabilities.Modes)
 		}
 		if capabilities.Profiles[1].FinalLinkRaceFree != (platform != "windows") {
 			t.Errorf("%s final-link race-free capability = %v: Windows must report its check/open gap while Linux reports O_NOFOLLOW", platform, capabilities.Profiles[1].FinalLinkRaceFree)
