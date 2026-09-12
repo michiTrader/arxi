@@ -69,6 +69,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/surface"
 	"github.com/michiTrader/arxi/internal/tool"
 )
@@ -226,7 +227,7 @@ func (s *Store) Clear(agent, toolName string) (bool, error) {
 		if err := os.Remove(s.Path(agent)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf("toolstore: remove policy for %q: %w", agent, err)
 		}
-		return true, fsyncDir(s.dir)
+		return true, fsdurability.SyncDirectory(s.dir)
 	}
 	return true, s.write(rec)
 }
@@ -374,18 +375,5 @@ func (s *Store) write(r Record) error {
 	}
 	// The rename is a directory operation. Fsyncing the file does not make the
 	// entry that names it durable, so the directory needs its own sync.
-	return fsyncDir(s.dir)
-}
-
-// fsyncDir makes a rename durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("toolstore: open %s to sync: %w", dir, err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("toolstore: sync %s: %w", dir, err)
-	}
-	return nil
+	return fsdurability.SyncDirectory(s.dir)
 }
