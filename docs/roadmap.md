@@ -125,8 +125,10 @@ schema version, policy version, expiry and single-use consumption. Validate that
 the decision verb matches the pending item kind. Changing any bound field
 invalidates the grant.
 
-Replace aspirational workspace labels with real provisioners for supported modes,
-including Git worktrees where promised. Unsupported guarantees fail closed.
+Complete production capability decisions for any source-backed mode selected for
+support, including Git worktrees only where the full contract can be promised.
+Unsupported guarantees continue to fail closed; an internal adapter does not by
+itself make a mode supported.
 Constrain process trees, filesystem reach, environment inheritance and network
 access according to declared policy, with platform-specific negative tests.
 
