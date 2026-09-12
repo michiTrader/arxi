@@ -5,6 +5,55 @@ import (
 	"encoding/json"
 )
 
+// WorkspaceCapabilitiesV1 is the explicit, versioned host declaration used for
+// preflight. Nil preserves text-only source compatibility and promises no tool
+// or source guarantees.
+type WorkspaceCapabilitiesV1 struct {
+	Schema            string               `json:"schema"`
+	CapabilityVersion string               `json:"capability_version"`
+	Platform          string               `json:"platform"`
+	Modes             []string             `json:"modes"`
+	SourceKinds       []string             `json:"source_kinds,omitempty"`
+	Profiles          []WorkspaceProfileV1 `json:"profiles"`
+	Provisioners      map[string]string    `json:"provisioners"`
+}
+
+const WorkspaceCapabilitiesSchemaV1 = "arxi.host.workspace-capabilities/v1"
+
+// WorkspaceProfileV1 declares one complete profile. ID is a display/selection
+// label; exact authorization binds the digest identity of all profile fields.
+type WorkspaceProfileV1 struct {
+	Schema            string                     `json:"schema"`
+	ID                string                     `json:"id"`
+	FileAccess        string                     `json:"file_access"`
+	HandleRelative    bool                       `json:"handle_relative"`
+	FinalLinkRaceFree bool                       `json:"final_link_race_free"`
+	Process           WorkspaceProcessProfileV1  `json:"process"`
+	Command           *WorkspaceCommandProfileV1 `json:"command,omitempty"`
+}
+
+const WorkspaceProfileSchemaV1 = "arxi.host.workspace-profile/v1"
+
+type WorkspaceProcessProfileV1 struct {
+	Descendants string `json:"descendants"`
+	Filesystem  string `json:"filesystem"`
+	Environment string `json:"environment"`
+	Network     string `json:"network"`
+}
+
+type WorkspaceCommandProfileV1 struct {
+	Schema             string `json:"schema"`
+	RunnerVersion      string `json:"runner_version"`
+	Executable         string `json:"executable"`
+	EnvironmentVersion string `json:"environment_version"`
+	Descendants        string `json:"descendants"`
+	Filesystem         string `json:"filesystem"`
+	Network            string `json:"network"`
+	OutputLimitBytes   int    `json:"output_limit_bytes"`
+}
+
+const WorkspaceCommandSchemaV1 = "arxi.host.command-profile/v1"
+
 // JobID is an opaque job identifier.
 type JobID string
 
