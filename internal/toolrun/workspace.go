@@ -57,6 +57,17 @@ type Workspace struct {
 	command    *workspace.CommandProfile
 }
 
+// Close releases the root capability. Idempotence lets terminal cleanup and
+// process shutdown converge without leaking a directory handle.
+func (w *Workspace) Close() error {
+	if w == nil || w.rootHandle == nil {
+		return nil
+	}
+	err := w.rootHandle.Close()
+	w.rootHandle = nil
+	return err
+}
+
 // OpenWorkspace prepares dir as the root for member's tools.
 //
 // EvalSymlinks is called on the root itself, and that is load-bearing rather
