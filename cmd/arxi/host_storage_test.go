@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -83,6 +84,28 @@ func TestFilesystemJobStorageCreatesBoundRunAndTransfersWriter(t *testing.T) {
 		if !errors.As(err, &locked) {
 			t.Fatalf("second writer error lost LockedError: %v", err)
 		}
+	}
+}
+
+func TestFilesystemJobStorageCreatesDurableRunOnNativeWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows directory-sync behavior is platform-specific")
+	}
+	root := t.TempDir()
+	storage := newFilesystemJobStorage(root)
+	created, err := storage.Create(context.Background(), filesystemCreateRequest(t, "windows-durable"))
+	if err != nil {
+		t.Fatalf("native Windows host storage Create failed: %v; Access Denied from directory Sync must not reject otherwise durable job files", err)
+	}
+	if err := created.Writer.Close(); err != nil {
+		t.Fatalf("close native Windows host storage writer: %v", err)
+	}
+	loaded, err := storage.Load(context.Background(), "windows-durable")
+	if err != nil {
+		t.Fatalf("load native Windows host storage write: %v; a successful durable Create must publish a readable job", err)
+	}
+	if loaded.Revision != "1" {
+		t.Fatalf("native Windows host storage revision = %q, want 1: the confirmed start record did not survive the durable write path", loaded.Revision)
 	}
 }
 
