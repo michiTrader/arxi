@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 
 	"github.com/michiTrader/arxi/internal/app"
@@ -52,7 +53,7 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 		BudgetUSD: f.budget, MaxTurns: f.maxTurns, Location: dir,
 		OnAccepted: func(_ app.SubmitResult, dir string, cfg kernel.Config) { announce(dir, cfg) },
 	}
-	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup}, supervisor: sup, prepared: prepared}, nil
+	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup, Platform: runtime.GOOS}, supervisor: sup, prepared: prepared}, nil
 }
 
 func submitAndWaitCLI(ctx context.Context, runtime cliSubmission) (string, exec.Outcome, error) {
