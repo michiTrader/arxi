@@ -130,6 +130,21 @@ func TestJobCoordinationIsPureAndIndependent(t *testing.T) {
 	}
 }
 
+func TestWorkspaceModelIsPureAndIndependent(t *testing.T) {
+	for _, p := range ownClosure(t, mod+"internal/workspace") {
+		for _, imp := range p.Imports {
+			if why, bad := forbidden[imp]; bad {
+				t.Errorf("%s imports %q.\n  why this is wrong: %s. Workspace resolution and capability comparison must be deterministic values; probing and provisioning belong to adapters before acceptance.\n  what to do: pass observed capabilities into internal/workspace and keep I/O in app, host, or provisioner packages.", p.ImportPath, imp, why)
+			}
+		}
+	}
+	for _, d := range list(t, mod+"internal/workspace").Deps {
+		if strings.HasPrefix(d, mod) {
+			t.Errorf("internal/workspace depends on %s.\n  why this is wrong: the guarantee model is a pure leaf shared by parsing, preflight, frozen config and authorization; importing a runtime layer would make identity depend on the adapter using it.\n  what to do: map runtime values into workspace DTOs at the caller boundary.", d)
+		}
+	}
+}
+
 // TestBlueprintDependsOnlyOnTheKernel keeps blueprint loading a leaf.
 //
 // The temptation as the run loop lands will be to have the loader open the log
