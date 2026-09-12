@@ -445,12 +445,15 @@ func (w *worker) run() {
 			}
 		}
 		if runErr == nil && out.StoppedBy == exec.StopTerminal && out.State.Status == kernel.StatusSucceeded && w.workspace != nil && !w.released {
-			if releaseErr := w.workspace.ReleaseWorkspaces(context.Background()); releaseErr != nil {
+			if closeErr := w.workspace.CloseWorkspaces(); closeErr != nil {
+				result.Err = errors.Join(result.Err, closeErr)
+			} else if releaseErr := w.workspace.ReleaseWorkspaces(context.Background()); releaseErr != nil {
 				result.Err = errors.Join(result.Err, releaseErr)
 			} else {
 				w.released = true
 			}
 		}
+
 		w.publish(result)
 
 		drained := w.drain(store)

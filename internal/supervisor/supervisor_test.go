@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +83,76 @@ func (c *claimStub) Finish(exec.Outcome, error) error {
 	defer c.mu.Unlock()
 	c.finishes++
 	return nil
+}
+
+type lifecycleExecutor struct {
+	quietExecutor
+	mu       sync.Mutex
+	calls    []string
+	closeErr error
+}
+
+func (x *lifecycleExecutor) CloseWorkspaces() error {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.calls = append(x.calls, "close")
+	return x.closeErr
+}
+func (x *lifecycleExecutor) ReleaseWorkspaces(context.Context) error {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	x.calls = append(x.calls, "release")
+	return nil
+}
+
+func TestSuccessfulTerminalCleanupClosesHandlesBeforeRelease(t *testing.T) {
+	_, root := seedRun(t, "r1", "live", []kernel.Event{
+		{ID: "step", Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(1)}},
+		{ID: "done", Type: kernel.RunResult, Source: kernel.SourceRuntime, Payload: map[string]any{"summary": "done"}},
+	})
+	executor := &lifecycleExecutor{}
+	s := New(root, Options{Build: func(string, runconfig.Artifact) (exec.Executor, error) { return executor, nil }})
+	h, err := s.Open(context.Background(), "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := h.WaitCompletion(context.Background(), 0)
+	if err != nil || result.Err != nil {
+		t.Fatalf("successful completion = %#v / %v: cleanup errors must remain visible at the terminal boundary", result, err)
+	}
+	executor.mu.Lock()
+	calls := append([]string(nil), executor.calls...)
+	executor.mu.Unlock()
+	if !reflect.DeepEqual(calls, []string{"close", "release"}) {
+		t.Fatalf("workspace lifecycle calls = %v: root handles must close before ownership-checked release or Windows cleanup can fail and evidence handling becomes platform-dependent", calls)
+	}
+	if err := h.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedTerminalOutcomeClosesButRetainsWorkspaceEvidence(t *testing.T) {
+	_, root := seedRun(t, "r1", "live", []kernel.Event{
+		{ID: "step", Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(1)}},
+		{ID: "failed", Type: kernel.RunQuiescent, Source: kernel.SourceRuntime, Payload: map[string]any{"diagnosis": "stuck"}},
+	})
+	executor := &lifecycleExecutor{}
+	s := New(root, Options{Build: func(string, runconfig.Artifact) (exec.Executor, error) { return executor, nil }})
+	h, err := s.Open(context.Background(), "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.WaitCompletion(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if !reflect.DeepEqual(executor.calls, []string{"close"}) {
+		t.Fatalf("failed workspace lifecycle calls = %v: failed or unknown work must close process handles while retaining filesystem evidence for diagnosis", executor.calls)
+	}
 }
 
 func TestClaimCheckpointsConfirmedFrontierAndStopsAfterFenceLoss(t *testing.T) {
