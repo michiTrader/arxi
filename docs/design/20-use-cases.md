@@ -720,8 +720,11 @@ The lock is **cooperative** and `--ttl` is effectively required in practice: a
 lock with no expiry, held by an agent that crashed mid-turn, stalls the run until
 a human notices — which is the quiescence of §20.3 caused by the very mechanism
 meant to prevent conflicts. And note what the lock does *not* do: it does not give
-filesystem isolation. That is why `workspace: worktree` is a separate default
-(§20.4). The lock coordinates intent; the filesystem provides separation.
+filesystem isolation. The separately resolved `workspace: worktree` requirement
+is intended to provide source separation (§20.4), but current native platforms do
+not advertise that mode, so a file-using run fails preflight instead of claiming
+separation it cannot provide. The lock coordinates intent; only an advertised,
+verified filesystem profile may provide separation.
 
 ```
 > arxi_state_unlock {"key": "migrations/"}
