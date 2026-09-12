@@ -241,12 +241,14 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1542 tests, no dependencies**.
-The count is of **cases reported by `go test -v`, subtests included**, which is
-what `go test -run` can address individually:
+Underneath, every package is done and tested — **1980 Linux test cases, no dependencies**.
+The count is of **cases reported by `go test -count=1 -v`, subtests included**, which is
+what `go test -run` can address individually. It is the WSL/Linux count; platform
+build tags make the native Windows count different, so this number does not claim
+one cross-platform total:
 
 ```bash
-go test -v ./... 2>&1 | grep -c '^=== RUN'
+go test -count=1 -v ./... 2>&1 | grep -c '^=== RUN'
 ```
 
 The convention is stated because it is the only reason the number is checkable.
