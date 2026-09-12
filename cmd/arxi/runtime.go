@@ -58,6 +58,11 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 		source, capabilities = probe.Source, &probe.Capabilities
 	}
 	managed := &workspacefs.Manager{Root: filepath.Join(dir, "workspaces")}
+	service := app.AcceptanceServices{RunsDir: "runs", Platform: platform, Source: source, Capabilities: capabilities}
+	artifact, err = service.FreezeWorkspace(artifact)
+	if err != nil {
+		return cliSubmission{}, fmt.Errorf("freeze workspace contract: %w", err)
+	}
 	sup := supervisor.New("runs", supervisor.Options{
 		Now: nowFunc,
 		Build: func(dir string, effective runconfig.Artifact) (exec.Executor, error) {
@@ -81,8 +86,8 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 			return workspacefs.AbortPreparation(ctx, runDir, managed, requests)
 		}
 	}
-	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup, Platform: platform,
-		Source: source, Capabilities: capabilities}, supervisor: sup, prepared: prepared}, nil
+	service.Lifecycle = sup
+	return cliSubmission{service: service, supervisor: sup, prepared: prepared}, nil
 }
 
 func submitAndWaitCLI(ctx context.Context, runtime cliSubmission) (string, exec.Outcome, error) {
