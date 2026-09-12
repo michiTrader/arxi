@@ -58,6 +58,9 @@ func Prepare(ctx context.Context, dir string, provisioner Provisioner, requests 
 	for _, req := range requests {
 		digest, _ := requestDigest(req)
 		if phases[digest] == "prepared" {
+			if _, err := provisioner.Provision(ctx, req); err != nil {
+				return fmt.Errorf("verify workspace for %q before recording dispatch: %w", req.Member, err)
+			}
 			if err := appendPreparation(path, preparationRecord{Schema: preparationSchema, Phase: "started", Digest: digest, Request: req}); err != nil {
 				return err
 			}

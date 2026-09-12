@@ -46,10 +46,23 @@ func preparationRequest(member string) Request {
 		Source: workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none"}}
 }
 
+func TestPreparationRecordsStartedOnlyAfterProvisionerVerification(t *testing.T) {
+	dir := t.TempDir()
+	req := preparationRequest("writer")
+	provisioner := &preparationProvisioner{failAt: 1}
+	if err := Prepare(context.Background(), dir, provisioner, []Request{req}); err == nil {
+		t.Fatal("provisioning failure was accepted: started may only claim an external workspace after the provisioner verifies it")
+	}
+	records, err := readPreparation(filepath.Join(dir, PreparationFile))
+	if err != nil || len(records) != 1 || records[0].Phase != "prepared" {
+		t.Fatalf("preparation records = %#v / %v: a pre-dispatch failure must remain prepared so recovery cannot mistake intent for external ownership", records, err)
+	}
+}
+
 func TestPreparationRecoversStartedProvisioningByVerifiedAdoption(t *testing.T) {
 	dir := t.TempDir()
 	requests := []Request{preparationRequest("a"), preparationRequest("b")}
-	first := &preparationProvisioner{failAt: 2}
+	first := &preparationProvisioner{failAt: 4}
 	if err := Prepare(context.Background(), dir, first, requests); err == nil {
 		t.Fatal("injected crash was accepted: preparation must leave a durable started boundary for recovery")
 	}
