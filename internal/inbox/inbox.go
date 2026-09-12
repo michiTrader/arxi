@@ -385,6 +385,9 @@ func decideExactStore(store *logstore.Store, cfg kernel.Config, id string, reply
 		return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrNoSuchItem)
 	}
 	if item.Replied {
+		if a := st.Authorization(item.AuthorizationID); a != nil && a.Decision == "expired" {
+			return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAuthorizationExpired)
+		}
 		return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAlreadyAnswered)
 	}
 	if !decisionMatchesKind(reply.Decision, item.Kind, true) {
