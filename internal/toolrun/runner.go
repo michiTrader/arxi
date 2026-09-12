@@ -68,6 +68,10 @@ func (r *Runner) workspaceFor(member string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
+	if command, ok := session.CommandProfile(); ok {
+		copy := *command
+		w.command = &copy
+	}
 	if r.spaces == nil {
 		r.spaces = map[string]*Workspace{}
 	}

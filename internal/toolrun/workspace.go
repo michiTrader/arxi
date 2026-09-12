@@ -51,6 +51,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 // Workspace is the directory a member's tools may touch, and nothing above it.
@@ -64,6 +66,8 @@ type Workspace struct {
 	// A message that says "path escapes the workspace" without saying whose
 	// sends the reader to the wrong blueprint.
 	Member string
+
+	command *workspace.CommandProfile
 }
 
 // OpenWorkspace prepares dir as the root for member's tools.
