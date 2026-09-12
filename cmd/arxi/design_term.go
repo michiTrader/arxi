@@ -1,3 +1,5 @@
+//go:build !windows
+
 // design_term.go is the two things `arxi design` needs from a tty that the
 // standard library does not offer: raw mode, and the window size.
 //
