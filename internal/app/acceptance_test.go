@@ -17,7 +17,6 @@ import (
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
 	"github.com/michiTrader/arxi/internal/runconfig"
-	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 type lifecycleStub struct {
@@ -95,7 +94,8 @@ func TestAcceptedTextOnlyRunFreezesNoToolsProfileForAuthorization(t *testing.T) 
 	if loadErr != nil {
 		t.Skipf("native Windows cannot fsync directories in this test environment: %v", loadErr)
 	}
-	if artifact.WorkspaceProfileID != workspace.NoToolsProfileID || artifact.WorkspaceContract == nil || artifact.WorkspaceContract.Decisions[0].Platform != "windows" {
+	if artifact.WorkspaceContract == nil || artifact.WorkspaceContract.Decisions[0].Platform != "windows" ||
+		artifact.WorkspaceProfileID != artifact.WorkspaceContract.Decisions[0].ProfileIdentity {
 		t.Fatalf("frozen workspace identity = profile %q contract %#v: exact authorization must bind the selected profile and platform decision, not the legacy label", artifact.WorkspaceProfileID, artifact.WorkspaceContract)
 	}
 }
