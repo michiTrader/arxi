@@ -17,6 +17,7 @@ import (
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/model"
 	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 const (
@@ -47,6 +48,13 @@ type Route struct {
 	Price     model.Price `json:"price"`
 }
 
+type WorkspaceContract struct {
+	Schema       string                       `json:"schema"`
+	Source       workspace.SourceIdentity     `json:"source"`
+	Requirements []workspace.Requirement      `json:"requirements"`
+	Decisions    []workspace.PlatformDecision `json:"platform_decisions"`
+}
+
 type Artifact struct {
 	Schema              string                               `json:"schema"`
 	RunID               string                               `json:"run_id"`
@@ -61,6 +69,7 @@ type Artifact struct {
 	ToolSchemaVersion   string                               `json:"tool_schema_version,omitempty"`
 	PolicyVersion       string                               `json:"policy_version,omitempty"`
 	WorkspaceProfileID  string                               `json:"workspace_profile_id,omitempty"`
+	WorkspaceContract   *WorkspaceContract                   `json:"workspace_contract,omitempty"`
 	AuthorizationTTLMS  int64                                `json:"authorization_ttl_ms,omitempty"`
 	Contracts           Contracts                            `json:"contracts"`
 	legacyAuthorization bool
@@ -217,6 +226,8 @@ func VerifyBinding(dir, runID string, events []kernel.Event) (Artifact, error) {
 // but those defaults cannot retroactively authorize an old unanswered action.
 func (a Artifact) SupportsExactAuthorization() bool { return !a.legacyAuthorization }
 
+func (a Artifact) SupportsWorkspaceContract() bool { return a.WorkspaceContract != nil }
+
 func requireEOF(dec *json.Decoder) error {
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
@@ -255,6 +266,25 @@ func Validate(a Artifact) error {
 	}
 	if a.ToolSchemaVersion == "" || a.PolicyVersion == "" || a.WorkspaceProfileID == "" || a.AuthorizationTTLMS <= 0 {
 		return fmt.Errorf("authorization defaults require tool schema, policy, workspace profile, and positive ttl")
+	}
+	if a.WorkspaceContract != nil {
+		if a.WorkspaceContract.Schema != workspace.SchemaV1 {
+			return fmt.Errorf("unsupported workspace contract schema %q", a.WorkspaceContract.Schema)
+		}
+		if a.WorkspaceContract.Source.Schema != workspace.SchemaV1 || a.WorkspaceContract.Source.Kind == "" {
+			return fmt.Errorf("workspace contract requires a versioned source identity")
+		}
+		if len(a.WorkspaceContract.Requirements) == 0 || len(a.WorkspaceContract.Decisions) != len(a.WorkspaceContract.Requirements) {
+			return fmt.Errorf("workspace contract requires one platform decision per member requirement")
+		}
+		for i, requirement := range a.WorkspaceContract.Requirements {
+			if err := workspace.ValidateRequirement(requirement); err != nil {
+				return err
+			}
+			if decision := a.WorkspaceContract.Decisions[i]; decision.Schema != workspace.SchemaV1 || decision.Member != requirement.Member || decision.ProfileID != requirement.ProfileID || decision.Platform == "" || decision.CapabilityVersion == "" || decision.ProvisionerVersion == "" {
+				return fmt.Errorf("workspace platform decision for member %q does not bind its frozen requirement", requirement.Member)
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for _, r := range a.Routes {
