@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 type storageBackend struct {
@@ -134,6 +136,22 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	effective := runconfig.New(string(id), mode, bp.SHA, req.Prompt, "host-text", bp.Config, []runconfig.Route{{
 		Ref: "host-text", Provider: "host", Model: "host-text",
 	}}, nil)
+	requirements, err := hostWorkspaceRequirements(bp.Config)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "resolve workspace requirements: "+err.Error())
+	}
+	decisions, err := workspace.Preflight(requirements, workspace.CurrentCapabilities(runtime.GOOS))
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace preflight: "+err.Error())
+	}
+	effective.WorkspaceContract = &runconfig.WorkspaceContract{Schema: workspace.SchemaV1,
+		Source: workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none", DirtyPolicy: "excluded",
+			UntrackedPolicy: "excluded", IgnoredPolicy: "excluded", SubmodulePolicy: "refused",
+			SymlinkPolicy: "internal-relative-only", SpecialFilePolicy: "refused"},
+		Requirements: requirements, Decisions: decisions}
+	if len(requirements) > 0 {
+		effective.WorkspaceProfileID = requirements[0].ProfileID
+	}
 	metadata, err := json.Marshal(storedJobMetadata{Effective: effective, Simulated: req.Simulated})
 	if err != nil {
 		return SubmitResult{}, adaptStorageError(CapabilitySubmit, id, 0, err)
@@ -195,6 +213,18 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	}
 	worker.start()
 	return out, nil
+}
+
+func hostWorkspaceRequirements(config kernel.Config) ([]workspace.Requirement, error) {
+	members := make([]workspace.Member, len(config.Members))
+	for i, member := range config.Members {
+		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
+	}
+	stages := make([]workspace.Stage, len(config.Stages))
+	for i, stage := range config.Stages {
+		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
+	}
+	return workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(config.Workspace), Members: members, Stages: stages})
 }
 
 func (b *storageBackend) Inspect(ctx context.Context, req InspectRequest) (Job, error) {
