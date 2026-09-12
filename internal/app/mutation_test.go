@@ -125,7 +125,11 @@ func TestMutationServicesMaterializeApprovalExpiryBeforeFailure(t *testing.T) {
 
 func TestLegacyPendingApprovalFailsClosedForLiveMutation(t *testing.T) {
 	s := legacyMutationFixture(t)
-	_, err := s.Approve(Decision{JobID: "r1", ItemID: "legacy-approval-1", Principal: "operator:alice"})
+	before, err := s.Inspect("r1")
+	if err != nil || before.State.InboxItem("legacy-approval-1") == nil {
+		t.Fatalf("legacy approval did not survive replay before mutation: historical logs would become unreadable; preserve the unbound item for inspection while refusing new authority: state=%#v err=%v", before.State.Inbox, err)
+	}
+	_, err = s.Approve(Decision{JobID: "r1", ItemID: "legacy-approval-1", Principal: "operator:alice"})
 	appErrorKind(t, err, InvalidArgument)
 	if !errors.Is(err, inbox.ErrAuthorizationBinding) {
 		t.Fatalf("legacy approval error = %v: historical logs must remain readable but live mutation cannot invent exact authority; return the missing-binding refusal", err)
