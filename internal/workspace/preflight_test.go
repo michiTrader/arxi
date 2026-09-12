@@ -33,8 +33,12 @@ func TestCurrentLinuxAndWindowsCapabilitiesReportOnlyProvenGuarantees(t *testing
 		if len(capabilities.Modes) != 1 || capabilities.Modes[0] != ModeNone {
 			t.Errorf("%s modes = %v: shared cannot claim a verified source view yet, and copy/worktree must stay unadvertised until their real provisioners land", platform, capabilities.Modes)
 		}
-		if capabilities.Profiles[1].FinalLinkRaceFree != (platform != "windows") {
-			t.Errorf("%s final-link race-free capability = %v: Windows must report its check/open gap while Linux reports O_NOFOLLOW", platform, capabilities.Profiles[1].FinalLinkRaceFree)
+		if platform == "linux" {
+			if len(capabilities.Profiles) != 2 || !capabilities.Profiles[1].FinalLinkRaceFree {
+				t.Errorf("Linux direct-file profile = %#v: handle-relative openat plus O_NOFOLLOW must be the advertised strong guarantee", capabilities.Profiles)
+			}
+		} else if len(capabilities.Profiles) != 1 {
+			t.Errorf("Windows profiles = %#v: no direct-file profile may be advertised until reparse-safe handle traversal exists", capabilities.Profiles)
 		}
 	}
 }
