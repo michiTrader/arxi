@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,7 +16,7 @@ import (
 	"github.com/michiTrader/arxi/internal/workspace"
 )
 
-const markerName = ".arxi-workspace.json"
+const metadataDirName = ".arxi-workspace-metadata"
 
 // Request is the stable, frozen identity of one member workspace.
 type Request struct {
@@ -102,6 +101,7 @@ type Manager struct {
 func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	req = canonicalRequest(req)
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
@@ -115,13 +115,7 @@ func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 	case workspace.ModeNone:
 		got = session{id: key, command: req.Command}
 	case workspace.ModeShared:
-		shared := req
-		shared.Member = "shared"
-		key = sessionKey(shared)
-		if existing := m.live[key]; existing != nil {
-			return existing, nil
-		}
-		got, err = m.provisionShared(ctx, shared, key)
+		got, err = m.provisionShared(ctx, req, key)
 	case workspace.ModeCopy:
 		got, err = m.provisionCopy(ctx, req, key)
 	case workspace.ModeWorktree:
@@ -140,11 +134,9 @@ func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 }
 
 func (m *Manager) provisionShared(ctx context.Context, req Request, key string) (Session, error) {
-	shared := req
-	shared.Mode = workspace.ModeCopy
-	root := m.path(shared)
+	root := m.path(req)
 	if exists(root) {
-		if err := verifyMarker(root, req); err != nil {
+		if err := m.verifyMarker(req); err != nil {
 			return nil, err
 		}
 		if err := verifySnapshot(ctx, root, req); err != nil {
@@ -156,10 +148,8 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 		return nil, fmt.Errorf("create shared workspace parent: %w", err)
 	}
 	tmp := root + ".partial"
-	if exists(tmp) {
-		if err := os.RemoveAll(tmp); err != nil {
-			return nil, fmt.Errorf("reconcile partial shared workspace: %w", err)
-		}
+	if err := m.reconcileUnpublished(req, tmp); err != nil {
+		return nil, err
 	}
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		return nil, fmt.Errorf("create shared workspace: %w", err)
@@ -168,11 +158,12 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 		_ = os.RemoveAll(tmp)
 		return nil, err
 	}
-	if err := writeMarker(tmp, req); err != nil {
+	if err := m.writeMarker(req); err != nil {
 		_ = os.RemoveAll(tmp)
 		return nil, err
 	}
 	if err := os.Rename(tmp, root); err != nil {
+		_ = os.Remove(m.markerPath(req))
 		return nil, fmt.Errorf("publish shared workspace: %w", err)
 	}
 	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
@@ -181,7 +172,7 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (Session, error) {
 	root := m.path(req)
 	if exists(root) {
-		if err := verifyMarker(root, req); err != nil {
+		if err := m.verifyMarker(req); err != nil {
 			return nil, err
 		}
 		if err := verifySnapshot(ctx, root, req); err != nil {
@@ -193,10 +184,8 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 		return nil, fmt.Errorf("create workspace parent: %w", err)
 	}
 	tmp := root + ".partial"
-	if exists(tmp) {
-		if err := os.RemoveAll(tmp); err != nil {
-			return nil, fmt.Errorf("reconcile partial copy workspace: %w", err)
-		}
+	if err := m.reconcileUnpublished(req, tmp); err != nil {
+		return nil, err
 	}
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		return nil, fmt.Errorf("create copy workspace: %w", err)
@@ -210,16 +199,20 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 	if err := copyTrackedTree(ctx, tmp, req.Source); err != nil {
 		return nil, err
 	}
-	if err := writeMarker(tmp, req); err != nil {
+	if err := m.writeMarker(req); err != nil {
 		return nil, err
 	}
 	if err := os.Rename(tmp, root); err != nil {
 		if exists(root) {
-			if verifyErr := verifyMarker(root, req); verifyErr == nil {
+			if verifyErr := m.verifyMarker(req); verifyErr == nil {
+				if snapshotErr := verifySnapshot(ctx, root, req); snapshotErr != nil {
+					return nil, snapshotErr
+				}
 				ok = true
 				return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 			}
 		}
+		_ = os.Remove(m.markerPath(req))
 		return nil, fmt.Errorf("publish copy workspace: %w", err)
 	}
 	ok = true
@@ -229,7 +222,7 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string) (Session, error) {
 	root := m.path(req)
 	if exists(root) {
-		if err := verifyMarker(root, req); err != nil {
+		if err := m.verifyMarker(req); err != nil {
 			return nil, err
 		}
 		if err := verifyWorktree(ctx, root, req); err != nil {
@@ -240,15 +233,24 @@ func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create worktree parent: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", req.Source.CanonicalRoot, "worktree", "add", "--detach", root, req.Source.Commit)
-	body, commandErr := cmd.CombinedOutput()
+	body, commandErr := gitCommand(ctx, req.Source.CanonicalRoot, "worktree", "add", "--no-checkout", "--detach", root, req.Source.Commit).CombinedOutput()
 	if commandErr != nil && !exists(root) {
 		return nil, fmt.Errorf("create Git worktree: %w: %s", commandErr, strings.TrimSpace(string(body)))
+	}
+	if commandErr == nil {
+		if err := copyTrackedTree(ctx, root, req.Source); err != nil {
+			_, _ = gitCommand(context.Background(), req.Source.CanonicalRoot, "worktree", "remove", "--force", root).CombinedOutput()
+			return nil, fmt.Errorf("populate Git worktree from frozen objects: %w", err)
+		}
+		if indexBody, err := gitCommand(ctx, root, "read-tree", req.Source.Tree).CombinedOutput(); err != nil {
+			_, _ = gitCommand(context.Background(), req.Source.CanonicalRoot, "worktree", "remove", "--force", root).CombinedOutput()
+			return nil, fmt.Errorf("index frozen Git worktree: %w: %s", err, strings.TrimSpace(string(indexBody)))
+		}
 	}
 	if err := verifyWorktree(ctx, root, req); err != nil {
 		return nil, fmt.Errorf("reconcile Git worktree creation: %w", err)
 	}
-	if err := writeMarker(root, req); err != nil {
+	if err := m.writeMarker(req); err != nil {
 		return nil, fmt.Errorf("record worktree ownership: %w", err)
 	}
 	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
@@ -257,35 +259,75 @@ func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string
 func (m *Manager) Release(ctx context.Context, req Request, got Session) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	req = canonicalRequest(req)
+	if err := validateRequest(req); err != nil {
+		return err
+	}
 	key := sessionKey(req)
 	if got == nil || got.Identity() != key {
 		return fmt.Errorf("workspace release handle does not belong to job %q member %q", req.JobID, req.Member)
 	}
-	if req.Mode == workspace.ModeNone || req.Mode == workspace.ModeShared {
+	if req.Mode == workspace.ModeNone {
 		delete(m.live, key)
 		return nil
 	}
 	root := m.path(req)
 	if !exists(root) {
+		markerPath := m.markerPath(req)
+		if exists(markerPath) {
+			if err := m.verifyMarker(req); err != nil {
+				return fmt.Errorf("refuse workspace release without exact ownership: %w", err)
+			}
+			if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove orphaned workspace ownership metadata: %w", err)
+			}
+		}
 		delete(m.live, key)
 		return nil
 	}
-	if err := verifyMarker(root, req); err != nil {
+	if err := m.verifyMarker(req); err != nil {
 		return fmt.Errorf("refuse workspace release without exact ownership: %w", err)
 	}
 	if req.Mode == workspace.ModeWorktree {
 		if err := verifyWorktree(ctx, root, req); err != nil {
 			return err
 		}
-		cmd := exec.CommandContext(ctx, "git", "-C", req.Source.CanonicalRoot, "worktree", "remove", "--force", root)
-		body, err := cmd.CombinedOutput()
+		body, err := gitCommand(ctx, req.Source.CanonicalRoot, "worktree", "remove", "--force", root).CombinedOutput()
 		if err != nil && exists(root) {
 			return fmt.Errorf("remove owned Git worktree: %w: %s", err, strings.TrimSpace(string(body)))
 		}
 	} else if err := os.RemoveAll(root); err != nil {
 		return fmt.Errorf("remove owned copy workspace: %w", err)
 	}
+	if err := os.Remove(m.markerPath(req)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove workspace ownership metadata: %w", err)
+	}
 	delete(m.live, key)
+	return nil
+}
+
+func (m *Manager) reconcileUnpublished(req Request, partial string) error {
+	if !exists(partial) {
+		if exists(m.markerPath(req)) {
+			return fmt.Errorf("refuse orphaned workspace ownership metadata without a published workspace")
+		}
+		return nil
+	}
+	if exists(m.markerPath(req)) {
+		if err := m.verifyMarker(req); err != nil {
+			return fmt.Errorf("refuse partial workspace with unverified ownership: %w", err)
+		}
+	} else if err := os.RemoveAll(partial); err != nil {
+		return fmt.Errorf("reconcile unowned partial workspace: %w", err)
+	} else {
+		return nil
+	}
+	if err := os.RemoveAll(partial); err != nil {
+		return fmt.Errorf("reconcile owned partial workspace: %w", err)
+	}
+	if err := os.Remove(m.markerPath(req)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove partial workspace ownership metadata: %w", err)
+	}
 	return nil
 }
 
@@ -299,13 +341,24 @@ func validateRequest(req Request) error {
 	return nil
 }
 
+func canonicalRequest(req Request) Request {
+	if req.Mode == workspace.ModeShared {
+		req.Member = "shared"
+	}
+	return req
+}
+
 func sessionKey(req Request) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{req.JobID, req.Member, string(req.Mode), req.ProfileID, req.ProfileIdentity, req.ProvisionerVersion, req.Source.CanonicalRoot, req.Source.Commit, req.Source.Tree}, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 
 func (m *Manager) path(req Request) string {
-	return filepath.Join(m.Root, safeComponent(req.JobID), safeComponent(req.Member), string(req.Mode))
+	return filepath.Join(m.Root, "workspaces", safeComponent(req.JobID), safeComponent(req.Member), string(req.Mode))
+}
+
+func (m *Manager) markerPath(req Request) string {
+	return filepath.Join(m.Root, metadataDirName, safeComponent(sessionKey(req))+".json")
 }
 
 func safeComponent(value string) string {
@@ -324,12 +377,15 @@ func expectedMarker(req Request) marker {
 		ProfileID: req.ProfileID, ProfileIdentity: req.ProfileIdentity, ProvisionerVersion: req.ProvisionerVersion, Command: req.Command, Source: req.Source}
 }
 
-func writeMarker(root string, req Request) error {
+func (m *Manager) writeMarker(req Request) error {
 	body, err := json.Marshal(expectedMarker(req))
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(root, markerName)
+	path := m.markerPath(req)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create ownership metadata directory: %w", err)
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("create ownership marker: %w", err)
@@ -345,8 +401,8 @@ func writeMarker(root string, req Request) error {
 	return file.Close()
 }
 
-func verifyMarker(root string, req Request) error {
-	body, err := os.ReadFile(filepath.Join(root, markerName))
+func (m *Manager) verifyMarker(req Request) error {
+	body, err := os.ReadFile(m.markerPath(req))
 	if err != nil {
 		return fmt.Errorf("workspace path exists without a readable ownership marker: %w", err)
 	}
@@ -508,8 +564,7 @@ func safeSymlinkTarget(path, target string) error {
 }
 
 func gitOutputBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	body, err := cmd.CombinedOutput()
+	body, err := gitCommand(ctx, dir, args...).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(body)))
 	}

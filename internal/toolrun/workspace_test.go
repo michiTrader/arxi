@@ -17,6 +17,23 @@ func ws(t *testing.T) *Workspace {
 	return w
 }
 
+func TestReservedOwnershipPathsAreInvisibleToDirectTools(t *testing.T) {
+	w := ws(t)
+	for _, path := range []string{
+		".arxi-workspace.json",
+		".ARXI-WORKSPACE.JSON",
+		filepath.Join(metadataDirName, "owner.json"),
+		filepath.Join(w.Root, ".arxi-workspace.json"),
+	} {
+		if _, err := w.Resolve(path); err == nil {
+			t.Errorf("Resolve(%q) exposed a reserved ownership path: direct tools must not alter provisioner authority", path)
+		}
+		if err := w.WriteFile(path, []byte("forged")); err == nil {
+			t.Errorf("WriteFile(%q) altered a reserved ownership path: agent-visible source roots must not contain mutable ownership", path)
+		}
+	}
+}
+
 func TestAPlainRelativePathResolvesInsideTheWorkspace(t *testing.T) {
 	w := ws(t)
 	got, err := w.Resolve("main.go")

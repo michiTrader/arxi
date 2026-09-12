@@ -169,6 +169,9 @@ func (w *Workspace) Resolve(p string) (string, error) {
 	}
 
 	resolved := filepath.Join(realDir, filepath.Base(full))
+	if err := w.validateToolPath(resolved); err != nil {
+		return "", err
+	}
 	if !w.contains(resolved) {
 		return "", fmt.Errorf("toolrun: %s tried to reach %q, which is outside its "+
 			"workspace %s\n"+
@@ -179,6 +182,23 @@ func (w *Workspace) Resolve(p string) (string, error) {
 	}
 	return resolved, nil
 }
+
+func (w *Workspace) validateToolPath(path string) error {
+	relative, err := filepath.Rel(w.Root, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	first := relative
+	if index := strings.IndexRune(first, filepath.Separator); index >= 0 {
+		first = first[:index]
+	}
+	if strings.EqualFold(first, ".arxi-workspace.json") || strings.EqualFold(first, metadataDirName) {
+		return fmt.Errorf("toolrun: %s: reserved workspace metadata path %q is not agent-writable", w.Member, relative)
+	}
+	return nil
+}
+
+const metadataDirName = ".arxi-workspace-metadata"
 
 // contains reports whether p is the root or beneath it.
 //

@@ -2,6 +2,7 @@ package workspacefs
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,12 +183,144 @@ func TestRestartOwnershipVerificationAndIdempotentRelease(t *testing.T) {
 	if err := second.Release(context.Background(), foreign, adopted); err == nil {
 		t.Fatal("foreign job released another workspace: release must verify exact ownership before removal")
 	}
-	path, _ := adopted.WorkspaceRoot()
-	if err := os.WriteFile(filepath.Join(path, markerName), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(second.markerPath(canonicalRequest(req)), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (&Manager{Root: root}).Provision(context.Background(), req); err == nil {
 		t.Fatal("corrupt ownership marker was adopted: path existence is not ownership evidence")
+	}
+}
+
+func TestSharedIdentityAdoptionAndReleaseAreCanonicalAcrossMembers(t *testing.T) {
+	probe := testRepo(t)
+	managed := t.TempDir()
+	firstReq := request(probe, workspace.ModeShared, "writer-a")
+	secondReq := request(probe, workspace.ModeShared, "writer-b")
+	first, err := (&Manager{Root: managed}).Provision(context.Background(), firstReq)
+	if err != nil {
+		t.Fatalf("provision first shared member: %v", err)
+	}
+	secondManager := &Manager{Root: managed}
+	second, err := secondManager.Provision(context.Background(), secondReq)
+	if err != nil {
+		t.Fatalf("restart could not adopt shared workspace through another member: %v", err)
+	}
+	firstRoot, _ := first.WorkspaceRoot()
+	secondRoot, _ := second.WorkspaceRoot()
+	if first.Identity() != second.Identity() || firstRoot != secondRoot {
+		t.Fatal("shared members received different durable identities: provision and release would disagree about ownership")
+	}
+	if err := secondManager.Release(context.Background(), secondReq, second); err != nil {
+		t.Fatalf("release shared workspace through canonical member identity: %v", err)
+	}
+	if _, err := os.Stat(firstRoot); !os.IsNotExist(err) {
+		t.Fatalf("released shared workspace still exists: shared cleanup must be real and retryable: %v", err)
+	}
+	if err := secondManager.Release(context.Background(), firstReq, first); err != nil {
+		t.Fatalf("second shared release: %v: canonical cleanup must be idempotent across members", err)
+	}
+}
+
+func TestOwnershipMetadataIsOutsideTheToolVisibleWorkspace(t *testing.T) {
+	probe := testRepo(t)
+	manager := &Manager{Root: t.TempDir()}
+	req := request(probe, workspace.ModeCopy, "writer")
+	handle, err := manager.Provision(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := handle.WorkspaceRoot()
+	if _, err := os.Stat(filepath.Join(root, ".arxi-workspace.json")); !os.IsNotExist(err) {
+		t.Fatalf("ownership metadata remains inside the agent-writable source root: direct tools could forge release authority: %v", err)
+	}
+	markerPath := manager.markerPath(canonicalRequest(req))
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("protected ownership metadata is missing: restart cannot prove adoption authority: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".arxi-workspace.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Release(context.Background(), req, handle); err != nil {
+		t.Fatalf("agent-created legacy marker affected protected ownership: %v", err)
+	}
+}
+
+func TestRestartRefusesCorruptForeignAndOrphanedOwnershipMetadata(t *testing.T) {
+	probe := testRepo(t)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *Manager, Request, string)
+	}{
+		{name: "corrupt", mutate: func(t *testing.T, manager *Manager, req Request, _ string) {
+			if err := os.WriteFile(manager.markerPath(req), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "foreign", mutate: func(t *testing.T, manager *Manager, req Request, _ string) {
+			foreign := req
+			foreign.JobID = "another-job"
+			body, _ := json.Marshal(expectedMarker(foreign))
+			if err := os.WriteFile(manager.markerPath(req), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "orphaned", mutate: func(t *testing.T, _ *Manager, _ Request, root string) {
+			if err := os.RemoveAll(root); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			managed := t.TempDir()
+			manager := &Manager{Root: managed}
+			req := request(probe, workspace.ModeCopy, "writer")
+			handle, err := manager.Provision(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, _ := handle.WorkspaceRoot()
+			tc.mutate(t, manager, req, root)
+			if _, err := (&Manager{Root: managed}).Provision(context.Background(), req); err == nil {
+				t.Fatal("restart adopted workspace without exact protected ownership: path existence or stale metadata must never become authority")
+			}
+		})
+	}
+}
+
+func TestPartialRecoveryRequiresMatchingProtectedOwnership(t *testing.T) {
+	probe := testRepo(t)
+	manager := &Manager{Root: t.TempDir()}
+	req := request(probe, workspace.ModeCopy, "writer")
+	partial := manager.path(req) + ".partial"
+	if err := os.MkdirAll(partial, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "attacker.txt"), []byte("foreign"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Provision(context.Background(), req); err != nil {
+		t.Fatalf("unowned partial workspace was not safely replaced: %v", err)
+	}
+	root := manager.path(req)
+	if _, err := os.Stat(filepath.Join(root, "attacker.txt")); !os.IsNotExist(err) {
+		t.Fatalf("foreign partial content survived reconciliation: partial paths are not ownership evidence: %v", err)
+	}
+
+	foreignReq := req
+	foreignReq.JobID = "foreign-job"
+	foreign := &Manager{Root: t.TempDir()}
+	if err := os.MkdirAll(foreign.path(foreignReq)+".partial", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(foreign.markerPath(foreignReq)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(expectedMarker(req))
+	if err := os.WriteFile(foreign.markerPath(foreignReq), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := foreign.Provision(context.Background(), foreignReq); err == nil {
+		t.Fatal("foreign protected metadata authorized partial cleanup: cross-job ownership must fail closed")
 	}
 }
 
@@ -207,6 +340,68 @@ func TestReleaseIsOwnershipCheckedAndIdempotent(t *testing.T) {
 			t.Fatalf("%s second Release: %v: confirmed cleanup must be safely retryable", mode, err)
 		}
 	}
+}
+
+func TestSpoofedGitEnvironmentCannotRedirectProbe(t *testing.T) {
+	probe := testRepo(t)
+	outside := t.TempDir()
+	runGit(t, outside, "init")
+	t.Setenv("GIT_DIR", filepath.Join(outside, ".git"))
+	t.Setenv("GIT_WORK_TREE", outside)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", filepath.Join(t.TempDir(), "hooks"))
+	observed, err := Probe(context.Background(), probe.Source.CanonicalRoot)
+	if err != nil {
+		t.Fatalf("spoofed Git environment redirected source probing: %v", err)
+	}
+	if observed.Source != probe.Source {
+		t.Fatal("spoofed Git environment changed frozen source identity: subprocesses must use an explicit neutral environment")
+	}
+}
+
+func TestGitFiltersCannotExecuteOrMutateFrozenSource(t *testing.T) {
+	probe := testRepo(t)
+	repo := probe.Source.CanonicalRoot
+	if runtime.GOOS == "windows" {
+		t.Skip("executable filter regression requires a Unix shell; Git environment spoofing remains covered on Windows")
+	}
+	script := "#!/bin/sh\nprintf ran > " + shellQuote(sentinel) + "\nprintf altered\n"
+	if err := os.WriteFile(filter, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "config", "filter.hostile.smudge", filter)
+	runGit(t, repo, "config", "filter.hostile.clean", filter)
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("tracked.txt filter=hostile\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", ".gitattributes")
+	runGit(t, repo, "commit", "-m", "hostile filter fixture")
+	filtered, err := Probe(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []workspace.Mode{workspace.ModeCopy, workspace.ModeWorktree} {
+		handle, err := (&Manager{Root: t.TempDir()}).Provision(context.Background(), request(filtered, mode, "writer"))
+		if err != nil {
+			t.Fatalf("%s provision with hostile filter: %v", mode, err)
+		}
+		root, _ := handle.WorkspaceRoot()
+		body, err := os.ReadFile(filepath.Join(root, "tracked.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ReplaceAll(string(body), "\r\n", "\n") != "frozen\n" {
+			t.Fatalf("%s filter altered frozen output to %q: snapshots must read tracked objects without executing filters", mode, body)
+		}
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("Git clean or smudge filter executed during provisioning: repository configuration is untrusted: %v", err)
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func TestCopyRefusesUnsafeSymlinksAndCaseCollisions(t *testing.T) {

@@ -77,18 +77,28 @@ func Probe(ctx context.Context, source string) (ProbeResult, error) {
 	return ProbeResult{Source: identity, Capabilities: caps}, nil
 }
 
-// Verify re-probes the source and rejects drift from the frozen repository identity.
+// Verify proves repository identity and frozen object availability. The operator
+// checkout may advance after acceptance; its current HEAD is not run identity.
 func Verify(ctx context.Context, frozen workspace.SourceIdentity) (ProbeResult, error) {
-	if frozen.Kind != "git" || frozen.CanonicalRoot == "" {
-		return ProbeResult{}, fmt.Errorf("frozen source kind %q is not a provisionable Git source", frozen.Kind)
+	if frozen.Kind != "git" || frozen.CanonicalRoot == "" || frozen.CommonGitDir == "" || frozen.Commit == "" || frozen.Tree == "" {
+		return ProbeResult{}, fmt.Errorf("frozen source kind %q is not a complete provisionable Git source", frozen.Kind)
 	}
 	observed, err := Probe(ctx, frozen.CanonicalRoot)
 	if err != nil {
 		return ProbeResult{}, err
 	}
-	if observed.Source != frozen {
-		return ProbeResult{}, fmt.Errorf("current Git source identity does not match the frozen effective configuration")
+	if observed.Source.CanonicalRoot != frozen.CanonicalRoot || observed.Source.CommonGitDir != frozen.CommonGitDir {
+		return ProbeResult{}, fmt.Errorf("current Git repository identity does not match the frozen effective configuration")
 	}
+	commit, err := gitOutput(ctx, frozen.CanonicalRoot, "rev-parse", frozen.Commit+"^{commit}")
+	if err != nil || strings.TrimSpace(commit) != frozen.Commit {
+		return ProbeResult{}, fmt.Errorf("frozen Git commit %s is unavailable: %w", frozen.Commit, err)
+	}
+	tree, err := gitOutput(ctx, frozen.CanonicalRoot, "rev-parse", frozen.Commit+"^{tree}")
+	if err != nil || strings.TrimSpace(tree) != frozen.Tree {
+		return ProbeResult{}, fmt.Errorf("frozen Git tree %s does not match commit %s", frozen.Tree, frozen.Commit)
+	}
+	observed.Source = frozen
 	return observed, nil
 }
 
@@ -101,11 +111,39 @@ func canonical(path string) (string, error) {
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
-	body, err := cmd.CombinedOutput()
+	body, err := gitCommand(ctx, dir, args...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(body)))
 	}
 	return string(body), nil
+}
+
+func gitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	gitArgs := append([]string{
+		"-c", "core.hooksPath=" + filepath.ToSlash(os.DevNull),
+		"-c", "core.attributesFile=" + filepath.ToSlash(os.DevNull),
+	}, args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	cmd.Dir = dir
+	cmd.Env = gitEnvironment()
+	return cmd
+}
+
+func gitEnvironment() []string {
+	names := []string{"PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TMP", "TEMP", "TMPDIR"}
+	env := make([]string, 0, len(names)+6)
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return append(env,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=0",
+	)
 }
