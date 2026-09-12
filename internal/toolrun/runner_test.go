@@ -23,6 +23,9 @@ func (p testSessions) Provision(_ context.Context, req workspacefs.Request) (wor
 	if p.shared {
 		root = p.root
 	}
+	if req.Command != nil {
+		return workspacefs.OpenLocalCommandSession(root, req.JobID+"/"+req.Member, *req.Command)
+	}
 	return workspacefs.OpenLocalSession(root, req.JobID+"/"+req.Member)
 }
 func (testSessions) Release(context.Context, workspacefs.Request, workspacefs.Session) error {
