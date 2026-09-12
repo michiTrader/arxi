@@ -302,20 +302,27 @@ func Answer(dir string, id string, reply Reply) (kernel.Event, error) {
 // AnswerExact appends a kind-checked reply. Tool approvals additionally require
 // an immutable authorization binding and append its terminal decision atomically.
 func AnswerExact(dir string, id string, reply Reply) (kernel.Event, error) {
+	result, err := DecideExact(dir, id, reply, now())
+	return result.Reply, err
+}
+
+// DecideExact applies an exact decision with the clock owned by its mutation
+// adapter. Passing the observation into this boundary keeps expiry judgment and
+// its durable record under the same writer lock.
+func DecideExact(dir string, id string, reply Reply, at time.Time) (DecisionResult, error) {
 	if err := validDecision(reply); err != nil {
-		return kernel.Event{}, err
+		return DecisionResult{}, err
 	}
 	cfg, err := loadFrozenConfig(dir)
 	if err != nil {
-		return kernel.Event{}, err
+		return DecisionResult{}, err
 	}
 	store, err := logstore.Open(dir)
 	if err != nil {
-		return kernel.Event{}, err
+		return DecisionResult{}, err
 	}
 	defer store.Close()
-	result, err := decideExactStore(store, cfg, id, reply, now())
-	return result.Reply, err
+	return decideExactStore(store, cfg, id, reply, at)
 }
 
 // AnswerExactStore preserves resident writer ownership while applying the same
@@ -400,8 +407,23 @@ func decideExactStore(store *logstore.Store, cfg kernel.Config, id string, reply
 			return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrInvalidPrincipal)
 		}
 		expires, parseErr := time.Parse(time.RFC3339, a.ExpiresAt)
-		if parseErr != nil || !at.Before(expires) {
+		if parseErr != nil {
 			return DecisionResult{}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAuthorizationExpired)
+		}
+		if !at.Before(expires) {
+			// Returning before this append would let replay see a pending grant even
+			// though the authoritative writer had already judged it dead. Recording
+			// only expiry also prevents a due approve or reject from granting,
+			// denying, or consuming the exact action as a side effect of failure.
+			expired := authorizationExpiredEvent(*a, at)
+			written, appendErr := store.AppendIfSeq(st.Seq, []kernel.Event{expired})
+			if appendErr != nil {
+				return DecisionResult{}, appendErr
+			}
+			if len(written) != 1 {
+				return DecisionResult{}, fmt.Errorf("inbox: appended one expiry record and the log reported %d", len(written))
+			}
+			return DecisionResult{Authorization: &written[0]}, fmt.Errorf("inbox: %q in run %s: %w", id, st.RunID, ErrAuthorizationExpired)
 		}
 		events[0].Payload["authorization_id"] = a.ID
 		events[0].Payload["action_digest"] = a.ActionDigest
@@ -429,6 +451,14 @@ func replyEvent(id string, reply Reply, at time.Time) kernel.Event {
 	}
 	return kernel.Event{ID: "inbox-reply-" + id, Type: kernel.InboxReplied,
 		Ts: at.UTC().Format(time.RFC3339Nano), Source: kernel.SourceHuman, Payload: payload}
+}
+
+func authorizationExpiredEvent(a kernel.Authorization, at time.Time) kernel.Event {
+	return kernel.Event{ID: "authorization-expired-" + a.ID, Type: kernel.AuthorizationExpired,
+		Ts: at.UTC().Format(time.RFC3339Nano), Source: kernel.SourceRuntime, Payload: map[string]any{
+			"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+			"expired_at": a.ExpiresAt,
+		}}
 }
 
 func authorizationDecisionEvent(a kernel.Authorization, reply Reply, principal string, at time.Time) kernel.Event {
