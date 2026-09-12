@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -467,6 +468,15 @@ func TestALiveRunIsNotLoggedAsASimulation(t *testing.T) {
 		t.Skip("the loopback model server used here is POSIX-only")
 	}
 	dir := workdir(t)
+	if _, err := osexec.LookPath("git"); err != nil {
+		t.Skip("git unavailable: live workspace capability must be refused before provider dispatch")
+	}
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.invalid"}, {"config", "user.name", "CLI Test"}} {
+		cmd := osexec.Command("git", append([]string{"-C", dir}, args...)...)
+		if body, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, body)
+		}
+	}
 
 	// A local model server, so the live path can be exercised with no
 	// credential and no bill. This is the case the loopback-credential fix
@@ -480,6 +490,14 @@ func TestALiveRunIsNotLoggedAsASimulation(t *testing.T) {
 		"stages:\n  - {name: build, advance_when: all}\n"
 	if err := os.WriteFile(bp, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	cmd := osexec.Command("git", "-C", dir, "add", "bp.yaml")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add fixture: %v: %s", err, output)
+	}
+	cmd = osexec.Command("git", "-C", dir, "commit", "-m", "fixture")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit fixture: %v: %s", err, output)
 	}
 
 	for _, tc := range []struct {
