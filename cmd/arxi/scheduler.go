@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/app"
@@ -717,7 +715,7 @@ func (r *selfRunner) startSubprocess(a trigger.Action) (scheduler.Execution, err
 	cmd := exec.Command(r.self, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepareScheduledProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -766,7 +764,7 @@ func (c *childExec) Cancel() {
 		if c.cmd.Process == nil {
 			return
 		}
-		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+		cancelScheduledProcess(c.cmd)
 	})
 }
 
@@ -1037,7 +1035,7 @@ func loop(sched *scheduler.Scheduler, interval time.Duration) {
 		len(sched.Names()), interval)
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	notifySchedulerExit(sig)
 
 	// The first tick happens immediately, before the ticker is armed.
 	//
