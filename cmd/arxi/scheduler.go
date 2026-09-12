@@ -30,6 +30,7 @@ import (
 	"github.com/michiTrader/arxi/internal/supervisor"
 	"github.com/michiTrader/arxi/internal/surface"
 	"github.com/michiTrader/arxi/internal/trigger"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 // `arxi trigger run` — the caller the tick never had.
@@ -409,7 +410,7 @@ func occurrenceForJob(values map[job.OccurrenceID]job.Occurrence, id job.JobID) 
 func (r *selfRunner) resumeAccepted(id job.JobID, occurrence job.Occurrence) (scheduler.Execution, error) {
 	dir := filepath.Join("runs", string(id))
 	sup := supervisor.New("runs", supervisor.Options{Now: nowFunc, Build: func(dir string, effective runconfig.Artifact) (arxiexec.Executor, error) {
-		return runtimeExecutor(dir, effective), nil
+		return runtimeExecutor(dir, effective, &workspacefs.Manager{Root: filepath.Join(dir, "workspaces")})
 	}})
 	claim, err := claimScheduledJob(r.coordinator, id, r.owner)
 	if err != nil {

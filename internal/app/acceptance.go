@@ -122,6 +122,7 @@ type AcceptanceServices struct {
 	Routes       []runconfig.Route
 	Platform     string
 	Source       workspace.SourceIdentity
+	Capabilities *workspace.Capabilities
 }
 
 // Submit validates and durably accepts one job. Before run.started is confirmed,
@@ -519,11 +520,25 @@ func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runcon
 	if platform == "" {
 		platform = "unknown"
 	}
-	decisions, err := workspace.Preflight(requirements, workspace.CurrentCapabilities(platform))
+	capabilities := workspace.CurrentCapabilities(platform)
+	source := s.Source
+	needsSource := false
+	for _, requirement := range requirements {
+		needsSource = needsSource || requirement.RequiresSource
+	}
+	if s.Capabilities != nil {
+		capabilities = *s.Capabilities
+	} else if needsSource && source.Schema == "" && platform != "simulation" {
+		modes := make([]string, 0, len(requirements))
+		for _, requirement := range requirements {
+			modes = append(modes, string(requirement.Mode))
+		}
+		return artifact, fmt.Errorf("workspace modes %s require source identity and probed capabilities before acceptance", strings.Join(modes, ", "))
+	}
+	decisions, err := workspace.Preflight(requirements, capabilities)
 	if err != nil {
 		return artifact, fmt.Errorf("workspace preflight: %w", err)
 	}
-	source := s.Source
 	if source.Schema == "" {
 		source = workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none",
 			DirtyPolicy: "excluded", UntrackedPolicy: "excluded", IgnoredPolicy: "excluded",

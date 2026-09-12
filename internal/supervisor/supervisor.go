@@ -14,6 +14,7 @@ import (
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/workspace"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 const DefaultCommandLimit = 32
@@ -471,6 +472,11 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		return fail(fmt.Errorf("verify immutable execution config: %w", err))
 	}
 	if effective.SupportsWorkspaceContract() {
+		if effective.WorkspaceContract.Source.Kind == "git" {
+			if _, verifyErr := workspacefs.Verify(context.Background(), effective.WorkspaceContract.Source); verifyErr != nil {
+				return fail(fmt.Errorf("verify frozen workspace source: %w", verifyErr))
+			}
+		}
 		current, verifyErr := currentWorkspaceContract(effective.Config, effective.WorkspaceContract.Source, effective.WorkspaceContract.Decisions[0].Platform)
 		if verifyErr != nil {
 			return fail(fmt.Errorf("verify live workspace capabilities: %w", verifyErr))
@@ -588,7 +594,15 @@ func currentWorkspaceContract(config kernel.Config, source workspace.SourceIdent
 	if err != nil {
 		return runconfig.WorkspaceContract{}, err
 	}
-	decisions, err := workspace.Preflight(requirements, workspace.CurrentCapabilities(platform))
+	capabilities := workspace.CurrentCapabilities(platform)
+	if source.Kind == "git" {
+		probe, probeErr := workspacefs.Verify(context.Background(), source)
+		if probeErr != nil {
+			return runconfig.WorkspaceContract{}, probeErr
+		}
+		capabilities = probe.Capabilities
+	}
+	decisions, err := workspace.Preflight(requirements, capabilities)
 	if err != nil {
 		return runconfig.WorkspaceContract{}, err
 	}

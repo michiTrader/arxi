@@ -19,6 +19,8 @@ import (
 	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/supervisor"
 	"github.com/michiTrader/arxi/internal/toolrun"
+	"github.com/michiTrader/arxi/internal/workspace"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 type cliSubmission struct {
@@ -43,13 +45,22 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 		return cliSubmission{}, fmt.Errorf("resolve the effective run config: %w", err)
 	}
 	platform := runtime.GOOS
+	var source workspace.SourceIdentity
+	var capabilities *workspace.Capabilities
 	if f.sim {
 		platform = "simulation"
+	} else {
+		probe, probeErr := workspacefs.Probe(context.Background(), ".")
+		if probeErr != nil {
+			return cliSubmission{}, fmt.Errorf("probe workspace source: %w", probeErr)
+		}
+		source, capabilities = probe.Source, &probe.Capabilities
 	}
+	managed := &workspacefs.Manager{Root: filepath.Join(dir, "workspaces")}
 	sup := supervisor.New("runs", supervisor.Options{
 		Now: nowFunc,
 		Build: func(dir string, effective runconfig.Artifact) (exec.Executor, error) {
-			return runtimeExecutor(dir, effective), nil
+			return runtimeExecutor(dir, effective, managed)
 		},
 	})
 	prepared := app.PreparedSubmission{
@@ -57,7 +68,8 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 		BudgetUSD: f.budget, MaxTurns: f.maxTurns, Location: dir,
 		OnAccepted: func(_ app.SubmitResult, dir string, cfg kernel.Config) { announce(dir, cfg) },
 	}
-	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup, Platform: platform}, supervisor: sup, prepared: prepared}, nil
+	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup, Platform: platform,
+		Source: source, Capabilities: capabilities}, supervisor: sup, prepared: prepared}, nil
 }
 
 func submitAndWaitCLI(ctx context.Context, runtime cliSubmission) (string, exec.Outcome, error) {
@@ -186,13 +198,30 @@ func runStartedEvent(events []kernel.Event) *kernel.Event {
 	return nil
 }
 
-func runtimeExecutor(dir string, a runconfig.Artifact) exec.Executor {
+func runtimeExecutor(dir string, a runconfig.Artifact, provisioners ...workspacefs.Provisioner) (exec.Executor, error) {
+	var provisioner workspacefs.Provisioner
+	if len(provisioners) > 0 {
+		provisioner = provisioners[0]
+	}
 	if a.Mode == "sim" {
 		fake := exec.NewFake()
 		if a.SimVersion == runconfig.SimulationNative {
 			fake.NativeReadTool = "read"
 		}
-		return fake
+		return fake, nil
+	}
+	if a.WorkspaceContract == nil {
+		return nil, fmt.Errorf("live execution requires a frozen workspace contract")
+	}
+	if _, err := workspacefs.Verify(context.Background(), a.WorkspaceContract.Source); err != nil {
+		return nil, fmt.Errorf("verify frozen workspace source: %w", err)
+	}
+	requests := map[string]workspacefs.Request{}
+	for i, requirement := range a.WorkspaceContract.Requirements {
+		decision := a.WorkspaceContract.Decisions[i]
+		requests[requirement.Member] = workspacefs.Request{JobID: a.RunID, Member: requirement.Member,
+			Mode: requirement.Mode, ProfileID: decision.ProfileID, ProvisionerVersion: decision.ProvisionerVersion,
+			Source: a.WorkspaceContract.Source}
 	}
 	resolver := frozenResolver{}
 	prices := map[string]model.Price{}
@@ -206,6 +235,6 @@ func runtimeExecutor(dir string, a runconfig.Artifact) exec.Executor {
 	return &provider.Executor{
 		Resolver: resolver, DefaultModel: a.DefaultModel, Members: a.Config.Members,
 		Prompt: a.Prompt, Prices: prices, ToolPolicy: a.ToolPolicy,
-		Tools: &toolrun.Runner{Root: filepath.Join(dir, "workspace"), Shared: a.Config.Workspace == "shared"},
-	}
+		Tools: &toolrun.Runner{Sessions: provisioner, Requests: requests},
+	}, nil
 }

@@ -119,13 +119,21 @@ func TestTheNativeAnthropicPresetRegistersAndListsModels(t *testing.T) {
 func TestRuntimeSelectsFrozenSimulationSemantics(t *testing.T) {
 	legacy := runconfig.New("legacy", "sim", strings.Repeat("a", 64), "prompt", "", kernel.Config{}, nil, nil)
 	legacy.SimVersion = runconfig.SimulationLegacy
-	legacyFake, ok := runtimeExecutor(t.TempDir(), legacy).(*exec.Fake)
+	legacyExecutor, err := runtimeExecutor(t.TempDir(), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyFake, ok := legacyExecutor.(*exec.Fake)
 	if !ok || legacyFake.NativeReadTool != "" {
 		t.Fatalf("legacy simulation executor = %#v", legacyFake)
 	}
 	native := legacy
 	native.SimVersion = runconfig.SimulationNative
-	nativeFake, ok := runtimeExecutor(t.TempDir(), native).(*exec.Fake)
+	nativeExecutor, err := runtimeExecutor(t.TempDir(), native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeFake, ok := nativeExecutor.(*exec.Fake)
 	if !ok || nativeFake.NativeReadTool != "read" {
 		t.Fatalf("native simulation executor = %#v", nativeFake)
 	}
