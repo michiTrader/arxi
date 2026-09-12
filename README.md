@@ -1622,7 +1622,7 @@ unrecoverable:
 |---|---|
 | `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
 | `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
-| `allow` | **runs**, in `internal/toolrun`: a per-member workspace, `bash` under a deadline, output bounded. `tool.call_completed` carries the result. |
+| `allow` | Runs only when the frozen workspace mode/profile passed native preflight. Linux can advertise the direct-file profile, but no native source-backed mode is currently advertised; Windows advertises no direct-file profile. Native `bash` has no advertised contained-process profile. Unsupported combinations stop before `run.started`; `tool.call_completed` exists only after a genuinely available runner returns. |
 
 The `allow` row is narrower than it sounds, and the reason is worth stating.
 Because a granted *mutating* tool resolves to `ask`, `bash`, `write` and `edit`
