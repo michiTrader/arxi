@@ -135,15 +135,21 @@ func TestWorkspaceContractEncodingIsDeterministicAndResumeRequiresExactIdentity(
 	a := fixture()
 	requirement := workspace.Requirement{Schema: workspace.SchemaV1, Member: "backend", Mode: workspace.ModeNone,
 		FileAccess: workspace.FileAccessNone, ProfileID: workspace.NoToolsProfileID}
+	profile := workspace.Profile{Schema: workspace.ProfileSchemaV1, ID: workspace.NoToolsProfileID,
+		FileAccess: workspace.FileAccessNone, Process: workspace.ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}}
+	profileIdentity, err := profile.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
 	decision := workspace.PlatformDecision{Schema: workspace.SchemaV1, Member: "backend", Platform: "linux",
-		CapabilityVersion: "cap-v1", ProfileID: workspace.NoToolsProfileID, ProvisionerVersion: "none-v1"}
+		CapabilityVersion: "cap-v1", ProfileID: workspace.NoToolsProfileID, ProfileIdentity: profileIdentity, ProvisionerVersion: "none-v1"}
 	contract := WorkspaceContract{Schema: workspace.SchemaV1,
 		Source: workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none", DirtyPolicy: "excluded",
 			UntrackedPolicy: "excluded", IgnoredPolicy: "excluded", SubmodulePolicy: "refused",
 			SymlinkPolicy: "internal-relative-only", SpecialFilePolicy: "refused"},
 		Requirements: []workspace.Requirement{requirement}, Decisions: []workspace.PlatformDecision{decision}}
 	a.WorkspaceContract = &contract
-	a.WorkspaceProfileID = workspace.NoToolsProfileID
+	a.WorkspaceProfileID = profileIdentity
 	first, firstDigest, err := Encode(a)
 	if err != nil {
 		t.Fatal(err)
