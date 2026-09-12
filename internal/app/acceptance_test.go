@@ -60,7 +60,7 @@ func TestWorkspacePreflightRejectsBeforePublishingOrLaunching(t *testing.T) {
 	}{
 		{name: "copy provisioner", blueprint: "name: worker\nworkspace: copy\nmembers:\n  - {name: writer, tools: [write]}\n", want: "copy"},
 		{name: "worktree provisioner", blueprint: "name: worker\nworkspace: worktree\nmembers:\n  - {name: writer, tools: [write]}\n", want: "worktree"},
-		{name: "process containment", blueprint: "name: worker\nworkspace: none\nmembers:\n  - {name: shell, tools: [bash]}\n", want: "requests workspace none"},
+		{name: "process containment", blueprint: "name: worker\nworkspace: shared\nmembers:\n  - {name: shell, tools: [bash]}\n", want: "shared"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()

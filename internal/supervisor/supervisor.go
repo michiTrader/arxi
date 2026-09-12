@@ -566,6 +566,16 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 }
 
 func currentWorkspaceContract(config kernel.Config, source workspace.SourceIdentity, platform string) (runconfig.WorkspaceContract, error) {
+	topLevel := workspace.Mode(config.Workspace)
+	if topLevel == workspace.ModeNone {
+		for _, member := range config.Members {
+			for _, tool := range member.Tools {
+				if tool == "read" || tool == "grep" || tool == "write" || tool == "edit" || tool == "bash" {
+					topLevel = ""
+				}
+			}
+		}
+	}
 	members := make([]workspace.Member, len(config.Members))
 	for i, member := range config.Members {
 		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
@@ -574,7 +584,7 @@ func currentWorkspaceContract(config kernel.Config, source workspace.SourceIdent
 	for i, stage := range config.Stages {
 		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
 	}
-	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(config.Workspace), Members: members, Stages: stages})
+	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: topLevel, Members: members, Stages: stages})
 	if err != nil {
 		return runconfig.WorkspaceContract{}, err
 	}

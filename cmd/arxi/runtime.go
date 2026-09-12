@@ -42,6 +42,10 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 	if err != nil {
 		return cliSubmission{}, fmt.Errorf("resolve the effective run config: %w", err)
 	}
+	platform := runtime.GOOS
+	if f.sim {
+		platform = "simulation"
+	}
 	sup := supervisor.New("runs", supervisor.Options{
 		Now: nowFunc,
 		Build: func(dir string, effective runconfig.Artifact) (exec.Executor, error) {
@@ -53,7 +57,7 @@ func prepareCLISubmission(f startFlags, bp *blueprint.Blueprint, announce func(s
 		BudgetUSD: f.budget, MaxTurns: f.maxTurns, Location: dir,
 		OnAccepted: func(_ app.SubmitResult, dir string, cfg kernel.Config) { announce(dir, cfg) },
 	}
-	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup, Platform: runtime.GOOS}, supervisor: sup, prepared: prepared}, nil
+	return cliSubmission{service: app.AcceptanceServices{RunsDir: "runs", Lifecycle: sup, Platform: platform}, supervisor: sup, prepared: prepared}, nil
 }
 
 func submitAndWaitCLI(ctx context.Context, runtime cliSubmission) (string, exec.Outcome, error) {

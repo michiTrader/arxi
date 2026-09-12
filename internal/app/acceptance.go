@@ -489,6 +489,20 @@ func Wait(ctx context.Context, submission Submission, policy WaitPolicy) (WaitRe
 }
 
 func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runconfig.Artifact, error) {
+	topLevel := workspace.Mode(artifact.Config.Workspace)
+	// ResolveDefaults historically materialized "none" for an omitted declaration.
+	// A member that needs files still carries enough evidence to recognize that old
+	// default; treating it as explicit would turn every pre-Phase-4 writer into an
+	// impossible none request rather than applying ADR-0012's writer default.
+	if topLevel == workspace.ModeNone {
+		for _, member := range artifact.Config.Members {
+			for _, tool := range member.Tools {
+				if tool == "read" || tool == "grep" || tool == "write" || tool == "edit" || tool == "bash" {
+					topLevel = ""
+				}
+			}
+		}
+	}
 	members := make([]workspace.Member, len(artifact.Config.Members))
 	for i, member := range artifact.Config.Members {
 		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
@@ -497,7 +511,7 @@ func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runcon
 	for i, stage := range artifact.Config.Stages {
 		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
 	}
-	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(artifact.Config.Workspace), Members: members, Stages: stages})
+	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: topLevel, Members: members, Stages: stages})
 	if err != nil {
 		return artifact, fmt.Errorf("resolve workspace requirements: %w", err)
 	}

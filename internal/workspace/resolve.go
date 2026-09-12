@@ -46,6 +46,7 @@ func Resolve(input ResolutionInput) ([]Requirement, error) {
 		seenMembers[member.Name] = true
 		access, bash := accessFor(member.Tools)
 		selected := input.TopLevel
+		inferred := selected == ""
 		if selected == "" {
 			if access == FileAccessWrite || bash {
 				selected = ModeWorktree
@@ -65,6 +66,12 @@ func Resolve(input ResolutionInput) ([]Requirement, error) {
 				return nil, fmt.Errorf("member %q stage %q: %w", member.Name, stage.Name, err)
 			}
 		}
+		if selected == ModeNone && (access != FileAccessNone || bash) {
+			if !inferred {
+				return nil, fmt.Errorf("member %q requests workspace none but requires source, file, or process access", member.Name)
+			}
+			selected = ModeWorktree
+		}
 		profileID := DirectFilesProfileID
 		if access == FileAccessNone && !bash {
 			profileID = NoToolsProfileID
@@ -72,7 +79,7 @@ func Resolve(input ResolutionInput) ([]Requirement, error) {
 			profileID = ContainedProcessProfileID
 		}
 		requirement := Requirement{Schema: SchemaV1, Member: member.Name, Mode: selected,
-			FileAccess: access, RequiresSource: access != FileAccessNone || bash,
+			FileAccess: access, RequiresSource: selected != ModeNone || access != FileAccessNone || bash,
 			RequiresBash: bash, ProfileID: profileID}
 		if err := ValidateRequirement(requirement); err != nil {
 			return nil, err

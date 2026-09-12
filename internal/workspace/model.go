@@ -75,7 +75,7 @@ type Profile struct {
 }
 
 func CurrentCapabilities(platform string) Capabilities {
-	return Capabilities{
+	capabilities := Capabilities{
 		Schema: SchemaV1, CapabilityVersion: "arxi.workspace-capabilities/initial-v1", Platform: platform,
 		Modes: []Mode{ModeNone},
 		Profiles: []Profile{
@@ -87,6 +87,17 @@ func CurrentCapabilities(platform string) Capabilities {
 		},
 		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1"},
 	}
+	if platform == "simulation" {
+		capabilities.Modes = []Mode{ModeNone, ModeShared, ModeCopy, ModeWorktree}
+		capabilities.Provisioners = map[Mode]string{
+			ModeNone: "arxi.workspace.none/v1", ModeShared: "arxi.workspace.simulated/v1",
+			ModeCopy: "arxi.workspace.simulated/v1", ModeWorktree: "arxi.workspace.simulated/v1",
+		}
+		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1,
+			ID: ContainedProcessProfileID, FileAccess: FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
+			Process: ProcessProfile{Descendants: "contained", Filesystem: "workspace-only", Environment: "allowlist", Network: "denied"}})
+	}
+	return capabilities
 }
 
 type Requirement struct {
