@@ -51,6 +51,33 @@ func (s *submissionCoordinatorStub) BindSubmission(value SubmissionBinding) (Sub
 	return s.binding, nil
 }
 
+func TestPrepareFailureLeavesNoAcceptedRunCallbackOrLaunch(t *testing.T) {
+	root := t.TempDir()
+	lifecycle := &lifecycleStub{}
+	blueprintBytes := []byte("name: worker\n")
+	sum := sha256.Sum256(blueprintBytes)
+	artifact := runconfig.New("r1", "sim", hex.EncodeToString(sum[:]), "work", "", kernel.Config{Blueprint: "worker"}.ResolveDefaults(), nil, nil)
+	callback := false
+	prepared := 0
+	aborted := 0
+	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle}
+	_, err := service.SubmitPrepared(context.Background(), PreparedSubmission{
+		JobID: "r1", Actor: "worker", Blueprint: blueprintBytes, Artifact: artifact, BudgetUSD: 1,
+		Prepare:      func(context.Context, string) error { prepared++; return errors.New("workspace unavailable") },
+		AbortPrepare: func(context.Context, string) error { aborted++; return nil },
+		OnAccepted:   func(SubmitResult, string, kernel.Config) { callback = true },
+	})
+	if err == nil || prepared != 1 || aborted != 1 {
+		t.Fatalf("error/prepared/aborted = %v/%d/%d: failed provisioning must be attempted once and cleaned before acceptance", err, prepared, aborted)
+	}
+	if callback || lifecycle.launches != 0 {
+		t.Fatalf("callback/launches = %v/%d: no accepted callback or provider-capable lifecycle may run after preparation failure", callback, lifecycle.launches)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "r1")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed preparation left an accepted run directory: %v", statErr)
+	}
+}
+
 func TestWorkspacePreflightRejectsBeforePublishingOrLaunching(t *testing.T) {
 	for _, test := range []struct {
 		name      string
