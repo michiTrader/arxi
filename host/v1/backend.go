@@ -478,7 +478,15 @@ func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error)
 			}
 			return Job{}, adaptCoordinationError(CapabilityWait, req.JobID, claimErr)
 		}
-		return Job{}, adaptStorageError(CapabilityWait, req.JobID, job.Sequence,
+		// Worker removal follows writer closure, so a missing resident after the
+		// first projection may mean the terminal append became durable between
+		// inspection and lookup. Re-reading storage preserves the event log as
+		// lifecycle truth instead of turning scheduler timing into a false outage.
+		terminal, terminalErr := b.inspect(ctx, CapabilityWait, req.JobID)
+		if terminalErr != nil || terminal.Terminal {
+			return terminal, terminalErr
+		}
+		return Job{}, adaptStorageError(CapabilityWait, req.JobID, terminal.Sequence,
 			errors.New("job is not resident in this host"))
 	}
 }
