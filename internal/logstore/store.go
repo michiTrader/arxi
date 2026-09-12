@@ -81,6 +81,8 @@ type Store struct {
 	closed bool
 }
 
+var removeFile = os.Remove
+
 // Open acquires the run directory for writing and validates the existing log.
 //
 // Validation is not optional bookkeeping. Open is the only moment where damage
@@ -799,7 +801,7 @@ func (s *Store) rollbackPending() error {
 	if err := truncateAndSync(s.eventsPath(), marker.PreAppendSize); err != nil {
 		return err
 	}
-	if err := os.Remove(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePendingFile(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("logstore: remove pending marker: %w", err)
 	}
 	return fsyncDir(s.dir)
@@ -872,7 +874,7 @@ func (s *Store) writePending(offset int64) error {
 }
 
 func (s *Store) clearPending() error {
-	if err := os.Remove(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePendingFile(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("logstore: clear pending marker: %w", err)
 	}
 	// The removal is the commit point, so it has to be durable before Append
