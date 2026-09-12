@@ -417,6 +417,10 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	if err != nil {
 		return nil, NotDispatched(fmt.Errorf("read exact authorization history: %w", err))
 	}
+	if len(events) == 0 || events[len(events)-1].Seq <= 0 {
+		return nil, NotDispatched(fmt.Errorf("authorization %s has no confirmed history", effect.AuthorizationID))
+	}
+	verifiedSeq := events[len(events)-1].Seq
 	state, _ := kernel.Fold(kernel.State{}, events, r.Config)
 	a := state.Authorization(effect.AuthorizationID)
 	if a == nil || a.Schema != "arxi.authorization/v1" || a.SuspensionID != effect.SuspensionID ||
@@ -516,7 +520,6 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	if a.ConsumingWorkID != "" {
 		return nil, NotDispatched(fmt.Errorf("authorization %s was already consumed", a.ID))
 	}
-	head := r.Log.Head()
 	if err := r.register(childMetadata(r, &child, "tool", WorkNonIdempotent, false)); err != nil {
 		return nil, NotDispatched(fmt.Errorf("register authorized tool dispatch %s: %w", child.ID, err))
 	}
@@ -538,7 +541,7 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 					"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
 					"expired_at": a.ExpiresAt,
 				}}
-			if _, err := r.Log.AppendIfSeq(head, r.stamp([]kernel.Event{expired})); err != nil {
+			if _, err := r.Log.AppendIfSeq(verifiedSeq, r.stamp([]kernel.Event{expired})); err != nil {
 				return nil, NotDispatched(fmt.Errorf("materialize expired authorization %s: %w", a.ID, err))
 			}
 			return nil, NotDispatched(fmt.Errorf("authorization %s expired before consumption", a.ID))
@@ -552,7 +555,7 @@ func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effec
 	started := r.progressEvent(kernel.ExecWorkStarted, map[string]any{
 		"work_id": child.ID, "parent_work_id": suspension.ParentWorkID, "work_scope": "turn_child",
 	}, resumeWork.Source)
-	if _, err := r.Log.AppendIfSeq(head, r.stamp([]kernel.Event{consumed, started})); err != nil {
+	if _, err := r.Log.AppendIfSeq(verifiedSeq, r.stamp([]kernel.Event{consumed, started})); err != nil {
 		return nil, NotDispatched(fmt.Errorf("consume authorization %s: %w", a.ID, err))
 	}
 	child.Started = true

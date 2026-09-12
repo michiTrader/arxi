@@ -105,6 +105,38 @@ func (x *nativeLoopExecutor) FinishTurn(e kernel.SpawnTurn, trace []TurnEntry) (
 	}, nil
 }
 
+type readBarrierLog struct {
+	*memLog
+	mu        sync.Mutex
+	remaining int
+	arrived   chan struct{}
+	release   chan struct{}
+}
+
+func newReadBarrierLog(log *memLog, readers int) *readBarrierLog {
+	return &readBarrierLog{memLog: log, remaining: readers, arrived: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (l *readBarrierLog) Read(fromSeq, toSeq int64) ([]kernel.Event, error) {
+	events, err := l.memLog.Read(fromSeq, toSeq)
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	if l.remaining == 0 {
+		l.mu.Unlock()
+		return events, nil
+	}
+	l.remaining--
+	if l.remaining == 0 {
+		close(l.arrived)
+	}
+	release := l.release
+	l.mu.Unlock()
+	<-release
+	return events, nil
+}
+
 func exactTestRunner(log *memLog, x *nativeLoopExecutor) *Runner {
 	config := kernel.Config{Members: []kernel.MemberConfig{{Name: "backend"}}}
 	_, _ = log.Append([]kernel.Event{{ID: "run-started", Type: kernel.RunStarted, Source: kernel.SourceHuman,
@@ -201,15 +233,21 @@ func TestExactAuthorizationResumeRaceConsumesAndRunsOnce(t *testing.T) {
 	}
 	resume := exactGrant(t, r, log)
 	x.policies["provider-call-7"] = "allow"
+	barrier := newReadBarrierLog(log, 2)
+	first, second := *r, *r
+	first.Log, second.Log = barrier, barrier
+	runners := []*Runner{&first, &second}
 	var wg sync.WaitGroup
-	errs := make([]error, 2)
-	for i := range errs {
+	errs := make([]error, len(runners))
+	for i := range runners {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = r.resumeAuthorization(context.Background(), Work{Source: kernel.Event{ID: "grant-exact"}}, resume)
+			_, errs[i] = runners[i].resumeAuthorization(context.Background(), Work{Source: kernel.Event{ID: "grant-exact"}}, resume)
 		}(i)
 	}
+	<-barrier.arrived
+	close(barrier.release)
 	wg.Wait()
 	if x.authorizedToolRun != 1 {
 		t.Fatalf("racing resumes invoked the runner %d times, want one: grant consumption must be the dispatch lock", x.authorizedToolRun)
