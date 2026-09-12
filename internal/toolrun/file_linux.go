@@ -12,6 +12,11 @@ import (
 )
 
 func (w *Workspace) openRelative(path string, flags int, perm os.FileMode) (*os.File, error) {
+	if resolved, err := w.Resolve(path); err != nil {
+		return nil, err
+	} else if err := w.validateToolPath(resolved); err != nil {
+		return nil, err
+	}
 	parts, err := relativeParts(path)
 	if err != nil {
 		return nil, fmt.Errorf("toolrun: %s: %w", w.Member, err)
