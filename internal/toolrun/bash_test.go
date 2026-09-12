@@ -8,10 +8,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
-func TestASuccessfulCommandReportsItsOutputAndZero(t *testing.T) {
+func commandWorkspace(t *testing.T) *Workspace {
+	t.Helper()
 	w := ws(t)
+	w.command = &workspace.CommandProfile{Schema: workspace.CommandSchemaV1, RunnerVersion: "test", Executable: "bash",
+		EnvironmentVersion: workspace.EnvironmentAllowlistV1, Descendants: "process-group",
+		Filesystem: "unrestricted", Network: "unrestricted", OutputLimitBytes: maxOutputBytes}
+	return w
+}
+
+func TestASuccessfulCommandReportsItsOutputAndZero(t *testing.T) {
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(), "echo hello", 0)
 	if err != nil {
 		t.Fatalf("Bash: %v", err)
@@ -28,7 +39,7 @@ func TestASuccessfulCommandReportsItsOutputAndZero(t *testing.T) {
 }
 
 func TestAFailingCommandIsNotARunnerError(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(), "exit 3", 0)
 	if err != nil {
 		t.Fatalf("Bash returned an error for a non-zero exit: %v\n"+
@@ -42,7 +53,7 @@ func TestAFailingCommandIsNotARunnerError(t *testing.T) {
 }
 
 func TestTheCommandRunsInsideTheWorkspace(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(), "pwd", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +71,7 @@ func TestTheCommandRunsInsideTheWorkspace(t *testing.T) {
 }
 
 func TestStdoutAndStderrArriveInOneStream(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(), "echo out; echo err 1>&2", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +85,7 @@ func TestStdoutAndStderrArriveInOneStream(t *testing.T) {
 }
 
 func TestATimeoutIsReportedAsATimeoutRatherThanAFailure(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	start := time.Now()
 	res, err := w.Bash(context.Background(), "sleep 30", 150*time.Millisecond)
 	elapsed := time.Since(start)
@@ -99,7 +110,7 @@ func TestATimeoutDoesNotLeaveTheChildRunning(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process groups are a no-op on windows, and killGroup says so")
 	}
-	w := ws(t)
+	w := commandWorkspace(t)
 
 	// The grandchild writes AFTER the parent shell has exited. If only the direct
 	// child is killed, the marker appears in a workspace belonging to a run that
@@ -125,7 +136,7 @@ func TestATimeoutDoesNotLeaveTheChildRunning(t *testing.T) {
 }
 
 func TestOversizedOutputIsTruncatedRatherThanFailing(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	// Print well past the cap, then exit 0.
 	res, err := w.Bash(context.Background(),
 		"for i in $(seq 1 20000); do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done", 0)
@@ -153,7 +164,7 @@ func TestOversizedOutputIsTruncatedRatherThanFailing(t *testing.T) {
 }
 
 func TestTruncationKeepsTheBeginning(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(),
 		"echo FIRST_LINE_MARKER; for i in $(seq 1 20000); do echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; done", 0)
 	if err != nil {
@@ -167,7 +178,7 @@ func TestTruncationKeepsTheBeginning(t *testing.T) {
 }
 
 func TestAnEmptyScriptIsRefusedRatherThanSucceeding(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	for _, s := range []string{"", "   ", "\n\t"} {
 		if _, err := w.Bash(context.Background(), s, 0); err == nil {
 			t.Errorf("Bash(%q) succeeded\n"+
@@ -178,7 +189,7 @@ func TestAnEmptyScriptIsRefusedRatherThanSucceeding(t *testing.T) {
 }
 
 func TestACancelledContextStopsTheCommandWithoutClaimingATimeout(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(100 * time.Millisecond)
@@ -201,7 +212,7 @@ func TestACancelledContextStopsTheCommandWithoutClaimingATimeout(t *testing.T) {
 }
 
 func TestTheDurationIsMeasuredRatherThanZero(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(), "sleep 0.2", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +226,7 @@ func TestTheDurationIsMeasuredRatherThanZero(t *testing.T) {
 }
 
 func TestACommandCanWriteInsideTheWorkspace(t *testing.T) {
-	w := ws(t)
+	w := commandWorkspace(t)
 	if _, err := w.Bash(context.Background(), "echo built > out.txt", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +250,7 @@ func TestAMissingTimeoutFallsBackToTheDefaultRatherThanForever(t *testing.T) {
 	if DefaultTimeout <= 0 {
 		t.Fatal("DefaultTimeout is not positive, so a caller passing 0 gets no deadline")
 	}
-	w := ws(t)
+	w := commandWorkspace(t)
 	res, err := w.Bash(context.Background(), "echo x", 0)
 	if err != nil || res.ExitCode != 0 {
 		t.Fatalf("a zero timeout should mean the default, not a refusal: %v", err)
