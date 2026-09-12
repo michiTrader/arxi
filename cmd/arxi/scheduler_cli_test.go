@@ -391,13 +391,13 @@ func TestResidentScheduledDecisionIsAcknowledgedAtActualSequence(t *testing.T) {
 	defer sup.Close(context.Background())
 
 	sequence, err := appendExternalDecision(dir, externalInboxEvent("inbox-1", inbox.Reply{
-		Decision: inbox.DecisionApprove,
+		Decision: inbox.DecisionApprove, Principal: "operator:alice",
 	}), true)
 	if err != nil {
 		t.Fatalf("external decision: %v", err)
 	}
-	if sequence != 9 {
-		t.Fatalf("acknowledged sequence = %d, want actual appended sequence 9", sequence)
+	if sequence != 12 {
+		t.Fatalf("acknowledged sequence = %d, want actual appended reply sequence 12: exact approval commits a grant before its reply; acknowledge the linked inbox event rather than the batch's first record", sequence)
 	}
 	if got := eventTypeCount(dir, kernel.InboxReplied); got != 1 {
 		t.Fatalf("inbox replies = %d, want 1", got)
@@ -421,7 +421,7 @@ func TestResidentScheduledDecisionRefusesDuplicate(t *testing.T) {
 	defer close(stop)
 	defer sup.Close(context.Background())
 
-	reply := externalInboxEvent("inbox-1", inbox.Reply{Decision: inbox.DecisionApprove})
+	reply := externalInboxEvent("inbox-1", inbox.Reply{Decision: inbox.DecisionApprove, Principal: "operator:alice"})
 	if _, err := appendExternalDecision(dir, reply, true); err != nil {
 		t.Fatalf("first decision: %v", err)
 	}
@@ -464,8 +464,19 @@ func scheduledApprovalStore(t *testing.T, dir string) *logstore.Store {
 		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(3), "work_ids": []string{}}},
 		{Type: kernel.AgentActivated, Actor: "agent", Payload: map[string]any{"agent": "agent"}},
 		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(5), "work_ids": []string{}}},
-		{Type: kernel.InboxCreated, Payload: map[string]any{"inbox_id": "inbox-1", "agent": "agent", "kind": "tool_approval", "question": "allow?"}},
+		{Type: kernel.AuthorizationRequested, Source: kernel.SourceRuntime, Actor: "agent", Payload: map[string]any{
+			"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "inbox_id": "inbox-1",
+			"requester_principal": "agent:agent", "suspension_id": "suspension-1", "parent_work_id": "parent-1",
+			"provider_call_id": "call-1", "tool": "bash", "argument_digest": strings.Repeat("a", 64),
+			"action_digest": strings.Repeat("b", 64), "tool_schema_version": "arxi.tool.bash/v1", "policy_version": "policy-1",
+			"workspace_profile_id": "workspace-1", "expires_at": "2099-09-12T00:00:00Z", "after_ms": int64(60000),
+		}},
 		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(7), "work_ids": []string{}}},
+		{Type: kernel.InboxCreated, Source: kernel.SourceRuntime, Payload: map[string]any{
+			"inbox_id": "inbox-1", "agent": "agent", "kind": "tool_approval", "question": "allow?",
+			"authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64),
+		}},
+		{Type: kernel.ExecStepCompleted, Source: kernel.SourceRuntime, Payload: map[string]any{"source_seq": int64(9), "work_ids": []string{}}},
 	})
 	if err != nil {
 		store.Close()

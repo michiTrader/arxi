@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+const exactActionDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+func exactAuthorizationEvents() string {
+	return `{"id":"e4","seq":4,"type":"authorization.requested","source":"runtime","actor":"backend","payload":{"schema":"arxi.authorization/v1","authorization_id":"authorization-1","inbox_id":"inbox-1","requester_principal":"agent:backend","suspension_id":"suspension-1","parent_work_id":"parent-1","provider_call_id":"call-1","tool":"bash","argument_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","action_digest":"` + exactActionDigest + `","tool_schema_version":"arxi.tool.bash/v1","policy_version":"policy-1","workspace_profile_id":"workspace-1","expires_at":"2099-09-12T00:00:00Z","after_ms":60000}}
+` +
+		`{"id":"e5","seq":5,"type":"inbox.created","source":"runtime","payload":{"inbox_id":"inbox-1","kind":"tool_approval","question":"allow bash?","agent":"backend","on_timeout":"deny","authorization_id":"authorization-1","action_digest":"` + exactActionDigest + `"}}
+`
+}
+
 // blockedRun writes a run directory under dir/runs/<id> whose log leaves
 // backend waiting on a bash approval.
 //
@@ -35,10 +44,35 @@ func blockedRun(t *testing.T, dir, id string) {
 	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"team","run_id":"` + id + `","budget_usd":5.0}}
 {"id":"e2","seq":2,"type":"stage.entered","payload":{"stage":"execute","index":0}}
 {"id":"e3","seq":3,"type":"agent.activated","actor":"backend","payload":{"agent":"backend"}}
-{"id":"e4","seq":4,"type":"tool.call_denied","actor":"backend","payload":{"tool":"bash","policy":"ask"}}
+` + exactAuthorizationEvents()
+	if err := os.WriteFile(filepath.Join(run, "events.ndjson"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func legacyBlockedRun(t *testing.T, dir, id string) {
+	t.Helper()
+	run := filepath.Join(dir, "runs", id)
+	if err := os.MkdirAll(run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"id":"e1","seq":1,"type":"run.started","payload":{"actor":"team","run_id":"` + id + `"}}
+{"id":"e2","seq":2,"type":"inbox.created","payload":{"inbox_id":"legacy-inbox-1","kind":"tool_approval","question":"allow legacy bash?","agent":"backend"}}
 `
 	if err := os.WriteFile(filepath.Join(run, "events.ndjson"), []byte(log), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLegacyPendingApprovalFailsClosedButRemainsListable(t *testing.T) {
+	dir := t.TempDir()
+	legacyBlockedRun(t, dir, "legacy-run")
+	if listed := arxi(t, dir, "inbox"); listed.code != 0 || !strings.Contains(listed.out, "legacy-inbox-1") {
+		t.Fatalf("legacy pending approval was not replay-compatible in the listing: historical inspection would lose the unanswered item; keep replay while refusing live authority:\n%s", listed.out)
+	}
+	got := arxi(t, dir, "inbox", "approve", "legacy-inbox-1")
+	if got.code == 0 || !strings.Contains(got.out, "exact authorization binding") {
+		t.Fatalf("legacy pending approval result = exit %d, output %q: live mutation could invent authority for unbound work; fail closed and name the missing exact binding", got.code, got.out)
 	}
 }
 
@@ -91,10 +125,10 @@ func TestApprovingPrintsTheAgentAndTheSeqTheAnswerLandedAt(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit %d: %s", got.code, got.out)
 	}
-	// §20.2 prints "approved. backend unblocked (r1 seq 6)". The seq is the
-	// part worth asserting: it is the point in the log the answer landed at,
-	// which is what `run replay --until-seq` is anchored to.
-	for _, want := range []string{"approved", "backend", "r1", "seq 5"} {
+	// Exact approval commits authorization.granted and inbox.replied in one
+	// batch. The displayed seq must identify the reply, because that is the
+	// replay point at which the human-facing item is durably answered.
+	for _, want := range []string{"approved", "backend", "r1", "seq 7"} {
 		if !strings.Contains(got.out, want) {
 			t.Errorf("the confirmation does not mention %q:\n%s", want, got.out)
 		}
@@ -131,7 +165,7 @@ func TestTheApprovalIsWrittenWithATimestampAndTheDecision(t *testing.T) {
 	}
 
 	if ev.Type != "inbox.replied" {
-		t.Fatalf("last event is %q, want inbox.replied", ev.Type)
+		t.Fatalf("last event is %q, want inbox.replied: approval audit and inbox state would diverge; commit authorization.granted before the linked reply", ev.Type)
 	}
 	// Measured empty on a real log before this was fixed. The append does not go
 	// through the effect runner -- a human typed a command, there is no run loop
