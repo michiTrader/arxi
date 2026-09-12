@@ -144,6 +144,12 @@ func (w *storageWorker) run() {
 	}
 	executor := &textExecutor{provider: w.provider, tools: w.tools, workspaces: w.workspaces,
 		jobID: w.id, effective: metadata.Effective, sessions: w.prepared}
+	defer func() {
+		state, _ := kernel.Fold(kernel.State{}, w.events, metadata.Effective.Config)
+		if state.Status == kernel.StatusSucceeded {
+			w.setErr(executor.release(context.Background()))
+		}
+	}()
 
 	runner := &exec.Runner{Log: log, Clock: clock,
 		Executor: executor,

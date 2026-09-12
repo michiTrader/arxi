@@ -108,6 +108,21 @@ func TestWorkspaceProvisionFailurePreventsToolDispatch(t *testing.T) {
 	}
 }
 
+func TestTextExecutorReleasesPreparedSessionsIdempotently(t *testing.T) {
+	spaces := &recordingProvisioner{}
+	session := WorkspaceSessionV1{ID: "session:prepared", Workspace: "opaque:prepared"}
+	x := &textExecutor{workspaces: spaces, sessions: map[string]WorkspaceSessionV1{"writer": session}}
+	if err := x.release(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.release(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces.released) != 1 || spaces.released[0] != session.Workspace {
+		t.Fatalf("released handles = %v: a durable successful outcome must release each exact accepted host session once, while restart-safe retries remain idempotent", spaces.released)
+	}
+}
+
 func TestRecoveredWorkspaceSessionMustMatchIdentityAndExactHandleBeforeDispatch(t *testing.T) {
 	frozen := map[string]WorkspaceSessionV1{"writer": {ID: "stable-session", Workspace: "opaque:exact"}}
 	for _, test := range []struct {

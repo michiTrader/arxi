@@ -129,6 +129,9 @@ func (x *textExecutor) workspace(ctx context.Context, actor string) (Workspace, 
 func (x *textExecutor) release(ctx context.Context) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	if x.workspaces == nil {
+		return nil
+	}
 	var releaseErr error
 	for actor, session := range x.sessions {
 		if err := x.workspaces.Release(ctx, session.Workspace); err != nil {
