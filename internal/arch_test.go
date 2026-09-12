@@ -371,8 +371,9 @@ func TestTheScheduleParserDependsOnDeclarationsAndNotOnTheRuntime(t *testing.T) 
 // package is persistence that gets copy-pasted.
 func TestTheTriggerStoreIsTheOnlyPlaceTriggersTouchTheDisk(t *testing.T) {
 	permitted := map[string]bool{
-		mod + "internal/trigger": true,
-		mod + "internal/surface": true, // inherited through trigger, a declaration
+		mod + "internal/trigger":      true,
+		mod + "internal/surface":      true, // inherited through trigger, a declaration
+		mod + "internal/fsdurability": true, // storage-only directory sync compatibility
 	}
 	for _, d := range list(t, mod+"internal/trigstore").Deps {
 		if !strings.HasPrefix(d, mod) || permitted[d] {
@@ -518,9 +519,10 @@ func TestEvalDoesNotReadTheClockOrTheNetwork(t *testing.T) {
 // evidence unreadable on a machine with no API key.
 func TestTheEvalStoreIsTheOnlyPlaceRunsTouchTheDisk(t *testing.T) {
 	permitted := map[string]bool{
-		mod + "internal/eval":      true,
-		mod + "internal/blueprint": true, // inherited through eval
-		mod + "internal/kernel":    true, // inherited through blueprint
+		mod + "internal/eval":         true,
+		mod + "internal/blueprint":    true, // inherited through eval
+		mod + "internal/kernel":       true, // inherited through blueprint
+		mod + "internal/fsdurability": true, // storage-only directory sync compatibility
 	}
 	for _, d := range list(t, mod+"internal/evalstore").Deps {
 		if !strings.HasPrefix(d, mod) || permitted[d] {
@@ -818,11 +820,12 @@ func TestTheDesignerCannotReachTheTerminal(t *testing.T) {
 // refusal rather than on a receipt.
 func TestTheDesignerDoesNotPerformTheWriteItDescribes(t *testing.T) {
 	permitted := map[string]bool{
-		mod + "internal/agentstore": true,
-		mod + "internal/blueprint":  true, // inherited through agentstore
-		mod + "internal/kernel":     true, // inherited
-		mod + "internal/surface":    true, // inherited, and a declaration
-		mod + "internal/tool":       true, // inherited
+		mod + "internal/agentstore":   true,
+		mod + "internal/blueprint":    true, // inherited through agentstore
+		mod + "internal/kernel":       true, // inherited
+		mod + "internal/surface":      true, // inherited, and a declaration
+		mod + "internal/tool":         true, // inherited
+		mod + "internal/fsdurability": true, // inherited storage-only compatibility
 	}
 	for _, d := range list(t, mod+"internal/designer").Deps {
 		if !strings.HasPrefix(d, mod) || permitted[d] {
