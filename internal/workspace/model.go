@@ -74,6 +74,21 @@ type Profile struct {
 	Process           ProcessProfile `json:"process"`
 }
 
+func CurrentCapabilities(platform string) Capabilities {
+	return Capabilities{
+		Schema: SchemaV1, CapabilityVersion: "arxi.workspace-capabilities/initial-v1", Platform: platform,
+		Modes: []Mode{ModeNone, ModeShared},
+		Profiles: []Profile{
+			{Schema: ProfileSchemaV1, ID: NoToolsProfileID, FileAccess: FileAccessNone,
+				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
+			{Schema: ProfileSchemaV1, ID: DirectFilesProfileID, FileAccess: FileAccessWrite,
+				HandleRelative: true, FinalLinkRaceFree: platform != "windows",
+				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
+		},
+		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1", ModeShared: "arxi.workspace.shared-current-directory/v1"},
+	}
+}
+
 type Requirement struct {
 	Schema         string     `json:"schema"`
 	Member         string     `json:"member"`
