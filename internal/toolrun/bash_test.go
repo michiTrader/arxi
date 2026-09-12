@@ -14,6 +14,9 @@ import (
 
 func commandWorkspace(t *testing.T) *Workspace {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows capability preflight refuses command execution before the runner")
+	}
 	w := ws(t)
 	w.command = &workspace.CommandProfile{Schema: workspace.CommandSchemaV1, RunnerVersion: "test", Executable: "bash",
 		EnvironmentVersion: workspace.EnvironmentAllowlistV1, Descendants: "process-group",
