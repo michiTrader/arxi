@@ -163,7 +163,7 @@ to raise the ceiling or stop.
 
 | default | why |
 |---|---|
-| `workspace: worktree` if anybody has `write`/`bash` | Two agents writing the same directory overwrite each other, and the KV store lock does not prevent it. The lock coordinates *intent*; real isolation comes from the filesystem. |
+| workspace source and tool profile | Resolution selects `worktree` for writers, `shared` for readers and `none` for text-only members, but preflight accepts only advertised native guarantees. Windows currently advertises `none`/`no-tools`; Linux advertises that plus `direct-files`, while no native source-backed mode is advertised. Therefore file-using and `bash` runs fail before `run.started`; an internal provisioner or process runner is not availability until the production capability decision guarantees its full contract. |
 | `on_timeout: escalate` | A timeout almost never means "impossible", it means "something got stuck, go look". Failing by default trains the user to set absurdly long timeouts, which is worse than having none. |
 | `activation: coalesce` | The alternative multiplies the invoice in exchange for nothing. |
 | `include_self: false` | See §10.6. |
