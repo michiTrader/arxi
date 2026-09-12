@@ -137,6 +137,9 @@ func validatePreparation(records []preparationRecord, requests []Request) (map[s
 		}
 		phases[record.Digest] = record.Phase
 	}
+	return phases, nil
+}
+
 func requestDigest(req Request) (string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {

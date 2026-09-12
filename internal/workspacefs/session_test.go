@@ -366,6 +366,8 @@ func TestGitFiltersCannotExecuteOrMutateFrozenSource(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("executable filter regression requires a Unix shell; Git environment spoofing remains covered on Windows")
 	}
+	sentinel := filepath.Join(t.TempDir(), "filter-ran")
+	filter := filepath.Join(t.TempDir(), "filter.sh")
 	script := "#!/bin/sh\nprintf ran > " + shellQuote(sentinel) + "\nprintf altered\n"
 	if err := os.WriteFile(filter, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
