@@ -219,9 +219,16 @@ func runtimeExecutor(dir string, a runconfig.Artifact, provisioners ...workspace
 	requests := map[string]workspacefs.Request{}
 	for i, requirement := range a.WorkspaceContract.Requirements {
 		decision := a.WorkspaceContract.Decisions[i]
-		requests[requirement.Member] = workspacefs.Request{JobID: a.RunID, Member: requirement.Member,
+		request := workspacefs.Request{JobID: a.RunID, Member: requirement.Member,
 			Mode: requirement.Mode, ProfileID: decision.ProfileID, ProvisionerVersion: decision.ProvisionerVersion,
 			Source: a.WorkspaceContract.Source}
+		if provisioner == nil {
+			return nil, fmt.Errorf("member %q requires workspace %s, but no provisioner is configured", requirement.Member, requirement.Mode)
+		}
+		if _, err := provisioner.Provision(context.Background(), request); err != nil {
+			return nil, fmt.Errorf("pre-provision workspace for %q before provider dispatch: %w", requirement.Member, err)
+		}
+		requests[requirement.Member] = request
 	}
 	resolver := frozenResolver{}
 	prices := map[string]model.Price{}
