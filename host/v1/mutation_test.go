@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,102 @@ func exactHostStorage(t *testing.T) (*memoryStorage, JobID) {
 		t.Fatal(err)
 	}
 	return storage, id
+}
+
+func hostAuthorizationEvents(t *testing.T, storage *memoryStorage, id JobID) []kernel.Event {
+	t.Helper()
+	storage.mu.Lock()
+	records := cloneStoredRecords(storage.jobs[id].records)
+	storage.mu.Unlock()
+	events := make([]kernel.Event, len(records))
+	for i, record := range records {
+		if err := json.Unmarshal(record.Data, &events[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return events
+}
+
+func TestHostDueApprovalAndRejectPersistExpiryBeforeStableFailure(t *testing.T) {
+	for _, decision := range []struct {
+		name string
+		call func(*Host, JobID) error
+	}{
+		{"approve", func(h *Host, id JobID) error {
+			_, err := h.Approve(context.Background(), ApproveRequest{Principal: Principal{ID: "operator:alice"}, JobID: id, ItemID: "approval-1"})
+			return err
+		}},
+		{"reject", func(h *Host, id JobID) error {
+			_, err := h.Reject(context.Background(), RejectRequest{Principal: Principal{ID: "operator:alice"}, JobID: id, ItemID: "approval-1", Reason: "unsafe"})
+			return err
+		}},
+	} {
+		t.Run(decision.name, func(t *testing.T) {
+			storage, id := exactHostStorage(t)
+			h := New(Options{Storage: storage, Now: func() time.Time { return time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC) }})
+			defer h.Close()
+			err := decision.call(h, id)
+			if !IsCode(err, CodeInvalidArgument) || !errors.Is(err, errAuthorizationExpired) {
+				t.Fatalf("due host %s error = %v: host/v1 must preserve its stable invalid-argument refusal after expiry commits", decision.name, err)
+			}
+			events := hostAuthorizationEvents(t, storage, id)
+			last := events[len(events)-1]
+			if last.Type != kernel.AuthorizationExpired || last.Source != kernel.SourceRuntime || last.Str("expired_at") != "2026-09-12T00:00:00Z" {
+				t.Fatalf("due host %s persisted %+v: restart needs a durable runtime expiry judgment", decision.name, last)
+			}
+			state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{Members: []kernel.MemberConfig{{Name: "worker"}}})
+			if a := state.Authorization("authorization-1"); a == nil || a.Decision != "expired" || a.GrantEventID != "" || a.ConsumingWorkID != "" {
+				t.Fatalf("due host %s replay = %+v: failed mutation must neither grant nor consume", decision.name, a)
+			}
+			repeated := decision.call(h, id)
+			if !IsCode(repeated, CodeInvalidArgument) || !errors.Is(repeated, errAuthorizationExpired) {
+				t.Fatalf("recorded host expiry retry = %v: host/v1 must return the same stable refusal", repeated)
+			}
+			if got := len(hostAuthorizationEvents(t, storage, id)); got != len(events) {
+				t.Fatalf("recorded host expiry grew log from %d to %d: retry must not append a duplicate judgment", len(events), got)
+			}
+		})
+	}
+}
+
+func TestHostRacingDueExpiryAndDecisionCommitOneTerminalJudgment(t *testing.T) {
+	storage, id := exactHostStorage(t)
+	var mu sync.Mutex
+	observed := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	h := New(Options{Storage: storage, Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return observed }})
+	defer h.Close()
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, due := range []bool{false, true} {
+		go func(due bool) {
+			<-start
+			mu.Lock()
+			if due {
+				observed = time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+			} else {
+				observed = time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+			}
+			mu.Unlock()
+			_, err := h.Approve(context.Background(), ApproveRequest{Principal: Principal{ID: "operator:alice"}, JobID: id, ItemID: "approval-1"})
+			errs <- err
+		}(due)
+	}
+	close(start)
+	for range 2 {
+		<-errs
+	}
+	var grants, expiries int
+	for _, event := range hostAuthorizationEvents(t, storage, id) {
+		switch event.Type {
+		case kernel.AuthorizationGranted:
+			grants++
+		case kernel.AuthorizationExpired:
+			expiries++
+		}
+	}
+	if grants+expiries != 1 {
+		t.Fatalf("host race committed %d grants and %d expiries: serialized writer/CAS must choose one terminal judgment", grants, expiries)
+	}
 }
 
 func TestHostExactApprovalCarriesPrincipalAndCommitsOneBatch(t *testing.T) {
