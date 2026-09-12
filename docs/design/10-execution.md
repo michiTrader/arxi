@@ -377,3 +377,31 @@ Two smaller choices follow from the same reasoning:
 - A simulated turn **costs money by default**. A free simulation can never reach
   a budget ceiling, so `budget.warning` and `budget.exceeded` would be dead code
   until a real run hit them.
+
+## 10.13 Exact grants and workspace preaccept
+
+Phase 4 does not turn an approval into a fresh model instruction. An `ask`
+outcome persists the exact canonical call and continuation, and the approval
+binds that immutable action. The active fenced worker re-folds the confirmed
+prefix, then atomically appends `authorization.consumed` with the matching child
+`exec.work_started`. The runner receives the call only after that batch commits.
+A crash after the pair is started work, not an unused grant; recovery reconciles
+a trustworthy receipt or records `unknown` rather than redispatching a
+non-idempotent action.
+
+Workspace resolution and availability are deliberately different steps. The
+pure resolver derives one requirement per member; the native capability decision
+then rejects any mode/profile combination the platform does not advertise. For
+accepted combinations, external preparation happens while the run is still
+unpublished and records ordered `prepared`, `started`, and `finished` evidence.
+Only after every requirement is provisioner-verified are the frozen blueprint,
+effective configuration, and `run.started` published. A failure invokes
+ownership-checked cleanup and leaves no accepted run; a crash can re-enter the
+provisioner, but path existence alone is never adoption evidence.
+
+The production decision is intentionally narrower than internal implementation.
+Windows currently advertises only `none`/`no-tools`. Linux additionally
+advertises `direct-files`, but no native source-backed mode, so no file-using
+combination passes preflight. Native `shared`, `copy`, `worktree`, and
+`contained-process` remain unavailable until one production capability decision
+can guarantee the full source, lifecycle, file and process contract.
