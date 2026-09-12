@@ -143,7 +143,10 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	if err != nil {
 		return SubmitResult{}, invalidArgument(CapabilitySubmit, "resolve workspace requirements: "+err.Error())
 	}
-	decisions, err := workspace.Preflight(requirements, workspace.CurrentCapabilities(runtime.GOOS))
+	if hostRequiresTools(requirements) && (b.tools == nil || b.workspaces == nil) {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require both Options.Tools and Options.Workspaces before acceptance")
+	}
+	decisions, err := workspace.Preflight(requirements, hostWorkspaceCapabilities(requirements, b.tools, b.workspaces))
 	if err != nil {
 		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace preflight: "+err.Error())
 	}
@@ -228,6 +231,30 @@ func hostWorkspaceRequirements(config kernel.Config) ([]workspace.Requirement, e
 		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
 	}
 	return workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(config.Workspace), Members: members, Stages: stages})
+}
+
+func hostRequiresTools(requirements []workspace.Requirement) bool {
+	for _, requirement := range requirements {
+		if requirement.FileAccess != workspace.FileAccessNone || requirement.RequiresBash {
+			return true
+		}
+	}
+	return false
+}
+
+func hostWorkspaceCapabilities(requirements []workspace.Requirement, tools ToolExecutor, provisioner WorkspaceProvisioner) workspace.Capabilities {
+	capabilities := workspace.CurrentCapabilities(runtime.GOOS)
+	if tools == nil || provisioner == nil || !hostRequiresTools(requirements) {
+		return capabilities
+	}
+	capabilities.CapabilityVersion = "arxi.host.workspace-ports/v1"
+	capabilities.Modes = []workspace.Mode{workspace.ModeNone, workspace.ModeShared, workspace.ModeCopy, workspace.ModeWorktree}
+	capabilities.SourceKinds = []string{"host-opaque"}
+	capabilities.Provisioners = map[workspace.Mode]string{
+		workspace.ModeNone: "arxi.workspace.none/v1", workspace.ModeShared: "arxi.host.workspace-provisioner/v1",
+		workspace.ModeCopy: "arxi.host.workspace-provisioner/v1", workspace.ModeWorktree: "arxi.host.workspace-provisioner/v1",
+	}
+	return capabilities
 }
 
 func (b *storageBackend) Inspect(ctx context.Context, req InspectRequest) (Job, error) {
