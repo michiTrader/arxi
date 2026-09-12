@@ -74,6 +74,26 @@ func request(probe ProbeResult, mode workspace.Mode, member string) Request {
 		ProfileIdentity: identity, ProvisionerVersion: probe.Capabilities.Provisioners[mode], Source: probe.Source}
 }
 
+func TestVerifyAcceptsOperatorCheckoutAdvanceWhenFrozenObjectsRemain(t *testing.T) {
+	probe := testRepo(t)
+	root := probe.Source.CanonicalRoot
+	if err := os.WriteFile(filepath.Join(root, "later.txt"), []byte("later\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "later.txt")
+	runGit(t, root, "commit", "-m", "advance operator checkout")
+	if got := runGit(t, root, "rev-parse", "HEAD"); got == probe.Source.Commit {
+		t.Fatal("fixture HEAD did not advance, so the test cannot distinguish frozen source from operator checkout state")
+	}
+	verified, err := Verify(context.Background(), probe.Source)
+	if err != nil {
+		t.Fatalf("Verify rejected an available frozen object after source advance: %v", err)
+	}
+	if verified.Source != probe.Source {
+		t.Fatalf("verified source = %#v, want frozen %#v: resume must keep the accepted source identity", verified.Source, probe.Source)
+	}
+}
+
 func TestSourceLayoutsExposeFrozenTrackedTreeWithPromisedVisibility(t *testing.T) {
 	probe := testRepo(t)
 	manager := &Manager{Root: t.TempDir()}
