@@ -220,7 +220,8 @@ func runtimeExecutor(dir string, a runconfig.Artifact, provisioners ...workspace
 	for i, requirement := range a.WorkspaceContract.Requirements {
 		decision := a.WorkspaceContract.Decisions[i]
 		request := workspacefs.Request{JobID: a.RunID, Member: requirement.Member,
-			Mode: requirement.Mode, ProfileID: decision.ProfileID, ProvisionerVersion: decision.ProvisionerVersion,
+			Mode: requirement.Mode, ProfileID: decision.ProfileID, ProfileIdentity: decision.ProfileIdentity,
+			ProvisionerVersion: decision.ProvisionerVersion, Command: decision.Command,
 			Source: a.WorkspaceContract.Source}
 		if provisioner == nil {
 			return nil, fmt.Errorf("member %q requires workspace %s, but no provisioner is configured", requirement.Member, requirement.Mode)
