@@ -1,3 +1,5 @@
+//go:build linux
+
 package toolrun
 
 import (
@@ -94,7 +96,11 @@ func TestSharedWorkspaceIsOptInRatherThanTheDefault(t *testing.T) {
 
 func TestTheSameMemberKeepsTheSameWorkspace(t *testing.T) {
 	r := runner(t)
-	a, _ := r.workspaceFor("backend")
+	a, err := r.workspaceFor("backend")
+	if err != nil {
+		t.Fatalf("opening the first workspace for a repeat call failed: %v\n"+
+			"  the persistence assertion cannot dereference a workspace the platform refused", err)
+	}
 	if err := a.WriteFile("state.txt", []byte("step 1")); err != nil {
 		t.Fatal(err)
 	}
