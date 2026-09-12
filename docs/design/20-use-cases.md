@@ -307,7 +307,13 @@ would need to know to debug the run:
   the cheap one respectively.
 
 Printing the resolved values is what makes these defaults reviewable instead of
-folklore. A default you cannot see is indistinguishable from a bug when it fires.
+folklore. Resolution is not availability: on current native builds this team is
+refused before `run.started`, because neither Windows nor Linux advertises a
+source-backed `worktree` mode, and `backend` additionally requires the
+unadvertised `contained-process` profile. The transcript below remains the
+specified behavior after a production platform adapter can advertise and
+provision the complete contract; the current honest result is preflight refusal,
+not a weaker shared directory or unrestricted shell.
 
 ```
 $ arxi run start feature-team "implement rate limiting on /api/login" --budget 20.00 --workspace worktree
