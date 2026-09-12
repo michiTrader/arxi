@@ -96,7 +96,7 @@ func (s MutationServices) decide(op string, req Decision, decision string, store
 	}
 	reply := inbox.Reply{Decision: decision, Text: req.Text, Principal: req.Principal}
 	if store == nil {
-		_, err = inbox.AnswerExact(dir, req.ItemID, reply)
+		_, err = inbox.DecideExact(dir, req.ItemID, reply, s.now())
 	} else {
 		_, err = inbox.DecideExactStore(store, req.ItemID, reply, s.now())
 	}
