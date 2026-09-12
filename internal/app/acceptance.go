@@ -11,13 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -497,15 +497,7 @@ func writeSyncedFile(path string, body []byte, mode os.FileMode) error {
 }
 
 func syncDirectory(dir string) error {
-	opened, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer opened.Close()
-	if err := opened.Sync(); err != nil && runtime.GOOS != "windows" {
-		return err
-	}
-	return nil
+	return fsdurability.SyncDirectory(dir)
 }
 
 // Wait observes retained supervisor generations according to a private policy.
