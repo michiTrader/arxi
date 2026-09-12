@@ -30,6 +30,17 @@ func ValidateCapabilities(capabilities Capabilities) error {
 		if profile.Schema != ProfileSchemaV1 || profile.ID == "" {
 			return fmt.Errorf("workspace capability contains an invalid profile")
 		}
+		if _, err := profile.Identity(); err != nil {
+			return err
+		}
+		if profile.Command != nil {
+			command := profile.Command
+			if command.Schema != CommandSchemaV1 || command.RunnerVersion == "" || command.Executable == "" ||
+				command.EnvironmentVersion == "" || command.Descendants == "" || command.Filesystem == "" ||
+				command.Network == "" || command.OutputLimitBytes <= 0 {
+				return fmt.Errorf("workspace profile %q contains an invalid command profile", profile.ID)
+			}
+		}
 		if seenProfiles[profile.ID] {
 			return fmt.Errorf("workspace profile %q is duplicated", profile.ID)
 		}
@@ -68,12 +79,31 @@ func Preflight(requirements []Requirement, capabilities Capabilities) ([]Platfor
 		if requirement.FileAccess == FileAccessRead && profile.FileAccess == FileAccessNone {
 			return nil, fmt.Errorf("member %q requires read access, but workspace profile %q provides none", requirement.Member, profile.ID)
 		}
-		if requirement.RequiresBash && (profile.Process.Descendants != "contained" || profile.Process.Filesystem != "workspace-only" || profile.Process.Environment != "allowlist" || profile.Process.Network != "denied") {
-			return nil, fmt.Errorf("member %q requires contained process descendants, workspace-only filesystem, allowlisted environment, and denied network; profile %q does not provide all four guarantees", requirement.Member, profile.ID)
+		if requirement.RequiresBash {
+			if profile.Command == nil {
+				return nil, fmt.Errorf("member %q requires bash, but profile %q has no platform command runner", requirement.Member, profile.ID)
+			}
+			command := profile.Command
+			if command.Descendants != "contained" {
+				return nil, fmt.Errorf("member %q requires contained process descendants, but profile %q provides %s", requirement.Member, profile.ID, command.Descendants)
+			}
+			if command.Filesystem != "workspace-only" {
+				return nil, fmt.Errorf("member %q requires workspace-only process filesystem reach, but profile %q provides %s", requirement.Member, profile.ID, command.Filesystem)
+			}
+			if command.EnvironmentVersion != EnvironmentAllowlistV1 {
+				return nil, fmt.Errorf("member %q requires allowlisted process environment, but profile %q provides %s", requirement.Member, profile.ID, command.EnvironmentVersion)
+			}
+			if command.Network != "denied" {
+				return nil, fmt.Errorf("member %q requires denied process network reach, but profile %q provides %s", requirement.Member, profile.ID, command.Network)
+			}
+		}
+		identity, err := profile.Identity()
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, PlatformDecision{Schema: SchemaV1, Member: requirement.Member, Platform: capabilities.Platform,
-			CapabilityVersion: capabilities.CapabilityVersion, ProfileID: profile.ID,
-			ProvisionerVersion: capabilities.Provisioners[requirement.Mode]})
+			CapabilityVersion: capabilities.CapabilityVersion, ProfileID: profile.ID, ProfileIdentity: identity,
+			ProvisionerVersion: capabilities.Provisioners[requirement.Mode], Command: profile.Command})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Member < out[j].Member })
 	return out, nil
