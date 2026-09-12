@@ -137,9 +137,15 @@ func CurrentCapabilities(platform string) Capabilities {
 			ModeNone: "arxi.workspace.none/v1", ModeShared: "arxi.workspace.simulated/v1",
 			ModeCopy: "arxi.workspace.simulated/v1", ModeWorktree: "arxi.workspace.simulated/v1",
 		}
-		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1,
-			ID: ContainedProcessProfileID, FileAccess: FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
-			Process: ProcessProfile{Descendants: "contained", Filesystem: "workspace-only", Environment: "allowlist", Network: "denied"}})
+		capabilities.Profiles = append(capabilities.Profiles,
+			Profile{Schema: ProfileSchemaV1, ID: DirectFilesProfileID, FileAccess: FileAccessWrite,
+				HandleRelative: true, FinalLinkRaceFree: true,
+				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
+			Profile{Schema: ProfileSchemaV1, ID: ContainedProcessProfileID, FileAccess: FileAccessWrite,
+				HandleRelative: true, FinalLinkRaceFree: true,
+				Process: ProcessProfile{Descendants: "contained", Filesystem: "workspace-only", Environment: "allowlist", Network: "denied"},
+				Command: &CommandProfile{Schema: CommandSchemaV1, RunnerVersion: "arxi.command.simulated/v1", Executable: "simulated",
+					EnvironmentVersion: EnvironmentAllowlistV1, Descendants: "contained", Filesystem: "workspace-only", Network: "denied", OutputLimitBytes: 256 << 10}})
 	}
 	return capabilities
 }
