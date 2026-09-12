@@ -6,7 +6,11 @@ import (
 	"strings"
 )
 
-const DefaultProfileID = "arxi.workspace/direct-files-v1"
+const (
+	NoToolsProfileID          = "arxi.workspace/no-tools-v1"
+	DirectFilesProfileID      = "arxi.workspace/direct-files-v1"
+	ContainedProcessProfileID = "arxi.workspace/contained-process-v1"
+)
 
 func Resolve(input ResolutionInput) ([]Requirement, error) {
 	if input.TopLevel != "" {
@@ -61,9 +65,15 @@ func Resolve(input ResolutionInput) ([]Requirement, error) {
 				return nil, fmt.Errorf("member %q stage %q: %w", member.Name, stage.Name, err)
 			}
 		}
+		profileID := DirectFilesProfileID
+		if access == FileAccessNone && !bash {
+			profileID = NoToolsProfileID
+		} else if bash {
+			profileID = ContainedProcessProfileID
+		}
 		requirement := Requirement{Schema: SchemaV1, Member: member.Name, Mode: selected,
 			FileAccess: access, RequiresSource: access != FileAccessNone || bash,
-			RequiresBash: bash, ProfileID: DefaultProfileID}
+			RequiresBash: bash, ProfileID: profileID}
 		if err := ValidateRequirement(requirement); err != nil {
 			return nil, err
 		}
