@@ -48,6 +48,7 @@ type SourceIdentity struct {
 	Schema            string `json:"schema"`
 	Kind              string `json:"kind"`
 	CanonicalRoot     string `json:"canonical_root,omitempty"`
+	CommonGitDir      string `json:"common_git_dir,omitempty"`
 	Commit            string `json:"commit,omitempty"`
 	Tree              string `json:"tree,omitempty"`
 	DirtyPolicy       string `json:"dirty_policy"`
