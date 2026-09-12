@@ -236,6 +236,13 @@ func (s AcceptanceServices) SubmitPrepared(ctx context.Context, req PreparedSubm
 	if len(req.Blueprint) == 0 || req.Artifact.BlueprintSHA == "" {
 		return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: errors.New("prepared blueprint is required")}
 	}
+	if req.Artifact.WorkspaceContract == nil {
+		var freezeErr error
+		req.Artifact, freezeErr = s.freezeWorkspace(req.Artifact)
+		if freezeErr != nil {
+			return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: freezeErr}
+		}
+	}
 	blueprintSum := sha256.Sum256(req.Blueprint)
 	if got := hex.EncodeToString(blueprintSum[:]); got != req.Artifact.BlueprintSHA {
 		return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id,
