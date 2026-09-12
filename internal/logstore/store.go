@@ -23,11 +23,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 
 	"github.com/michiTrader/arxi/internal/advisorylock"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
@@ -933,15 +933,7 @@ func (s *Store) releaseLock() error {
 // removing a file are directory operations, and fsyncing the file does not make
 // the entry that names it durable.
 func fsyncDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("logstore: open directory for fsync: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
+	if err := fsdurability.SyncDirectory(dir); err != nil {
 		return fmt.Errorf("logstore: fsync directory %s: %w", dir, err)
 	}
 	return nil
