@@ -117,8 +117,16 @@ for another agent, which is a deadlock the budget pays for by the second.
 
 ## 20.2 UC-2 — The tool that needs permission
 
-The first time the tool is not merely convenient. The agent needs `bash`, which
-nobody authorized.
+This scenario describes the exact-authorization lifecycle, but its native
+execution prerequisites are not currently advertised. A text-only run can start
+on Windows or Linux. Linux additionally advertises the `direct-files` profile,
+but no native source-backed mode; Windows does not advertise direct files at all.
+Neither platform advertises `contained-process`, so this `bash` run fails
+preflight before `run.started` rather than reaching the inbox. The request,
+grant, durable consume/start, and resumed-call semantics below are implemented
+and tested through explicit adapters; the transcript becomes a native CLI path
+only after the production capability decision can guarantee the complete
+workspace and process contract.
 
 ```
 $ arxi agent create backend --model claude-sonnet-4-6 --tools read,write,bash
@@ -299,7 +307,13 @@ would need to know to debug the run:
   the cheap one respectively.
 
 Printing the resolved values is what makes these defaults reviewable instead of
-folklore. A default you cannot see is indistinguishable from a bug when it fires.
+folklore. Resolution is not availability: on current native builds this team is
+refused before `run.started`, because neither Windows nor Linux advertises a
+source-backed `worktree` mode, and `backend` additionally requires the
+unadvertised `contained-process` profile. The transcript below remains the
+specified behavior after a production platform adapter can advertise and
+provision the complete contract; the current honest result is preflight refusal,
+not a weaker shared directory or unrestricted shell.
 
 ```
 $ arxi run start feature-team "implement rate limiting on /api/login" --budget 20.00 --workspace worktree
@@ -706,8 +720,11 @@ The lock is **cooperative** and `--ttl` is effectively required in practice: a
 lock with no expiry, held by an agent that crashed mid-turn, stalls the run until
 a human notices — which is the quiescence of §20.3 caused by the very mechanism
 meant to prevent conflicts. And note what the lock does *not* do: it does not give
-filesystem isolation. That is why `workspace: worktree` is a separate default
-(§20.4). The lock coordinates intent; the filesystem provides separation.
+filesystem isolation. The separately resolved `workspace: worktree` requirement
+is intended to provide source separation (§20.4), but current native platforms do
+not advertise that mode, so a file-using run fails preflight instead of claiming
+separation it cannot provide. The lock coordinates intent; only an advertised,
+verified filesystem profile may provide separation.
 
 ```
 > arxi_state_unlock {"key": "migrations/"}

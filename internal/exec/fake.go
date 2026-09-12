@@ -255,6 +255,30 @@ func (f *Fake) CompleteTurn(ctx context.Context, req turn.Request) (turn.Respons
 		FinishReason: turn.FinishStop, Usage: turn.Usage{InputTokens: 10, OutputTokens: 2}}, nil
 }
 
+func (f *Fake) ResolveTurnToolPolicy(_ kernel.SpawnTurn, call turn.ToolCall) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if policy, stopped := f.AskTools[call.Name]; stopped {
+		return policy
+	}
+	return "allow"
+}
+
+func (f *Fake) ExecuteAuthorizedTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (TurnToolOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return TurnToolOutcome{}, err
+	}
+	if err := turn.ValidateToolCall(call); err != nil {
+		return TurnToolOutcome{}, NotDispatched(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(Call{Kind: "turn_tool", Agent: e.Agent, Tool: call.Name, Detail: string(call.Arguments)})
+	result := f.ToolResults[call.Name]
+	return TurnToolOutcome{Policy: "allow", Continue: true, Result: turn.ToolResult{CallID: call.ID,
+		Content: []turn.ContentBlock{{Type: turn.BlockText, Text: result}}}}, nil
+}
+
 func (f *Fake) ExecuteTurnTool(ctx context.Context, e kernel.SpawnTurn, call turn.ToolCall) (TurnToolOutcome, error) {
 	if err := ctx.Err(); err != nil {
 		return TurnToolOutcome{}, err

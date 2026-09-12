@@ -24,26 +24,12 @@
 //
 // # What this package does NOT protect against
 //
-// Path confinement applies to tool ARGUMENTS. `bash` takes a script, and a
-// script is a program: `echo x > ../../etc/thing` contains no argument for
-// Resolve to inspect, so nothing here refuses it. What `bash` gets is the
-// workspace as its working directory, which makes every careless RELATIVE path
-// land in the right place — and careless-relative is the common case, not
-// deliberate-absolute.
-//
-// The reach is worth stating precisely rather than softening: one level up from
-// a member's workspace is the RUN directory, which holds the append-only log and
-// the frozen blueprint. A command that writes there can damage the very
-// artefacts that make the run explainable. Real confinement for `bash` needs the
-// operating system — a container, a user namespace, seccomp — and this package
-// cannot provide it from inside the same process.
-//
-// This is documented instead of being quietly left out because the alternative
-// is somebody reading "workspace isolation" and concluding that untrusted
-// scripts are safe to run. The tool POLICY is what stands between a model and
-// `bash` today: `bash` resolves to ask for a granted mutating tool, so a human
-// sees the command before it runs. That is a real control, and it is a different
-// one from confinement.
+// A source layout is not process confinement. Command execution is available
+// only through an explicit, frozen command profile. That profile states its
+// filesystem, network, environment and descendant guarantees independently;
+// unsupported strong profiles are refused before this package starts a child.
+// An explicitly named operator profile may say unrestricted, but that is not an
+// isolation mode and cannot satisfy the default bash requirement.
 package toolrun
 
 import (
@@ -51,6 +37,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 // Workspace is the directory a member's tools may touch, and nothing above it.
@@ -64,6 +52,20 @@ type Workspace struct {
 	// A message that says "path escapes the workspace" without saying whose
 	// sends the reader to the wrong blueprint.
 	Member string
+
+	rootHandle *os.File
+	command    *workspace.CommandProfile
+}
+
+// Close releases the root capability. Idempotence lets terminal cleanup and
+// process shutdown converge without leaking a directory handle.
+func (w *Workspace) Close() error {
+	if w == nil || w.rootHandle == nil {
+		return nil
+	}
+	err := w.rootHandle.Close()
+	w.rootHandle = nil
+	return err
 }
 
 // OpenWorkspace prepares dir as the root for member's tools.
@@ -103,7 +105,11 @@ func OpenWorkspace(dir, member string) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("toolrun: resolve workspace %s: %w", abs, err)
 	}
-	return &Workspace{Root: real, Member: member}, nil
+	rootHandle, err := openWorkspaceRoot(real)
+	if err != nil {
+		return nil, fmt.Errorf("toolrun: open workspace root %s: %w", real, err)
+	}
+	return &Workspace{Root: real, Member: member, rootHandle: rootHandle}, nil
 }
 
 // Resolve turns a tool-supplied path into an absolute one inside the workspace,
@@ -174,6 +180,9 @@ func (w *Workspace) Resolve(p string) (string, error) {
 	}
 
 	resolved := filepath.Join(realDir, filepath.Base(full))
+	if err := w.validateToolPath(resolved); err != nil {
+		return "", err
+	}
 	if !w.contains(resolved) {
 		return "", fmt.Errorf("toolrun: %s tried to reach %q, which is outside its "+
 			"workspace %s\n"+
@@ -184,6 +193,23 @@ func (w *Workspace) Resolve(p string) (string, error) {
 	}
 	return resolved, nil
 }
+
+func (w *Workspace) validateToolPath(path string) error {
+	relative, err := filepath.Rel(w.Root, path)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	first := relative
+	if index := strings.IndexRune(first, filepath.Separator); index >= 0 {
+		first = first[:index]
+	}
+	if strings.EqualFold(first, ".arxi-workspace.json") || strings.EqualFold(first, metadataDirName) {
+		return fmt.Errorf("toolrun: %s: reserved workspace metadata path %q is not agent-writable", w.Member, relative)
+	}
+	return nil
+}
+
+const metadataDirName = ".arxi-workspace-metadata"
 
 // contains reports whether p is the root or beneath it.
 //

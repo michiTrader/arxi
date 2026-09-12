@@ -23,11 +23,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 
 	"github.com/michiTrader/arxi/internal/advisorylock"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/kernel"
 )
 
@@ -80,6 +80,8 @@ type Store struct {
 
 	closed bool
 }
+
+var removeFile = os.Remove
 
 // Open acquires the run directory for writing and validates the existing log.
 //
@@ -799,7 +801,7 @@ func (s *Store) rollbackPending() error {
 	if err := truncateAndSync(s.eventsPath(), marker.PreAppendSize); err != nil {
 		return err
 	}
-	if err := os.Remove(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePendingFile(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("logstore: remove pending marker: %w", err)
 	}
 	return fsyncDir(s.dir)
@@ -872,7 +874,7 @@ func (s *Store) writePending(offset int64) error {
 }
 
 func (s *Store) clearPending() error {
-	if err := os.Remove(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePendingFile(s.pendingPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("logstore: clear pending marker: %w", err)
 	}
 	// The removal is the commit point, so it has to be durable before Append
@@ -933,15 +935,7 @@ func (s *Store) releaseLock() error {
 // removing a file are directory operations, and fsyncing the file does not make
 // the entry that names it durable.
 func fsyncDir(dir string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("logstore: open directory for fsync: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
+	if err := fsdurability.SyncDirectory(dir); err != nil {
 		return fmt.Errorf("logstore: fsync directory %s: %w", dir, err)
 	}
 	return nil

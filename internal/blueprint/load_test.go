@@ -74,6 +74,13 @@ func TestWorkspaceStaysNoneWhenNobodyCanWrite(t *testing.T) {
 	}
 }
 
+func TestCopyWorkspaceParsesAtTopLevelAndStage(t *testing.T) {
+	bp := mustLoad(t, "name: copies\nworkspace: copy\nmembers:\n  - {name: writer, tools: [write]}\nstages:\n  - {name: build, workspace: copy}\n")
+	if bp.Config.Workspace != "copy" || bp.Config.Stages[0].Workspace != "copy" {
+		t.Fatalf("copy parsed as top-level %q and stage %q: the CLI and frozen surface already promise copy, so the blueprint loader must not reject the same contract", bp.Config.Workspace, bp.Config.Stages[0].Workspace)
+	}
+}
+
 // TestUnsatisfiableQuorumIsRejected protects against the exact failure ADR-0004
 // exists for. A quorum above the member count does not make the run fail; it
 // makes it go silent after everyone has submitted, which the design doc calls

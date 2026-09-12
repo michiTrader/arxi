@@ -5,10 +5,65 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/michiTrader/arxi/internal/authorization"
 	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/turn"
 )
+
+func TestProductionActionDigestUsesCanonicalAuthorizationIdentity(t *testing.T) {
+	input := authorization.ActionInput{
+		JobID:                 "job-production",
+		RunID:                 "run-production",
+		RequesterPrincipal:    "agent:backend",
+		SuspendedParentWorkID: "work-production",
+		ProviderCallID:        "provider-call-production",
+		ToolName:              "write_file",
+		ArgumentDigest:        strings.Repeat("a", 64),
+		ToolSchemaVersion:     "arxi.tools/v1",
+		PolicyVersion:         "arxi.policy/v1",
+		WorkspaceProfileID:    "workspace-profile-production",
+	}
+	action, err := authorization.NewAction(input)
+	if err != nil {
+		t.Fatalf("canonical package rejected valid production bindings: runtime identity cannot be compared to its authority: %v", err)
+	}
+	got := exactActionDigest(input.JobID, input.RunID, input.RequesterPrincipal, input.SuspendedParentWorkID,
+		input.ProviderCallID, input.ToolName, input.ArgumentDigest, input.ToolSchemaVersion, input.PolicyVersion, input.WorkspaceProfileID)
+	if got != action.Digest() {
+		t.Fatalf("production digest %q differs from canonical digest %q: package tests no longer protect the runtime authorization path; derive production identity through authorization.NewAction", got, action.Digest())
+	}
+}
+
+func TestProductionActionDigestRejectsMalformedBindings(t *testing.T) {
+	if got := exactActionDigest("job-production", "run-production", "agent:backend", "work-production",
+		"provider-call-production", "write_file", strings.Repeat("A", 64), "arxi.tools/v1", "arxi.policy/v1", "workspace-profile-production"); got != "" {
+		t.Fatalf("malformed production bindings produced digest %q: runtime could request approval for identity the canonical package rejects; fail closed before persisting authorization", got)
+	}
+}
+
+func TestMalformedProductionAuthorizationIsNotPersisted(t *testing.T) {
+	log := newMemLog()
+	call, err := turn.NewToolCall("provider-call-production", "write_file", []byte(`{"path":"README.md"}`))
+	if err != nil {
+		t.Fatalf("valid tool call fixture was rejected: the malformed production test cannot reach authorization: %v", err)
+	}
+	runner := exactTestRunner(log, &nativeLoopExecutor{})
+	runner.Authorization.PolicyVersion = ""
+	progress := newDurableTurnProgress()
+	err = runner.suspendAuthorization(Work{ID: "work-production", SourceSeq: 36}, kernel.SpawnTurn{Agent: "backend"},
+		0, 0, turn.Request{}, nil, map[string]turn.ToolCall{}, []turn.ToolCall{call}, call, &progress)
+	if !errors.Is(err, ErrNotDispatched) {
+		t.Fatalf("malformed production authorization returned %v: incomplete exact bindings must fail closed as not dispatched", err)
+	}
+	for _, event := range log.events {
+		if event.Type == kernel.AuthorizationRequested {
+			t.Fatalf("malformed production bindings persisted authorization request %#v: no digest or approval may exist for an action rejected by the canonical constructor", event.Payload)
+		}
+	}
+}
 
 type dispatchCoordinatorFake struct {
 	registered []DispatchMetadata

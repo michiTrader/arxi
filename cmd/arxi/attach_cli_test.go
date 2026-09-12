@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -123,13 +122,7 @@ func startAttach(t *testing.T, dir string, args ...string) *attachSession {
 
 	s := &attachSession{t: t, cmd: cmd, ctx: ctx, out: &syncBuf{}, errb: &syncBuf{}, done: make(chan error, 1)}
 	cmd.Stdout, cmd.Stderr = s.out, s.errb
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	configureBoundedTestProcess(cmd)
 
 	// Wait blocks until the output copiers finish as well as the process, so a
 	// descendant holding the pipe open would hang the test after the kill. Nothing

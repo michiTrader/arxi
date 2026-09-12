@@ -16,6 +16,7 @@ import (
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/surface"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 // cmdRunUnpause implements `arxi run unpause <run> [--budget N]`.
@@ -322,7 +323,10 @@ func driveEffectiveRun(dir string, effective runconfig.Artifact, store *logstore
 			fatal(fmt.Errorf("restore live timers: %w", err))
 		}
 		clock, timekeep = rc, exec.RealTime{C: rc}
-		executor = runtimeExecutor(dir, effective)
+		executor, err = runtimeExecutor(dir, effective, &workspacefs.Manager{Root: filepath.Join(dir, "workspaces")})
+		if err != nil {
+			fatal(fmt.Errorf("restore workspace executor: %w", err))
+		}
 		now = func() string { return nowFunc().UTC().Format(time.RFC3339Nano) }
 	}
 
@@ -332,7 +336,14 @@ func driveEffectiveRun(dir string, effective runconfig.Artifact, store *logstore
 		Executor: executor,
 		Config:   cfg,
 		RunID:    runID,
-		Now:      now,
+		JobID:    runID,
+		Authorization: exec.AuthorizationConfig{
+			ToolSchemaVersion:  effective.ToolSchemaVersion,
+			PolicyVersion:      effective.PolicyVersion,
+			WorkspaceProfileID: effective.WorkspaceProfileID,
+			TTLMS:              effective.AuthorizationTTLMS,
+		},
+		Now: now,
 	}
 
 	loop := &exec.Loop{

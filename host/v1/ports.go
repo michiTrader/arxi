@@ -61,9 +61,33 @@ type WorkspaceRequest struct {
 }
 
 // WorkspaceProvisioner owns allocation and explicit release of opaque handles.
+// Legacy implementations remain valid for text-only jobs; workspace-backed tools
+// require the additive recoverable session contract.
 type WorkspaceProvisioner interface {
 	Provision(context.Context, WorkspaceRequest) (Workspace, error)
 	Release(context.Context, Workspace) error
+}
+
+// WorkspaceSessionV1 binds the exact opaque handle to a stable host identity.
+type WorkspaceSessionV1 struct {
+	ID        string    `json:"id"`
+	Workspace Workspace `json:"workspace"`
+}
+
+// WorkspaceRecoveryRequestV1 asks the provisioner to recover and verify the
+// durable identity and exact handle originally accepted for one member.
+type WorkspaceRecoveryRequestV1 struct {
+	WorkspaceRequest
+	SessionID string    `json:"session_id"`
+	Workspace Workspace `json:"workspace"`
+}
+
+// RecoverableWorkspaceProvisionerV1 prevents a process-local handle cache from
+// becoming workspace truth across restart.
+type RecoverableWorkspaceProvisionerV1 interface {
+	WorkspaceProvisioner
+	ProvisionSession(context.Context, WorkspaceRequest) (WorkspaceSessionV1, error)
+	RecoverSession(context.Context, WorkspaceRecoveryRequestV1) (WorkspaceSessionV1, error)
 }
 
 // Revision is an opaque optimistic-concurrency token.

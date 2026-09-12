@@ -412,7 +412,7 @@ func TestAStoreThatRefusesTheNameSendsTheDesignerBackToTheScreenThatCanFixIt(t *
 func TestAResizeRedrawsWithoutAKeystroke(t *testing.T) {
 	keys := make(chan designer.Key, 1)
 	resize := make(chan os.Signal, 1)
-	resize <- syscall.SIGWINCH
+	resize <- os.Interrupt
 
 	asked := 0
 	size := func() (int, int) {

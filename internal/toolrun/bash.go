@@ -3,9 +3,7 @@ package toolrun
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -74,117 +72,37 @@ func (w *Workspace) Bash(ctx context.Context, script string, timeout time.Durati
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	if w.command == nil {
+		return BashResult{}, fmt.Errorf("toolrun: %s has no preflighted command profile; bash is refused", w.Member)
+	}
+	profile := *w.command
+	if profile.Schema != "arxi.command-spec/v1" || profile.RunnerVersion == "" || profile.Executable == "" || profile.OutputLimitBytes <= 0 {
+		return BashResult{}, fmt.Errorf("toolrun: %s has an invalid command profile; bash is refused", w.Member)
+	}
+	env, err := commandEnvironment(profile, w.Root)
+	if err != nil {
+		return BashResult{}, err
+	}
+	runner, err := platformCommandRunner(profile.Descendants)
+	if err != nil {
+		return BashResult{}, err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// exec.Command, not exec.CommandContext, and the cancellation is done below
-	// by hand. CommandContext looks like exactly the right tool and is not, for a
-	// reason worth recording because it cost a failing test to find:
-	//
-	// its watchdog does `select { case resultc <- ctxResult{}: return; case
-	// <-ctx.Done(): }`, so if the child is reaped before the deadline it returns
-	// WITHOUT ever calling Cancel. `bash -c "work & echo started"` exits in
-	// milliseconds, so the shell is always reaped first, and the cancel hook that
-	// was supposed to kill the process group is never invoked. The grandchild then
-	// runs to completion while Wait sits on a pipe the orphan still holds open.
-	//
-	// Two mechanisms racing to own the deadline is also just one too many. One
-	// goroutine, watching one context, killing one group.
-	//
-	// -c, not a temporary script file: a file would have to be written somewhere,
-	// and the only place this package may write is the workspace the command can
-	// itself modify — so the script could be rewritten between creation and
-	// execution by the very command it launches.
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Dir = w.Root
-
-	// A bounded buffer shared by both streams, so interleaving is preserved and
-	// the cap applies to the total rather than to each half.
-	buf := &cappedBuffer{limit: maxOutputBytes}
-	cmd.Stdout = buf
-	cmd.Stderr = buf
-
-	// Nil Stdin gives the child /dev/null. Inheriting the parent's stdin would
-	// let a command that prompts for input hang forever holding the run open,
-	// waiting for a human who is not watching a terminal.
-	cmd.Stdin = nil
-
-	// The environment is inherited, and that is a real decision rather than an
-	// omission: a build needs PATH, HOME and the toolchain's own variables, and a
-	// runner that stripped them would fail on every real project and be worked
-	// around immediately. It does mean a command can read the process
-	// environment, including provider API keys, so the confinement here is of the
-	// filesystem and not of secrets. Saying so is the point; a boundary that is
-	// believed to be wider than it is gets trusted with the wrong things.
-
-	setProcessGroup(cmd)
-
+	buf := &cappedBuffer{limit: profile.OutputLimitBytes}
+	spec := CommandSpec{Executable: profile.Executable, Argv: []string{"-c", script}, Script: script, Root: w.Root, Env: env}
 	start := time.Now()
-	if err := cmd.Start(); err != nil {
-		return BashResult{}, fmt.Errorf("toolrun: %s could not start bash: %w\n"+
-			"  this is the runner failing, not the command: the script never ran", w.Member, err)
-	}
-
-	// One goroutine owns the deadline. It kills the GROUP, not the process:
-	// killing the process reaches the shell and nothing the shell started, so a
-	// backgrounded grandchild keeps writing into the workspace of a run that has
-	// already been recorded as finished.
-	//
-	// It also has to happen here rather than after Wait returns, which is the
-	// version that looks correct. Stdout is a buffer, so exec copies through an
-	// os.Pipe, and Wait does not return until the write end is closed by EVERY
-	// process holding it — including the orphan. A kill placed after Wait would
-	// therefore fire only once the orphan had finished doing whatever the timeout
-	// existed to stop.
-	// The pgid is captured HERE, not looked up at the deadline, and that is the
-	// difference between this working and silently doing nothing. Setpgid made the
-	// child its own group leader, so pgid == pid. For `work & echo done` the shell
-	// is reaped within milliseconds while Wait still blocks on the pipe the orphan
-	// holds; a Getpgid at the deadline would then ask about a leader that no longer
-	// exists and get ESRCH, while the group — orphan included — is very much alive.
-	pgid := cmd.Process.Pid
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			killGroup(pgid)
-		case <-done:
-		}
-	}()
-
-	err := cmd.Wait()
-	close(done)
+	exitCode, runErr := runner.Run(ctx, spec, buf)
 	elapsed := time.Since(start)
-
-	res := BashResult{
-		Output:    buf.String(),
-		Duration:  elapsed,
-		Truncated: buf.truncated,
-	}
-
-	// ctx.Err is consulted rather than the shape of err, because a killed child
-	// reports a signal and a signal is indistinguishable from one the script sent
-	// itself. The deadline is the only authority on whether time ran out.
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		res.TimedOut = true
+	res := BashResult{Output: buf.String(), ExitCode: exitCode, Duration: elapsed, Truncated: buf.truncated}
+	if ctx.Err() != nil {
 		res.ExitCode = -1
+		res.TimedOut = ctx.Err() == context.DeadlineExceeded
 		return res, nil
 	}
-
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			res.ExitCode = ee.ExitCode()
-			return res, nil
-		}
-		// Not an exit status: bash is missing, or the workspace vanished. This one
-		// IS a runner failure, and must not be reported as a command that failed —
-		// the remedy is completely different and the log should not conflate them.
-		return res, fmt.Errorf("toolrun: %s could not run bash: %w\n"+
-			"  this is the runner failing, not the command: the script never "+
-			"produced an exit status", w.Member, err)
+	if runErr != nil {
+		return res, fmt.Errorf("toolrun: %s could not run command: %w; the script did not produce an exit status", w.Member, runErr)
 	}
 	return res, nil
 }

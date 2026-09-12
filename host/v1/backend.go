@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,15 +19,19 @@ import (
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 type storageBackend struct {
-	storage      JobStorage
-	coordination Coordination
-	heartbeat    time.Duration
-	provider     TextProvider
-	now          func() time.Time
-	capabilities *capabilityResolver
+	storage       JobStorage
+	coordination  Coordination
+	heartbeat     time.Duration
+	provider      TextProvider
+	tools         ToolExecutor
+	workspaces    WorkspaceProvisioner
+	workspaceCaps *WorkspaceCapabilitiesV1
+	now           func() time.Time
+	capabilities  *capabilityResolver
 
 	mu       sync.Mutex
 	workers  map[JobID]*storageWorker
@@ -36,8 +42,9 @@ type storageBackend struct {
 }
 
 type storedJobMetadata struct {
-	Effective runconfig.Artifact `json:"effective"`
-	Simulated bool               `json:"simulated"`
+	Effective         runconfig.Artifact            `json:"effective"`
+	Simulated         bool                          `json:"simulated"`
+	WorkspaceSessions map[string]WorkspaceSessionV1 `json:"workspace_sessions,omitempty"`
 }
 
 func newBackend(options Options) backend {
@@ -68,7 +75,9 @@ func newBackend(options Options) backend {
 	}
 	backend := &storageBackend{
 		storage: options.Storage, coordination: options.Coordination, heartbeat: heartbeat,
-		provider: options.Provider, now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
+		provider: options.Provider, tools: options.Tools, workspaces: options.Workspaces,
+		workspaceCaps: cloneWorkspaceCapabilities(options.WorkspaceCapabilities),
+		now:           options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
 	}
 	if options.Provider != nil && options.Coordination != nil {
 		if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
@@ -134,7 +143,51 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	effective := runconfig.New(string(id), mode, bp.SHA, req.Prompt, "host-text", bp.Config, []runconfig.Route{{
 		Ref: "host-text", Provider: "host", Model: "host-text",
 	}}, nil)
-	metadata, err := json.Marshal(storedJobMetadata{Effective: effective, Simulated: req.Simulated})
+	requirements, err := hostWorkspaceRequirements(bp.Config)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "resolve workspace requirements: "+err.Error())
+	}
+	if hostRequiresTools(requirements) && (b.tools == nil || b.workspaces == nil || b.workspaceCaps == nil) {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require Options.Tools, Options.Workspaces, and explicit Options.WorkspaceCapabilities before acceptance")
+	}
+	preparedSessions := map[string]WorkspaceSessionV1{}
+	if hostRequiresTools(requirements) {
+		provisioner, recoverable := b.workspaces.(RecoverableWorkspaceProvisionerV1)
+		if !recoverable {
+			return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require RecoverableWorkspaceProvisionerV1 so durable session identity does not depend on process-local handles")
+		}
+		for _, requirement := range requirements {
+			if requirement.FileAccess == workspace.FileAccessNone && !requirement.RequiresBash {
+				continue
+			}
+			session, provisionErr := provisioner.ProvisionSession(ctx, WorkspaceRequest{JobID: id, Actor: requirement.Member})
+			if provisionErr != nil {
+				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provision before acceptance: "+provisionErr.Error())
+			}
+			if session.ID == "" || session.Workspace == "" {
+				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provisioner returned an empty session identity or handle before acceptance")
+			}
+			preparedSessions[requirement.Member] = session
+		}
+	}
+	capabilities, err := hostWorkspaceCapabilities(b.workspaceCaps)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace capability declaration: "+err.Error())
+	}
+	decisions, err := workspace.Preflight(requirements, capabilities)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace preflight: "+err.Error())
+	}
+	effective.WorkspaceContract = &runconfig.WorkspaceContract{Schema: workspace.SchemaV1,
+		Source: workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none", DirtyPolicy: "excluded",
+			UntrackedPolicy: "excluded", IgnoredPolicy: "excluded", SubmodulePolicy: "refused",
+			SymlinkPolicy: "internal-relative-only", SpecialFilePolicy: "refused"},
+		Requirements: requirements, Decisions: decisions}
+	if len(decisions) > 0 {
+		effective.WorkspaceProfileID = stableWorkspaceProfileIdentity(decisions, preparedSessions)
+	}
+	metadata, err := json.Marshal(storedJobMetadata{Effective: effective, Simulated: req.Simulated,
+		WorkspaceSessions: preparedSessions})
 	if err != nil {
 		return SubmitResult{}, adaptStorageError(CapabilitySubmit, id, 0, err)
 	}
@@ -184,7 +237,7 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 		executionClaim = claim
 		created.Writer = writer
 	}
-	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.now, start)
+	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.tools, b.workspaces, preparedSessions, b.now, start)
 	if b.coordination != nil {
 		worker.coordination = &workerCoordination{port: b.coordination, claim: executionClaim}
 		worker.heartbeat = b.heartbeat
@@ -195,6 +248,113 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	}
 	worker.start()
 	return out, nil
+}
+
+func hostWorkspaceRequirements(config kernel.Config) ([]workspace.Requirement, error) {
+	members := make([]workspace.Member, len(config.Members))
+	for i, member := range config.Members {
+		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
+	}
+	stages := make([]workspace.Stage, len(config.Stages))
+	for i, stage := range config.Stages {
+		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
+	}
+	return workspace.Resolve(workspace.ResolutionInput{TopLevel: workspace.Mode(config.Workspace), Members: members, Stages: stages})
+}
+
+func hostRequiresTools(requirements []workspace.Requirement) bool {
+	for _, requirement := range requirements {
+		if requirement.FileAccess != workspace.FileAccessNone || requirement.RequiresBash {
+			return true
+		}
+	}
+	return false
+}
+
+func hostWorkspaceCapabilities(declared *WorkspaceCapabilitiesV1) (workspace.Capabilities, error) {
+	if declared == nil {
+		return workspace.CurrentCapabilities(runtime.GOOS), nil
+	}
+	if declared.Schema != WorkspaceCapabilitiesSchemaV1 {
+		return workspace.Capabilities{}, fmt.Errorf("schema %q is unsupported", declared.Schema)
+	}
+	capabilities := workspace.Capabilities{Schema: workspace.SchemaV1,
+		CapabilityVersion: declared.CapabilityVersion, Platform: declared.Platform,
+		SourceKinds: append([]string(nil), declared.SourceKinds...), Provisioners: map[workspace.Mode]string{}}
+	for _, mode := range declared.Modes {
+		capabilities.Modes = append(capabilities.Modes, workspace.Mode(mode))
+	}
+	for mode, version := range declared.Provisioners {
+		capabilities.Provisioners[workspace.Mode(mode)] = version
+	}
+	for _, profile := range declared.Profiles {
+		if profile.Schema != WorkspaceProfileSchemaV1 {
+			return workspace.Capabilities{}, fmt.Errorf("profile %q schema %q is unsupported", profile.ID, profile.Schema)
+		}
+		converted := workspace.Profile{Schema: workspace.ProfileSchemaV1, ID: profile.ID,
+			FileAccess: workspace.FileAccess(profile.FileAccess), HandleRelative: profile.HandleRelative,
+			FinalLinkRaceFree: profile.FinalLinkRaceFree, Process: workspace.ProcessProfile(profile.Process)}
+		if profile.Command != nil {
+			if profile.Command.Schema != WorkspaceCommandSchemaV1 {
+				return workspace.Capabilities{}, fmt.Errorf("profile %q command schema %q is unsupported", profile.ID, profile.Command.Schema)
+			}
+			converted.Command = &workspace.CommandProfile{Schema: workspace.CommandSchemaV1,
+				RunnerVersion: profile.Command.RunnerVersion, Executable: profile.Command.Executable,
+				EnvironmentVersion: profile.Command.EnvironmentVersion, Descendants: profile.Command.Descendants,
+				Filesystem: profile.Command.Filesystem, Network: profile.Command.Network,
+				OutputLimitBytes: profile.Command.OutputLimitBytes}
+		}
+		capabilities.Profiles = append(capabilities.Profiles, converted)
+	}
+	return capabilities, nil
+}
+
+func cloneWorkspaceCapabilities(in *WorkspaceCapabilitiesV1) *WorkspaceCapabilitiesV1 {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Modes, out.SourceKinds = append([]string(nil), in.Modes...), append([]string(nil), in.SourceKinds...)
+	out.Profiles = append([]WorkspaceProfileV1(nil), in.Profiles...)
+	for i := range out.Profiles {
+		if in.Profiles[i].Command != nil {
+			command := *in.Profiles[i].Command
+			out.Profiles[i].Command = &command
+		}
+	}
+	out.Provisioners = make(map[string]string, len(in.Provisioners))
+	for mode, version := range in.Provisioners {
+		out.Provisioners[mode] = version
+	}
+	return &out
+}
+
+func stableWorkspaceProfileIdentity(decisions []workspace.PlatformDecision, sessions map[string]WorkspaceSessionV1) string {
+	members := make([]string, 0, len(sessions))
+	for member := range sessions {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+	bound := struct {
+		Schema    string                       `json:"schema"`
+		Decisions []workspace.PlatformDecision `json:"decisions"`
+		Sessions  []struct {
+			Member string `json:"member"`
+			ID     string `json:"id"`
+		} `json:"sessions"`
+	}{Schema: "arxi.host.workspace-authorization/v1", Decisions: decisions}
+	for _, member := range members {
+		bound.Sessions = append(bound.Sessions, struct {
+			Member string `json:"member"`
+			ID     string `json:"id"`
+		}{Member: member, ID: sessions[member].ID})
+	}
+	body, err := json.Marshal(bound)
+	if err != nil {
+		panic("host workspace bindings contain only JSON values: " + err.Error())
+	}
+	sum := sha256.Sum256(body)
+	return "arxi.host.workspace-authorization/v1:" + hex.EncodeToString(sum[:])
 }
 
 func (b *storageBackend) Inspect(ctx context.Context, req InspectRequest) (Job, error) {
@@ -249,18 +409,18 @@ func (b *storageBackend) Cancel(ctx context.Context, req CancelRequest) (Job, er
 			return Job{}, adaptCoordinationError(CapabilityCancel, req.JobID, err)
 		}
 	}
-	return b.mutate(ctx, CapabilityCancel, req.JobID, "", func(events []kernel.Event) (kernel.Event, error) {
+	return b.mutate(ctx, CapabilityCancel, req.JobID, "", func(events []kernel.Event) ([]kernel.Event, error) {
 		state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
 		if state.Status.Terminal() {
-			return kernel.Event{}, errAlreadyTerminal
+			return nil, errAlreadyTerminal
 		}
 		payload := map[string]any{}
 		if reason := strings.TrimSpace(req.Reason); reason != "" {
 			payload["reason"] = reason
 		}
-		return kernel.Event{ID: "cancel-" + strconv.FormatInt(state.Seq+1, 10), Type: kernel.RunCancelled,
+		return []kernel.Event{{ID: "cancel-" + strconv.FormatInt(state.Seq+1, 10), Type: kernel.RunCancelled,
 			Ts: b.clock().UTC().Format(time.RFC3339Nano), Source: kernel.SourceHuman,
-			Scope: "run:" + string(req.JobID), Payload: payload}, nil
+			Scope: "run:" + string(req.JobID), Payload: payload}}, nil
 	})
 }
 
@@ -268,7 +428,7 @@ func (b *storageBackend) Approve(ctx context.Context, req ApproveRequest) (Job, 
 	if err := b.authorize(ctx, req.Principal, CapabilityApprove, req.JobID); err != nil {
 		return Job{}, err
 	}
-	return b.decide(ctx, CapabilityApprove, req.JobID, req.ItemID, "approve", "")
+	return b.decide(ctx, CapabilityApprove, req.Principal, req.JobID, req.ItemID, "approve", "")
 }
 
 func (b *storageBackend) Reject(ctx context.Context, req RejectRequest) (Job, error) {
@@ -278,7 +438,7 @@ func (b *storageBackend) Reject(ctx context.Context, req RejectRequest) (Job, er
 	if strings.TrimSpace(req.Reason) == "" {
 		return Job{}, mutationError(CodeInvalidArgument, CapabilityReject, req.JobID, req.ItemID, errors.New("rejection reason is required"))
 	}
-	return b.decide(ctx, CapabilityReject, req.JobID, req.ItemID, "reject", req.Reason)
+	return b.decide(ctx, CapabilityReject, req.Principal, req.JobID, req.ItemID, "reject", req.Reason)
 }
 
 func (b *storageBackend) Answer(ctx context.Context, req AnswerRequest) (Job, error) {
@@ -288,41 +448,103 @@ func (b *storageBackend) Answer(ctx context.Context, req AnswerRequest) (Job, er
 	if strings.TrimSpace(req.Text) == "" {
 		return Job{}, mutationError(CodeInvalidArgument, CapabilityAnswer, req.JobID, req.ItemID, errors.New("answer text is required"))
 	}
-	return b.decide(ctx, CapabilityAnswer, req.JobID, req.ItemID, "answer", req.Text)
+	return b.decide(ctx, CapabilityAnswer, req.Principal, req.JobID, req.ItemID, "answer", req.Text)
 }
 
-func (b *storageBackend) decide(ctx context.Context, op Capability, id JobID, itemID ItemID, decision, text string) (Job, error) {
-	return b.mutate(ctx, op, id, itemID, func(events []kernel.Event) (kernel.Event, error) {
-		state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{})
-		for _, item := range state.Inbox {
-			if item.ID != string(itemID) {
-				continue
-			}
-			if item.Replied {
-				return kernel.Event{}, errAlreadyDecided
-			}
-			approval := item.Kind == "tool_approval"
-			if approval != (decision == "approve" || decision == "reject") {
-				return kernel.Event{}, errWrongDecisionKind
-			}
-			if state.Status.Terminal() {
-				return kernel.Event{}, errAlreadyTerminal
-			}
-			return kernel.Event{ID: "inbox-reply-" + string(itemID), Type: kernel.InboxReplied,
-				Ts: b.clock().UTC().Format(time.RFC3339Nano), Source: kernel.SourceHuman,
-				Payload: map[string]any{"inbox_id": string(itemID), "decision": decision, "text": text}}, nil
-		}
-		return kernel.Event{}, errItemNotFound
+func (b *storageBackend) decide(ctx context.Context, op Capability, principal Principal, id JobID, itemID ItemID, decision, text string) (Job, error) {
+	if b.storage == nil {
+		return Job{}, unavailable(op)
+	}
+	record, err := b.storage.Load(ctx, id)
+	if err != nil {
+		return Job{}, adaptStorageError(op, id, 0, err)
+	}
+	metadata, err := decodeStoredMetadata(record)
+	if err != nil {
+		return Job{}, adaptStorageError(op, id, 0, err)
+	}
+	return b.mutate(ctx, op, id, itemID, func(events []kernel.Event) ([]kernel.Event, error) {
+		return b.decisionEvents(events, metadata.Effective.Config, principal.ID, id, itemID, decision, text)
 	})
 }
 
+func (b *storageBackend) decisionEvents(events []kernel.Event, config kernel.Config, principal string, id JobID, itemID ItemID, decision, text string) ([]kernel.Event, error) {
+	state, _ := kernel.Fold(kernel.State{}, events, config)
+	item := state.InboxItem(string(itemID))
+	if item == nil {
+		return nil, errItemNotFound
+	}
+	if item.Replied {
+		if a := state.Authorization(item.AuthorizationID); a != nil && a.Decision == "expired" {
+			return nil, errAuthorizationExpired
+		}
+		return nil, errAlreadyDecided
+	}
+	approval := item.Kind == "tool_approval"
+	if approval != (decision == "approve" || decision == "reject") {
+		return nil, errWrongDecisionKind
+	}
+	if state.Status.Terminal() {
+		return nil, errAlreadyTerminal
+	}
+	at := b.clock().UTC().Format(time.RFC3339Nano)
+	reply := kernel.Event{ID: "inbox-reply-" + string(itemID), Type: kernel.InboxReplied,
+		Ts: at, Source: kernel.SourceHuman, Payload: map[string]any{
+			"inbox_id": string(itemID), "decision": decision, "text": text,
+		}}
+	principal = strings.TrimSpace(principal)
+	if principal != "" {
+		reply.Payload["principal"] = principal
+	}
+	if !approval {
+		return []kernel.Event{reply}, nil
+	}
+	a := state.Authorization(item.AuthorizationID)
+	if a == nil || item.AuthorizationID == "" || item.ActionDigest == "" ||
+		a.InboxID != item.ID || a.ActionDigest != item.ActionDigest || a.Schema != "arxi.authorization/v1" {
+		return nil, errAuthorizationBinding
+	}
+	if principal == "" || principal == a.RequesterPrincipal {
+		return nil, errInvalidPrincipal
+	}
+	expires, err := time.Parse(time.RFC3339, a.ExpiresAt)
+	if err != nil {
+		return nil, errAuthorizationExpired
+	}
+	if observedAt := b.clock(); !observedAt.Before(expires) {
+		// The failed mutation must leave its clock judgment in the same log the
+		// decision would have changed. Otherwise restart could forget the refusal
+		// and expose the exact action as pending again.
+		return []kernel.Event{authorizationExpiredEvent(*a, observedAt)}, errAuthorizationExpired
+	}
+	reply.Payload["authorization_id"], reply.Payload["action_digest"] = a.ID, a.ActionDigest
+	payload := map[string]any{"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest}
+	typeName, eventID := kernel.AuthorizationDenied, "authorization-denied-"+a.ID
+	if decision == "approve" {
+		typeName, eventID = kernel.AuthorizationGranted, "authorization-granted-"+a.ID
+		payload["approver_principal"], payload["grant_event_id"], payload["expires_at"] = principal, eventID, a.ExpiresAt
+	} else {
+		payload["principal"], payload["reason"] = principal, text
+	}
+	authorization := kernel.Event{ID: eventID, Type: typeName, Ts: at, Source: kernel.SourceHuman, Payload: payload}
+	return []kernel.Event{authorization, reply}, nil
+}
+
+func authorizationExpiredEvent(a kernel.Authorization, observedAt time.Time) kernel.Event {
+	return kernel.Event{ID: "authorization-expired-" + a.ID, Type: kernel.AuthorizationExpired,
+		Ts: observedAt.UTC().Format(time.RFC3339Nano), Source: kernel.SourceRuntime, Payload: map[string]any{
+			"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+			"expired_at": a.ExpiresAt,
+		}}
+}
+
 func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, itemID ItemID,
-	makeEvent func([]kernel.Event) (kernel.Event, error)) (Job, error) {
+	makeEvents func([]kernel.Event) ([]kernel.Event, error)) (Job, error) {
 	if b.storage == nil {
 		return Job{}, unavailable(op)
 	}
 	if worker := b.worker(id); worker != nil {
-		err := worker.command(ctx, func(events []kernel.Event) (kernel.Event, error) { return makeEvent(events) })
+		err := worker.command(ctx, makeEvents)
 		if err != nil {
 			return Job{}, adaptMutationFailure(op, id, itemID, err)
 		}
@@ -348,18 +570,32 @@ func (b *storageBackend) mutate(ctx context.Context, op Capability, id JobID, it
 	if err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
-	event, err := makeEvent(events)
+	eventsToAppend, err := makeEvents(events)
 	if err != nil {
+		if errors.Is(err, errAuthorizationExpired) && len(eventsToAppend) > 0 {
+			if appendErr := b.appendMutationEvents(ctx, writer, record.Revision, eventsToAppend); appendErr != nil {
+				return Job{}, adaptStorageError(op, id, 0, appendErr)
+			}
+		}
 		return Job{}, adaptMutationFailure(op, id, itemID, err)
 	}
-	encoded, err := encodeStoredEvent(event)
-	if err != nil {
-		return Job{}, adaptStorageError(op, id, 0, err)
-	}
-	if _, err = writer.Append(ctx, AppendBatch{Expected: record.Revision, Records: []StoredRecord{{Data: encoded}}}); err != nil {
+	if err := b.appendMutationEvents(ctx, writer, record.Revision, eventsToAppend); err != nil {
 		return Job{}, adaptStorageError(op, id, 0, err)
 	}
 	return b.inspect(ctx, op, id)
+}
+
+func (b *storageBackend) appendMutationEvents(ctx context.Context, writer JobWriter, revision Revision, events []kernel.Event) error {
+	records := make([]StoredRecord, len(events))
+	for i, event := range events {
+		encoded, err := encodeStoredEvent(event)
+		if err != nil {
+			return err
+		}
+		records[i] = StoredRecord{Data: encoded}
+	}
+	_, err := writer.Append(ctx, AppendBatch{Expected: revision, Records: records})
+	return err
 }
 
 func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error) {
@@ -402,7 +638,15 @@ func (b *storageBackend) Wait(ctx context.Context, req WaitRequest) (Job, error)
 			}
 			return Job{}, adaptCoordinationError(CapabilityWait, req.JobID, claimErr)
 		}
-		return Job{}, adaptStorageError(CapabilityWait, req.JobID, job.Sequence,
+		// Worker removal follows writer closure, so a missing resident after the
+		// first projection may mean the terminal append became durable between
+		// inspection and lookup. Re-reading storage preserves the event log as
+		// lifecycle truth instead of turning scheduler timing into a false outage.
+		terminal, terminalErr := b.inspect(ctx, CapabilityWait, req.JobID)
+		if terminalErr != nil || terminal.Terminal {
+			return terminal, terminalErr
+		}
+		return Job{}, adaptStorageError(CapabilityWait, req.JobID, terminal.Sequence,
 			errors.New("job is not resident in this host"))
 	}
 }
@@ -544,7 +788,7 @@ func (b *storageBackend) claimWorker(ctx context.Context, id JobID) (*storageWor
 		_ = writer.Close()
 		return nil, err
 	}
-	worker, err := newRecoveredStorageWorker(id, record, writer, b.provider, b.now, events,
+	worker, err := newRecoveredStorageWorker(ctx, id, record, writer, b.provider, b.tools, b.workspaces, b.now, events,
 		&workerCoordination{port: b.coordination, claim: claim}, b.heartbeat)
 	if err != nil {
 		_ = writer.Close()
@@ -755,10 +999,13 @@ func newStorageJobID(now time.Time) string {
 }
 
 var (
-	errAlreadyTerminal   = errors.New("job is already terminal")
-	errAlreadyDecided    = errors.New("item is already decided")
-	errWrongDecisionKind = errors.New("decision verb does not match item kind")
-	errItemNotFound      = errors.New("item was not found")
+	errAlreadyTerminal      = errors.New("job is already terminal")
+	errAlreadyDecided       = errors.New("item is already decided")
+	errWrongDecisionKind    = errors.New("decision verb does not match item kind")
+	errItemNotFound         = errors.New("item was not found")
+	errAuthorizationBinding = errors.New("approval item has no valid exact authorization binding")
+	errInvalidPrincipal     = errors.New("decision principal is empty or matches the requester")
+	errAuthorizationExpired = errors.New("authorization has expired")
 )
 
 func adaptMutationFailure(op Capability, id JobID, itemID ItemID, err error) error {
@@ -772,6 +1019,8 @@ func adaptMutationFailure(op Capability, id JobID, itemID ItemID, err error) err
 		code = CodeWrongDecisionKind
 	case errors.Is(err, errItemNotFound):
 		code = CodeNotFound
+	case errors.Is(err, errAuthorizationBinding), errors.Is(err, errInvalidPrincipal), errors.Is(err, errAuthorizationExpired):
+		code = CodeInvalidArgument
 	}
 	return mutationError(code, op, id, itemID, err)
 }

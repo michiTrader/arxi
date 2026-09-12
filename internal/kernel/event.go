@@ -45,6 +45,13 @@ const (
 	// --- model ---
 	LLMResponse EventType = "llm.response"
 
+	// --- exact authorization ---
+	AuthorizationRequested EventType = "authorization.requested"
+	AuthorizationGranted   EventType = "authorization.granted"
+	AuthorizationDenied    EventType = "authorization.denied"
+	AuthorizationExpired   EventType = "authorization.expired"
+	AuthorizationConsumed  EventType = "authorization.consumed"
+
 	// --- resources ---
 	LockAcquired     EventType = "lock.acquired"
 	LockReleased     EventType = "lock.released"

@@ -95,6 +95,7 @@ import (
 	"unicode"
 
 	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/tool"
 )
@@ -878,17 +879,5 @@ func (s *Store) write(name string, body []byte) error {
 	if err := os.Rename(tmpName, s.Path(name)); err != nil {
 		return fmt.Errorf("agentstore: publish agent %q: %w", name, err)
 	}
-	return fsyncDir(s.dir)
-}
-
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("agentstore: open %s to sync: %w", dir, err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("agentstore: sync %s: %w", dir, err)
-	}
-	return nil
+	return fsdurability.SyncDirectory(s.dir)
 }

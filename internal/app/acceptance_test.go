@@ -51,6 +51,109 @@ func (s *submissionCoordinatorStub) BindSubmission(value SubmissionBinding) (Sub
 	return s.binding, nil
 }
 
+func TestPreparedWorkspaceCrashReconcilesBeforeAcceptance(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "r1")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blueprintBytes := []byte("name: worker\n")
+	sum := sha256.Sum256(blueprintBytes)
+	artifact := runconfig.New("r1", "sim", hex.EncodeToString(sum[:]), "work", "", kernel.Config{Blueprint: "worker"}.ResolveDefaults(), nil, nil)
+	prepared := 0
+	callback := false
+	lifecycle := &lifecycleStub{launchErr: errors.New("stop after recovery")}
+	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle}
+	submission, err := service.SubmitPrepared(context.Background(), PreparedSubmission{
+		JobID: "r1", Actor: "worker", Blueprint: blueprintBytes, Artifact: artifact, BudgetUSD: 1,
+		Prepare:    func(context.Context, string) error { prepared++; return nil },
+		OnAccepted: func(SubmitResult, string, kernel.Config) { callback = true },
+	})
+	if err == nil || prepared != 1 || submission.Result.AcceptedSeq != 1 || !callback || lifecycle.launches != 1 {
+		t.Fatalf("submission/error/prepares/callback/launches = %#v/%v/%d/%v/%d: a preaccept crash must reconcile preparation and publish exactly one accepted run before lifecycle dispatch", submission, err, prepared, callback, lifecycle.launches)
+	}
+	run, inspectErr := NewReadService(root).Inspect(context.Background(), "r1")
+	if inspectErr != nil || run.Sequence != 1 {
+		t.Fatalf("reconciled run = %#v/%v: preparation recovery must publish one confirmed run.started event", run, inspectErr)
+	}
+}
+
+func TestPrepareFailureLeavesNoAcceptedRunCallbackOrLaunch(t *testing.T) {
+	root := t.TempDir()
+	lifecycle := &lifecycleStub{}
+	blueprintBytes := []byte("name: worker\n")
+	sum := sha256.Sum256(blueprintBytes)
+	artifact := runconfig.New("r1", "sim", hex.EncodeToString(sum[:]), "work", "", kernel.Config{Blueprint: "worker"}.ResolveDefaults(), nil, nil)
+	callback := false
+	prepared := 0
+	aborted := 0
+	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle}
+	_, err := service.SubmitPrepared(context.Background(), PreparedSubmission{
+		JobID: "r1", Actor: "worker", Blueprint: blueprintBytes, Artifact: artifact, BudgetUSD: 1,
+		Prepare:      func(context.Context, string) error { prepared++; return errors.New("workspace unavailable") },
+		AbortPrepare: func(context.Context, string) error { aborted++; return nil },
+		OnAccepted:   func(SubmitResult, string, kernel.Config) { callback = true },
+	})
+	if err == nil || prepared != 1 || aborted != 1 {
+		t.Fatalf("error/prepared/aborted = %v/%d/%d: failed provisioning must be attempted once and cleaned before acceptance", err, prepared, aborted)
+	}
+	if callback || lifecycle.launches != 0 {
+		t.Fatalf("callback/launches = %v/%d: no accepted callback or provider-capable lifecycle may run after preparation failure", callback, lifecycle.launches)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "r1")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed preparation left an accepted run directory: %v", statErr)
+	}
+}
+
+func TestWorkspacePreflightRejectsBeforePublishingOrLaunching(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		blueprint string
+		want      string
+	}{
+		{name: "copy provisioner", blueprint: "name: worker\nworkspace: copy\nmembers:\n  - {name: writer, tools: [write]}\n", want: "copy"},
+		{name: "worktree provisioner", blueprint: "name: worker\nworkspace: worktree\nmembers:\n  - {name: writer, tools: [write]}\n", want: "worktree"},
+		{name: "process containment", blueprint: "name: worker\nworkspace: shared\nmembers:\n  - {name: shell, tools: [bash]}\n", want: "shared"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			lifecycle := &lifecycleStub{}
+			service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle, Platform: "linux", NewID: func() string { return "refused" }}
+			_, err := service.Submit(context.Background(), SubmitRequest{Blueprint: []byte(test.blueprint), Prompt: "work", BudgetUSD: 1, Simulated: true})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("preflight error = %v, want %q: unsupported guarantees must be named before acceptance so the operator can select a realizable contract", err, test.want)
+			}
+			if lifecycle.launches != 0 {
+				t.Fatalf("lifecycle launched %d times after workspace refusal: provider dispatch can spend or mutate before the promised workspace exists", lifecycle.launches)
+			}
+			entries, readErr := os.ReadDir(root)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("run root after workspace refusal = %v / %v: preflight must happen before a run directory, log, or effective artifact becomes visible", entries, readErr)
+			}
+		})
+	}
+}
+
+func TestAcceptedTextOnlyRunFreezesNoToolsProfileForAuthorization(t *testing.T) {
+	root := t.TempDir()
+	lifecycle := &lifecycleStub{launchErr: errors.New("stop after acceptance")}
+	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle, Platform: "windows", NewID: func() string { return "text-only" }}
+	_, err := service.Submit(context.Background(), SubmitRequest{
+		Blueprint: []byte("name: worker\nmembers:\n  - {name: text}\n"), Prompt: "work", BudgetUSD: 1, Simulated: true,
+	})
+	if err == nil {
+		t.Fatal("lifecycle failure was hidden: this test must inspect the artifact after the acceptance boundary")
+	}
+	artifact, _, loadErr := runconfig.Load(filepath.Join(root, "text-only"))
+	if loadErr != nil {
+		t.Skipf("native Windows cannot fsync directories in this test environment: %v", loadErr)
+	}
+	if artifact.WorkspaceContract == nil || artifact.WorkspaceContract.Decisions[0].Platform != "windows" ||
+		artifact.WorkspaceProfileID != artifact.WorkspaceContract.Decisions[0].ProfileIdentity {
+		t.Fatalf("frozen workspace identity = profile %q contract %#v: exact authorization must bind the selected profile and platform decision, not the legacy label", artifact.WorkspaceProfileID, artifact.WorkspaceContract)
+	}
+}
+
 func TestSubmitPreparedPublishesExactArtifactAndCallbackBoundary(t *testing.T) {
 	root := t.TempDir()
 	lifecycle := &lifecycleStub{launchErr: errors.New("after acceptance")}
@@ -59,8 +162,12 @@ func TestSubmitPreparedPublishesExactArtifactAndCallbackBoundary(t *testing.T) {
 	blueprintSum := sha256.Sum256(blueprintBytes)
 	artifact := runconfig.New("r1", "sim", hex.EncodeToString(blueprintSum[:]), "exact prompt", "exact-model", cfg,
 		[]runconfig.Route{{Ref: "exact-model", Provider: "p", Protocol: model.ProtocolOpenAIChatCompletions, Model: "frozen", BaseURL: "https://example.test"}}, nil)
-	callbackCalled := false
 	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle}
+	artifact, err := service.freezeWorkspace(artifact)
+	if err != nil {
+		t.Fatalf("freeze prepared workspace contract: %v", err)
+	}
+	callbackCalled := false
 	submission, err := service.SubmitPrepared(context.Background(), PreparedSubmission{
 		JobID: "r1", Actor: "worker", Blueprint: blueprintBytes, Artifact: artifact,
 		BudgetUSD: 2, MaxTurns: 3,

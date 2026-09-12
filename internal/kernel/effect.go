@@ -196,18 +196,34 @@ type AskHuman struct {
 	// most, on budget.exceeded, whose entire promise is that a human can pay for
 	// more instead of losing the work. A question nobody can answer is a failure
 	// wearing the costume of a choice.
-	ID        string
-	Kind      string
-	Question  string
-	Agent     string
-	OnTimeout string
-	TimeoutMs int64
-	Cause     Cause
+	ID              string
+	Kind            string
+	Question        string
+	Agent           string
+	OnTimeout       string
+	TimeoutMs       int64
+	AuthorizationID string
+	ActionDigest    string
+	Cause           Cause
 }
 
 func (AskHuman) isEffect()           {}
 func (AskHuman) Class() EffectClass  { return ClassIndependent }
 func (a AskHuman) Provenance() Cause { return a.Cause }
+
+// ResumeAuthorization hands an already persisted suspension back to the exact
+// authorization path. It is deliberately not SpawnTurn: approval must resume
+// the original provider call, not pay for a model to invent another one.
+type ResumeAuthorization struct {
+	AuthorizationID string
+	SuspensionID    string
+	ActionDigest    string
+	Cause           Cause
+}
+
+func (ResumeAuthorization) isEffect()           {}
+func (ResumeAuthorization) Class() EffectClass  { return ClassIndependent }
+func (r ResumeAuthorization) Provenance() Cause { return r.Cause }
 
 // Snapshot materializes the state at the confirmed log head when the effect is
 // executed, so that `run show` does not have to replay the entire log. It is
@@ -230,12 +246,22 @@ var allEffectVariants = []Effect{
 	SetTimer{},
 	CancelTimer{},
 	AskHuman{},
+	ResumeAuthorization{},
 	Snapshot{},
 }
 
-// EffectVariants returns a copy of the variant registry. A copy and not the
-// slice directly so that one test cannot corrupt another test's registry.
+// EffectVariants returns a copy of every variant supported by the external
+// effect runner. Keeping this list complete makes exec's exhaustiveness test
+// fail whenever a new reducer decision has no dispatch path.
 func EffectVariants() []Effect {
+	out := make([]Effect, len(allEffectVariants))
+	copy(out, allEffectVariants)
+	return out
+}
+
+// KernelEffectVariants returns every sealed variant, including lifecycle-only
+// effects whose external adapter belongs to a later implementation slice.
+func KernelEffectVariants() []Effect {
 	out := make([]Effect, len(allEffectVariants))
 	copy(out, allEffectVariants)
 	return out

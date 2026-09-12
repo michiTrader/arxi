@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 // ErrUnknownTool and ErrNotImplemented distinguish a name nobody declared from
@@ -32,80 +32,56 @@ var (
 	ErrNotImplemented = errors.New("declared but not implemented in this build")
 )
 
-// Runner performs tools for the members of one run.
-//
-// It owns the mapping from member name to workspace, which is the part the
-// executor deliberately does not know. `workspace: worktree` means each member
-// gets a directory of its own, and the reason is in docs/design/10-execution.md:
-// two agents writing the same directory overwrite each other, and the KV lock
-// does not prevent it — the lock coordinates INTENT, while real isolation comes
-// from the filesystem.
+// Runner performs tools only through provisioner-verified sessions.
 type Runner struct {
-	// Root is the run's directory. Member workspaces live beneath it.
-	Root string
+	Sessions workspacefs.Provisioner
+	Requests map[string]workspacefs.Request
+	Timeout  time.Duration
 
-	// Shared, when true, gives every member the same workspace: the
-	// `workspace: shared` blueprint setting. Off by default, because the
-	// default that silently lets two agents corrupt each other's work is not
-	// the one to get for free.
-	Shared bool
-
-	// Timeout bounds a single bash call. Zero means DefaultTimeout.
-	Timeout time.Duration
-
-	// mu guards spaces. Independent effects run in PARALLEL, so two members can
-	// ask for their workspace at the same moment, and OpenWorkspace creates
-	// directories — without the lock, two goroutines race on the same mkdir and
-	// on the map itself.
-	mu     sync.Mutex
-	spaces map[string]*Workspace
+	mu       sync.Mutex
+	spaces   map[string]*Workspace
+	sessions map[string]workspacefs.Session
 }
 
-// workspaceFor returns member's workspace, creating it once.
+// workspaceFor obtains the stable session and opens its verified root once.
 func (r *Runner) workspaceFor(member string) (*Workspace, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	if w, ok := r.spaces[member]; ok {
 		return w, nil
 	}
-
-	dir := r.Root
-	if !r.Shared {
-		// The member name is a path component here, and it arrives from a
-		// blueprint a human wrote. "backend/../../etc" would place a workspace
-		// wherever it liked, so it is validated rather than trusted: the whole
-		// package exists to stop paths from escaping, and letting one in through
-		// the front door would be an odd place to start.
-		if err := validMemberName(member); err != nil {
-			return nil, err
-		}
-		dir = filepath.Join(r.Root, member)
+	if r.Sessions == nil {
+		return nil, fmt.Errorf("toolrun: no workspace provisioner is configured for %q", member)
 	}
-
-	w, err := OpenWorkspace(dir, member)
+	req, ok := r.Requests[member]
+	if !ok {
+		return nil, fmt.Errorf("toolrun: member %q has no frozen workspace request", member)
+	}
+	session, err := r.Sessions.Provision(context.Background(), req)
+	if err != nil {
+		return nil, fmt.Errorf("toolrun: provision workspace for %q: %w", member, err)
+	}
+	root, available := session.WorkspaceRoot()
+	if !available {
+		return nil, fmt.Errorf("toolrun: member %q uses workspace mode none; file and process tools have no filesystem root", member)
+	}
+	w, err := OpenWorkspace(root, member)
 	if err != nil {
 		return nil, err
+	}
+	if command, ok := session.CommandProfile(); ok {
+		copy := *command
+		w.command = &copy
 	}
 	if r.spaces == nil {
 		r.spaces = map[string]*Workspace{}
 	}
+	if r.sessions == nil {
+		r.sessions = map[string]workspacefs.Session{}
+	}
 	r.spaces[member] = w
+	r.sessions[member] = session
 	return w, nil
-}
-
-// validMemberName rejects a member name that cannot be a single directory.
-func validMemberName(m string) error {
-	if strings.TrimSpace(m) == "" {
-		return fmt.Errorf("toolrun: empty member name")
-	}
-	if m != filepath.Base(m) || m == "." || m == ".." ||
-		strings.ContainsAny(m, `/\`) || strings.ContainsRune(m, 0) {
-		return fmt.Errorf("toolrun: %q cannot be a workspace directory name\n"+
-			"  a member name becomes a path component, so one containing a separator "+
-			"or \"..\" would put the workspace outside the run's own directory", m)
-	}
-	return nil
 }
 
 // RunTool performs name for member and returns what the next turn should read.
@@ -293,15 +269,48 @@ func formatBash(res BashResult) string {
 	return b.String()
 }
 
-// Cleanup removes the run's workspaces.
-//
-// Called explicitly, never from a finaliser, and never automatically at the end
-// of a run. A failed run's workspace is the evidence: `run why` sends the user
-// to look at what the agent actually produced, and a runner that tidied up on
-// its way out would delete the one artefact worth having.
-func (r *Runner) Cleanup() error {
+// Close releases process-local root handles but preserves managed workspace
+// evidence. It is safe for failed, cancelled, idle and unknown outcomes.
+func (r *Runner) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var closeErr error
+	for member, space := range r.spaces {
+		if err := space.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close workspace root for %s: %w", member, err))
+		}
+	}
 	r.spaces = nil
-	return os.RemoveAll(r.Root)
+	return closeErr
+}
+
+// Release closes roots and releases exactly owned managed sessions. Callers must
+// use it only after a durable successful terminal outcome.
+func (r *Runner) Release(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var releaseErr error
+	for member, space := range r.spaces {
+		if err := space.Close(); err != nil {
+			releaseErr = errors.Join(releaseErr, fmt.Errorf("close workspace root for %s: %w", member, err))
+		}
+	}
+	for member, req := range r.Requests {
+		session := r.sessions[member]
+		var err error
+		if session == nil {
+			session, err = r.Sessions.Provision(ctx, req)
+		}
+		if err == nil {
+			err = r.Sessions.Release(ctx, req, session)
+		}
+		if err != nil {
+			releaseErr = errors.Join(releaseErr, fmt.Errorf("release workspace for %s: %w", member, err))
+		}
+	}
+	if releaseErr == nil {
+		r.spaces = nil
+		r.sessions = nil
+	}
+	return releaseErr
 }

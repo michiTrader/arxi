@@ -23,15 +23,7 @@ const maxReadBytes = 1 << 20 // 1 MiB
 // package was created to prevent. Handing out an io-capable method and never a
 // bare path is what makes forgetting impossible rather than merely discouraged.
 func (w *Workspace) WriteFile(path string, data []byte) error {
-	full, err := w.Resolve(path)
-	if err != nil {
-		return err
-	}
-
-	// O_TRUNC, not O_APPEND: a tool asked to write a file means the file has
-	// these contents. Appending on a retry would silently double the content of
-	// an idempotent-looking call.
-	f, err := openNoFollow(full, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := w.openRelative(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -57,12 +49,7 @@ func (w *Workspace) WriteFile(path string, data []byte) error {
 // facts about a file that another process may still be writing, and /proc-style
 // files report zero while returning content forever.
 func (w *Workspace) ReadFile(path string) ([]byte, error) {
-	full, err := w.Resolve(path)
-	if err != nil {
-		return nil, err
-	}
-
-	f, err := openNoFollow(full, os.O_RDONLY, 0)
+	f, err := w.openRelative(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/michiTrader/arxi/internal/app"
@@ -30,6 +28,7 @@ import (
 	"github.com/michiTrader/arxi/internal/supervisor"
 	"github.com/michiTrader/arxi/internal/surface"
 	"github.com/michiTrader/arxi/internal/trigger"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 // `arxi trigger run` — the caller the tick never had.
@@ -188,7 +187,8 @@ func importExternalDecisions(store *logstore.Store) (bool, error) {
 		}
 		var event kernel.Event
 		if request.Exact {
-			reply := internalinbox.Reply{Decision: request.Event.Str("decision"), Text: request.Event.Str("text")}
+			reply := internalinbox.Reply{Decision: request.Event.Str("decision"), Text: request.Event.Str("text"), Principal: request.Event.Str("principal")}
+
 			event, err = internalinbox.AnswerExactStore(store, request.Event.Str("inbox_id"), reply)
 		} else {
 			err = validateExternalDecision(store, request.Event, false)
@@ -408,7 +408,7 @@ func occurrenceForJob(values map[job.OccurrenceID]job.Occurrence, id job.JobID) 
 func (r *selfRunner) resumeAccepted(id job.JobID, occurrence job.Occurrence) (scheduler.Execution, error) {
 	dir := filepath.Join("runs", string(id))
 	sup := supervisor.New("runs", supervisor.Options{Now: nowFunc, Build: func(dir string, effective runconfig.Artifact) (arxiexec.Executor, error) {
-		return runtimeExecutor(dir, effective), nil
+		return runtimeExecutor(dir, effective, &workspacefs.Manager{Root: filepath.Join(dir, "workspaces")})
 	}})
 	claim, err := claimScheduledJob(r.coordinator, id, r.owner)
 	if err != nil {
@@ -715,7 +715,7 @@ func (r *selfRunner) startSubprocess(a trigger.Action) (scheduler.Execution, err
 	cmd := exec.Command(r.self, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	prepareScheduledProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -764,7 +764,7 @@ func (c *childExec) Cancel() {
 		if c.cmd.Process == nil {
 			return
 		}
-		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+		cancelScheduledProcess(c.cmd)
 	})
 }
 
@@ -1035,7 +1035,7 @@ func loop(sched *scheduler.Scheduler, interval time.Duration) {
 		len(sched.Names()), interval)
 
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	notifySchedulerExit(sig)
 
 	// The first tick happens immediately, before the ticker is armed.
 	//

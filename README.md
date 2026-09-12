@@ -143,11 +143,18 @@ possible remedies:
   $ arxi agent tool policy --agent backend --allow bash
 ```
 
-**The defaults are security decisions.** If any member can write files, the
-workspace becomes a `worktree` per member: two agents in the same directory
-overwrite each other and the result is garbage that is hard to attribute. A
-stage timeout escalates, it does not fail — failing by default trains the user
-to set absurd timeouts. Mutating tools do not authorize themselves.
+**Workspace and tool authority fail closed.** Source layout and execution
+containment are separate contracts, and the native builds advertise only what
+their platform adapters can prove. Windows currently advertises `none` with the
+`no-tools` profile. Linux advertises that same combination plus the
+`direct-files` profile, but no native source-backed mode yet, so file-using runs
+still fail preflight. `shared`, `copy`, `worktree`, and the `contained-process`
+profile are not advertised on native Windows or Linux; `bash` therefore cannot
+run there under the Phase 4 contract. Internal provisioner and containment code
+is test evidence, not production availability: those capabilities stay
+unavailable until the production capability decision can guarantee source
+identity, lifecycle, handle-relative access, descendant control, environment,
+filesystem reach, and network policy together.
 
 **Spending is auditable.** The budget belongs to the tree (`TreeSpentUSD`), so a
 nested spawn cannot multiply the ceiling of the root. And when N causes are
@@ -234,12 +241,14 @@ belongs to, and a parser that guesses about a spend ceiling is the failure
 The NDJSON protocol has **no** short flags. A machine has no fingers to save, and
 `{"b": 5}` in a log is a puzzle where `{"budget": 5}` is a fact.
 
-Underneath, every package is done and tested — **1542 tests, no dependencies**.
-The count is of **cases reported by `go test -v`, subtests included**, which is
-what `go test -run` can address individually:
+Underneath, every package is done and tested — **1980 Linux test cases, no dependencies**.
+The count is of **cases reported by `go test -count=1 -v`, subtests included**, which is
+what `go test -run` can address individually. It is the WSL/Linux count; platform
+build tags make the native Windows count different, so this number does not claim
+one cross-platform total:
 
 ```bash
-go test -v ./... 2>&1 | grep -c '^=== RUN'
+go test -count=1 -v ./... 2>&1 | grep -c '^=== RUN'
 ```
 
 The convention is stated because it is the only reason the number is checkable.
@@ -247,30 +256,42 @@ An earlier version of this table counted subtests for two packages and top-level
 functions for the rest, and the total it summed to was a number no command could
 reproduce — a figure like that cannot be shown to be wrong, so it drifts.
 
-| package | what it owns | tests |
+| package | what it owns | Linux test cases |
 |---|---|---|
-| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 67 |
-| `internal/exec` | the run loop, the effect runner, the fake executor, the clock | 64 |
-| `internal/logstore` | the append-only log, `seq` assignment, CAS on `seq` | 33 |
-| `internal/blueprint` | YAML loading, validation, and freezing by digest | 69 |
-| `internal/surface` | the capability manifest every command is checked against | 31 |
-| `internal/trigger` | schedules, what a trigger may invoke, and both halves of the firing decision | 152 |
-| `internal/trigstore` | triggers on disk: one file each, written atomically | 27 |
-| `internal/scheduler` | the tick: reads the store, asks `trigger`, starts and records | 31 |
-| `internal/eval` | suite files, the fold over cases, and the denominators a pass rate is read over | 106 |
-| `internal/evalstore` | runs on disk: never rewritten, never pruned, newest first by id | 28 |
-| `internal/model` | which models may be called: exist, unambiguous, enabled — and what a turn costs | 44 |
-| `internal/modelstore` | providers on disk: one file each, `0600`, written atomically | 19 |
-| `internal/provider` | the live executor: the wire format, the HTTP call, and what it costs | 24 |
-| `internal/tool` | what an agent may do: allow, ask or deny, resolved per tool | 16 |
-| `internal/toolrun` | where a tool may do it: the workspace boundary, `grep` and `edit`, and `bash` under a deadline | 83 |
-| `internal/inbox` | questions a run is waiting on: listing is a fold, answering is an append | 23 |
-| `internal/toolstore` | per-agent policy overrides on disk: one file each, written atomically | 20 |
+| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 652 |
+| `host/v1` | the public host lifecycle and extension ports | 37 |
+| `internal` (arch) | purity, layering, and ownership boundaries | 23 |
 | `internal/agentstore` | stored agents and teams: one file each, and which names a team may compose | 31 |
-| `internal/rolestore` | roles on disk: the defaults `agent create --role` copies once | 14 |
-| `internal/designer` | the designer as a pure function: a model in, a key in, a frame out | 38 |
-| `cmd/arxi` | the CLI, the short flags, the terminal, and the NDJSON protocol server | 602 |
-| `internal` (arch) | that the kernel stays pure, and that no effect is unhandled | 20 |
+| `internal/app` | durable acceptance, inspection, mutation, and cancellation services | 42 |
+| `internal/authorization` | exact action binding and digest identity | 29 |
+| `internal/blueprint` | YAML loading, validation, and freezing by digest | 70 |
+| `internal/capability` | installed and authorized capability resolution | 15 |
+| `internal/designer` | the designer as pure update and rendering functions | 38 |
+| `internal/eval` | suite files, the fold over cases, and pass-rate denominators | 106 |
+| `internal/evalstore` | eval runs on disk: never rewritten, never pruned, newest first by id | 28 |
+| `internal/exec` | the durable run loop, effect runner, canonical turns, fake executor, and clock | 107 |
+| `internal/fsdurability` | portable directory durability behavior | 2 |
+| `internal/inbox` | durable questions, exact decisions, and answer validation | 35 |
+| `internal/job` | job identity and pure transition validation | 10 |
+| `internal/jobstore` | coordination journal, claims, fencing, receipts, and ledger | 54 |
+| `internal/kernel` | the pure reducer: `Decide`, `State`, `Effect`, `Explain` | 86 |
+| `internal/logstore` | append-only events, confirmed prefixes, CAS, and recovery | 42 |
+| `internal/model` | model resolution, protocol selection, and turn pricing | 48 |
+| `internal/modelstore` | provider records written atomically | 19 |
+| `internal/provider` | OpenAI and Anthropic native protocol adapters | 43 |
+| `internal/rolestore` | role defaults copied once into stored agents | 14 |
+| `internal/runconfig` | immutable effective configuration and workspace contracts | 9 |
+| `internal/scheduler` | durable trigger occurrence admission and execution | 36 |
+| `internal/supervisor` | resident lifecycle, recovery, and workspace retention | 18 |
+| `internal/surface` | the capability manifest and use-case coverage | 32 |
+| `internal/tool` | allow, ask, or deny policy resolved per tool | 16 |
+| `internal/toolrun` | direct files, search, edit, command profiles, and negative isolation checks | 89 |
+| `internal/toolstore` | per-agent policy overrides written atomically | 20 |
+| `internal/trigger` | schedules, action boundaries, and firing decisions | 167 |
+| `internal/trigstore` | trigger records written atomically | 28 |
+| `internal/turn` | canonical provider-neutral turn values | 5 |
+| `internal/workspace` | pure requirements, profiles, capability decisions, and preflight | 8 |
+| `internal/workspacefs` | source probing and internal source-session lifecycle | 21 |
 
 Those cells add up to the total, and that is the only reason to print them: an
 earlier version of this table did **not** sum to the figure above it — the total
@@ -523,7 +544,7 @@ directions. Four things are being built, and they are at very different stages:
 
 | dimension | measured | how |
 |---|---|---|
-| the engine — event types the reducer folds | **40 / 40 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
+| the engine — event types the reducer folds | **45 / 45 — 100%** | every `EventType` constant appears in a `Decide` switch arm |
 | effects dispatched by the run loop | **7 / 7 — 100%** | every `kernel.Effect` has a case in `internal/exec` |
 | effects a **real** executor performs | **3 / 3 — 100%** | `SpawnTurn` calls models; `CallTool` runs tools in a confined workspace; `AskHuman` writes the question to the log |
 | the CLI surface | **50 / 50 — 100.0%** | every declared path probed against the built binary, by a test that also verifies its own sentinel |
@@ -531,8 +552,8 @@ directions. Four things are being built, and they are at very different stages:
 Read together they say something a single percentage cannot: **what is declared
 is finished, and what is declared is not everything a person could want.** The
 reducer, the log, the fold, the budget arithmetic and the trigger/eval/model
-layers are complete and heavily tested — that is where most of the 1542 tests
-live. What used to be missing was the last mile, CLI verbs that would read state
+layers are complete and heavily tested — that is where most of the 1980 Linux test
+cases live. What used to be missing was the last mile, CLI verbs that would read state
 the runners already produced, and the last mile is walked: the four rows above are
 the four things this project set out to build, and each is now at its declared
 size. What none of them measures is scale — every number here is coverage of a
@@ -1601,7 +1622,7 @@ unrecoverable:
 |---|---|
 | `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
 | `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
-| `allow` | **runs**, in `internal/toolrun`: a per-member workspace, `bash` under a deadline, output bounded. `tool.call_completed` carries the result. |
+| `allow` | Runs only when the frozen workspace mode/profile passed native preflight. Linux can advertise the direct-file profile, but no native source-backed mode is currently advertised; Windows advertises no direct-file profile. Native `bash` has no advertised contained-process profile. Unsupported combinations stop before `run.started`; `tool.call_completed` exists only after a genuinely available runner returns. |
 
 The `allow` row is narrower than it sounds, and the reason is worth stating.
 Because a granted *mutating* tool resolves to `ask`, `bash`, `write` and `edit`

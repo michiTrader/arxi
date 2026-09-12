@@ -14,7 +14,7 @@ world it **describes** as an `Effect` and returns; something else carries it out
 That constraint is why `arxi run`, `arxi run --sim`, `arxi run replay` and
 `arxi run why` are one body of logic instead of four programs that drift apart.
 
-Before touching code, read `docs/adr/`. Seven records, each one stating what was
+Before touching code, read `docs/adr/`. Twelve records, each one stating what was
 decided, what alternative was rejected, and **what breaks if someone reverts it
 without reading**. `docs/design/10-execution.md` has the execution model;
 `spec/events.md` has the event catalog and the `blocked_ref` contract.

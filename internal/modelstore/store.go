@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/model"
 )
 
@@ -146,7 +147,7 @@ func (s *Store) write(p model.Provider) error {
 	}
 	// The rename is a directory operation; fsyncing the file does not make the
 	// entry that names it durable.
-	return fsyncDir(s.dir)
+	return fsdurability.SyncDirectory(s.dir)
 }
 
 // Load reads one provider and validates it.
@@ -296,19 +297,4 @@ func (s *Store) names() ([]string, error) {
 		out = append(out, strings.TrimSuffix(e.Name(), ext))
 	}
 	return out, nil
-}
-
-// fsyncDir makes a directory's own metadata durable. Creating and renaming a
-// file are directory operations, and fsyncing the file does not make the entry
-// that names it durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("modelstore: open directory for fsync: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("modelstore: fsync directory %s: %w", dir, err)
-	}
-	return nil
 }

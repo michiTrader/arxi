@@ -16,6 +16,7 @@ import (
 
 	hostv1 "github.com/michiTrader/arxi/host/v1"
 	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
@@ -585,12 +586,7 @@ func writeExclusiveSynced(path string, body []byte, mode os.FileMode) error {
 }
 
 func syncFilesystemDirectory(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return file.Sync()
+	return fsdurability.SyncDirectory(dir)
 }
 
 func adaptFilesystemStorageError(err error) error {

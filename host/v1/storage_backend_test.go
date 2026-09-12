@@ -47,6 +47,47 @@ func TestStoragePortDrivesFullLifecycle(t *testing.T) {
 	}
 }
 
+func TestWaitAndInspectObserveDurableTerminalAfterWorkerRemoval(t *testing.T) {
+	storage := newMemoryStorage()
+	h := New(Options{Storage: storage, Provider: textProviderStub{}})
+	defer h.Close()
+	result, err := h.Submit(context.Background(), SubmitRequest{
+		Blueprint: testBlueprint, Prompt: "work", BudgetUSD: 1, Simulated: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := h.backend.(*storageBackend)
+	worker := backend.worker(result.JobID)
+	if worker == nil {
+		t.Fatal("submitted job has no resident worker: the regression cannot force the completion/removal boundary")
+	}
+	select {
+	case <-worker.done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not complete before Wait: the regression must observe durable truth after residency disappears")
+	}
+	if resident := backend.worker(result.JobID); resident != nil {
+		t.Fatal("completed worker remained resident: the regression did not force the lifecycle race")
+	}
+	for _, observe := range []struct {
+		name string
+		load func() (Job, error)
+	}{
+		{name: "wait", load: func() (Job, error) {
+			return h.Wait(context.Background(), WaitRequest{JobID: result.JobID})
+		}},
+		{name: "inspect", load: func() (Job, error) {
+			return h.Inspect(context.Background(), InspectRequest{JobID: result.JobID})
+		}},
+	} {
+		job, loadErr := observe.load()
+		if loadErr != nil || !job.Terminal || job.Status != JobSucceeded {
+			t.Fatalf("%s after worker removal = %#v, %v: terminal lifecycle truth must be rebuilt from confirmed storage", observe.name, job, loadErr)
+		}
+	}
+}
+
 func TestStoragePortPreservesExclusiveWriterAndResidentMutation(t *testing.T) {
 	storage := newMemoryStorage()
 	provider := &blockingTextProvider{started: make(chan struct{}), release: make(chan struct{})}

@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/trigger"
 )
 
@@ -187,7 +188,7 @@ func (s *Store) write(r trigger.Record) error {
 	}
 	// The rename is a directory operation. Fsyncing the file does not make the
 	// entry that names it durable, so the directory needs its own sync.
-	return fsyncDir(s.dir)
+	return fsdurability.SyncDirectory(s.dir)
 }
 
 // Load reads one trigger and validates it.
@@ -285,19 +286,4 @@ func (s *Store) names() ([]string, error) {
 		out = append(out, strings.TrimSuffix(e.Name(), ext))
 	}
 	return out, nil
-}
-
-// fsyncDir makes a directory's own metadata durable. Creating and renaming a
-// file are directory operations, and fsyncing the file does not make the entry
-// that names it durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("trigstore: open directory for fsync: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("trigstore: fsync directory %s: %w", dir, err)
-	}
-	return nil
 }

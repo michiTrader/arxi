@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -217,6 +218,155 @@ func question(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func exactApproval(t *testing.T, mutate func(*kernel.Event)) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "r1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "blueprint.snapshot.yaml"), []byte("name: team\nmembers:\n  - name: worker\nstages:\n  - name: work\n    advance_when: all\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := logstore.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append([]kernel.Event{
+		{ID: "start-exact", Type: kernel.RunStarted, Payload: map[string]any{"run_id": "r1"}},
+		{ID: "activate-exact", Type: kernel.AgentActivated, Actor: "worker", Payload: map[string]any{"agent": "worker"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := kernel.Event{ID: "authorization-request", Type: kernel.AuthorizationRequested, Actor: "worker", Payload: map[string]any{
+		"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "inbox_id": "approval-1",
+		"requester_principal": "agent:worker", "suspension_id": "suspension-1", "parent_work_id": "parent-1",
+		"provider_call_id": "call-1", "tool": "bash", "argument_digest": strings.Repeat("a", 64),
+		"action_digest": strings.Repeat("b", 64), "tool_schema_version": "bash/v1", "policy_version": "policy-1",
+		"workspace_profile_id": "workspace-1", "expires_at": "2026-09-12T00:00:00Z", "after_ms": int64(60000),
+	}}
+	if mutate != nil {
+		mutate(&request)
+	}
+	item := kernel.Event{ID: "approval-item", Type: kernel.InboxCreated, Payload: map[string]any{
+		"inbox_id": "approval-1", "kind": "tool_approval", "question": "allow bash?",
+		"authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64),
+	}}
+	if _, err := store.Append([]kernel.Event{request, item}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func readExactApprovalState(t *testing.T, dir string) ([]kernel.Event, kernel.State) {
+	t.Helper()
+	read, err := logstore.ReadConfirmed(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := decodeEvents(dir, read.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ := kernel.Fold(kernel.State{}, events, kernel.Config{Members: []kernel.MemberConfig{{Name: "worker"}}})
+	return events, state
+}
+
+func TestDueExactDecisionsPersistOneExpiryAndReplayTheRefusal(t *testing.T) {
+	for _, decision := range []Reply{
+		{Decision: DecisionApprove, Principal: "operator:alice"},
+		{Decision: DecisionReject, Text: "unsafe", Principal: "operator:alice"},
+	} {
+		t.Run(decision.Decision, func(t *testing.T) {
+			dir := exactApproval(t, nil)
+			observed := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+			result, err := DecideExact(dir, "approval-1", decision, observed)
+			if !errors.Is(err, ErrAuthorizationExpired) {
+				t.Fatalf("due %s error = %v, want ErrAuthorizationExpired: elapsed authority must fail closed after recording expiry", decision.Decision, err)
+			}
+			if result.Reply.Type != "" || result.Authorization == nil || result.Authorization.Type != kernel.AuthorizationExpired {
+				t.Fatalf("due %s result = %#v: failure must persist only authorization.expired, never a reply or terminal human decision", decision.Decision, result)
+			}
+			events, state := readExactApprovalState(t, dir)
+			last := events[len(events)-1]
+			a := state.Authorization("authorization-1")
+			if last.Type != kernel.AuthorizationExpired || last.Source != kernel.SourceRuntime || last.Str("expired_at") != "2026-09-12T00:00:00Z" {
+				t.Fatalf("persisted expiry = %+v: replay needs the immutable deadline judgment in a runtime event", last)
+			}
+			if a == nil || a.Decision != "expired" || !state.InboxItem("approval-1").Replied {
+				t.Fatalf("replayed authorization/inbox = %+v/%+v: restart could expose elapsed authority again; fold the durable expiry as terminal", a, state.InboxItem("approval-1"))
+			}
+		})
+	}
+}
+
+func TestAlreadyRecordedExpiryIsStableAndIdempotent(t *testing.T) {
+	dir := exactApproval(t, nil)
+	at := time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC)
+	if _, err := DecideExact(dir, "approval-1", Reply{Decision: DecisionApprove, Principal: "operator:alice"}, at); !errors.Is(err, ErrAuthorizationExpired) {
+		t.Fatalf("first due approval error = %v, want ErrAuthorizationExpired", err)
+	}
+	eventsBefore, _ := readExactApprovalState(t, dir)
+	_, err := DecideExact(dir, "approval-1", Reply{Decision: DecisionReject, Text: "still unsafe", Principal: "operator:bob"}, at.Add(time.Hour))
+	if !errors.Is(err, ErrAuthorizationExpired) {
+		t.Fatalf("decision after recorded expiry = %v, want ErrAuthorizationExpired: retries must return the same fail-closed result without another expiry append", err)
+	}
+	eventsAfter, _ := readExactApprovalState(t, dir)
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("recorded expiry grew log from %d to %d events: retries must not duplicate terminal judgments", len(eventsBefore), len(eventsAfter))
+	}
+}
+
+func TestExactApprovalRecordsPrincipalAndDecisionInOneBatch(t *testing.T) {
+	dir := exactApproval(t, nil)
+	oldNow := now
+	now = func() time.Time { return time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC) }
+	defer func() { now = oldNow }()
+	if _, err := AnswerExact(dir, "approval-1", Reply{Decision: DecisionApprove, Principal: "operator:alice"}); err != nil {
+		t.Fatalf("a valid exact approval failed: suspended work cannot resume; commit its grant and reply together: %v", err)
+	}
+	read, err := logstore.ReadConfirmed(dir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := decodeEvents(dir, read.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events[len(events)-2:]
+	if last[0].Type != kernel.AuthorizationGranted || last[1].Type != kernel.InboxReplied {
+		t.Fatalf("exact approval appended %q then %q: the grant must fold before the reply and share its batch; append authorization.granted followed by inbox.replied", last[0].Type, last[1].Type)
+	}
+	if last[0].Str("approver_principal") != "operator:alice" || last[1].Str("principal") != "operator:alice" {
+		t.Fatalf("decision principals = %q/%q: audit cannot identify who authorized the mutation; record the authenticated principal on both records", last[0].Str("approver_principal"), last[1].Str("principal"))
+	}
+}
+
+func TestExactApprovalFailsClosedOnPrincipalAndBindingErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		principal string
+		mutate    func(*kernel.Event)
+		want      error
+	}{
+		{"empty principal", "", nil, ErrInvalidPrincipal},
+		{"self approval", "agent:worker", nil, ErrInvalidPrincipal},
+		{"mismatched digest", "operator:alice", func(e *kernel.Event) { e.Payload["inbox_id"] = "request-only" }, ErrAuthorizationBinding},
+		{"missing binding", "operator:alice", func(e *kernel.Event) { e.Payload["inbox_id"] = "request-only" }, ErrAuthorizationBinding},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := exactApproval(t, tt.mutate)
+			_, err := AnswerExact(dir, "approval-1", Reply{Decision: DecisionApprove, Principal: tt.principal})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("exact approval error = %v, want %v: ambiguous authority could execute unintended work; refuse before appending either decision record", err, tt.want)
+			}
+		})
+	}
 }
 
 func TestDecisionVerbsRequireTheirExactItemKind(t *testing.T) {

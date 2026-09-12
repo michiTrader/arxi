@@ -86,7 +86,7 @@ concrete command:
 
 | `blocked_on` | `blocked_ref` | derived remedy |
 |---|---|---|
-| `approval` | `{inbox_id, tool, policy}` | `arxi inbox approve <inbox_id>` |
+| `approval` | Legacy: `{inbox_id, tool, policy}`. Exact authorization: `{inbox_id, authorization_id, action_digest, tool, policy}`. | `arxi inbox approve <inbox_id>` |
 | `lock` | `{key, holder}` | `arxi state unlock <run> <key>` |
 | `peer` | `{peer}` | (informational: chained wait) |
 | `budget` | `{}` | `arxi run unpause <run> --budget <higher>` |
@@ -119,10 +119,60 @@ order. The final `llm.response` aggregates input and output tokens across every
 model round and carries the final response ID, finish reason, refusal and text.
 
 Policy is resolved before the tool runner. `tool.call_denied` with
-`policy: "ask"` is **not an error**: it is a question. It creates an inbox item
-and leaves `blocked_ref` so the remedy is automatic. `deny` is recorded without
-running the tool; neither outcome is reinjected because both stop the native
-loop at that known boundary.
+`policy: "ask"` is **not an error**: it is a question. Exact authorization does
+not ask the model to recreate that call. The runtime persists the canonical
+continuation and `authorization.requested`, then leaves an authorization-bound
+`blocked_ref`. `deny` is recorded without running the tool. Legacy logs keep the
+old stop-and-reprompt meaning, but an unanswered legacy mutation cannot be
+upgraded into an exact grant.
+
+## Exact authorization
+
+Authorization records are reducer-visible domain facts. The suspended canonical
+continuation they reference is reducer-inert execution data: replay can decide
+that an authorization may resume without reading provider or tool state.
+
+| type | payload | notes |
+|---|---|---|
+| `authorization.requested` | `schema`, `authorization_id`, `inbox_id`, `requester_principal`, `suspension_id`, `parent_work_id`, `provider_call_id`, `tool`, `argument_digest`, `action_digest`, `tool_schema_version`, `policy_version`, `workspace_profile_id`, `expires_at`, `after_ms` | Every binding is immutable. The matching continuation and exact canonical call must already be durable. `after_ms` arms the authorization timer; `expires_at` is the recorded absolute judgment used by mutation adapters. |
+| `authorization.granted` | `schema`, `authorization_id`, `action_digest`, `approver_principal`, `grant_event_id`, `expires_at` | The approver is authenticated by the adapter and must differ from the requester. A grant does not run or consume the action. |
+| `authorization.denied` | `schema`, `authorization_id`, `action_digest`, `principal`, `reason?` | Terminal decision. It never resumes the suspended call. |
+| `authorization.expired` | `schema`, `authorization_id`, `action_digest`, `expired_at` | A clock-owning runtime records this judgment; the reducer never compares wall-clock time. |
+| `authorization.consumed` | `schema`, `authorization_id`, `action_digest`, `grant_event_id`, `work_id` | Appended in one writer compare-and-swap batch with the matching `exec.work_started`, immediately before external dispatch. There is at most one consumption. |
+
+`schema` is `arxi.authorization/v1`. An action digest is computed over job and
+run identity, requester principal, suspended parent work, provider call ID, tool
+name, canonical argument digest, tool-schema version, frozen policy version and
+workspace-profile identity. The digest uses a domain-separated, length-framed
+encoding. It is an integrity binding; the exact persisted bytes remain the
+evidence of what was authorized.
+
+Approval and rejection are valid only for an unanswered `tool_approval` item;
+answer is valid only for a question. The reply append records the authenticated
+principal. Empty principals, self-approval, mismatched authorization IDs or
+digests, changed bindings, elapsed grants and a second consumption fail closed.
+
+`authorization.granted` causes a resume effect for the recorded suspension, not a
+fresh model turn. Immediately before dispatch the fenced worker re-folds the
+confirmed prefix and verifies the grant and continuation. It atomically appends
+`authorization.consumed` and the exact child's `exec.work_started`; only then may
+the runner see the call. The consume/start pair is therefore the durable point of
+no return, not evidence that the external action completed. A crash after that
+boundary is handled as started work: a trustworthy receipt may reconcile it,
+otherwise a non-idempotent outcome is `unknown`. Recovery never restores the grant
+or guesses that the external action did not happen.
+
+Authorization expiry uses timer id `authorization:<authorization_id>`. A grant
+remains subject to the timer until consumption. `timer.tick` records
+`authorization.expired`; replay uses that event and never consults the current
+clock. A mutation adapter with a wall clock must materialize an already-due
+expiry before accepting or consuming a grant, so worker downtime cannot extend
+its authority.
+
+Historical events remain valid. A legacy `tool.call_denied` and
+`inbox.replied` pair replays with its historical behavior. Live recovery refuses
+to execute an unanswered legacy mutating approval because it lacks immutable
+action, schema, policy and principal bindings.
 
 ## Durable execution progress
 
@@ -264,8 +314,8 @@ that repeats on every call is a notice the user learns to ignore.
 
 | type | payload |
 |---|---|
-| `inbox.created` | `inbox_id`, `kind`, `question`, `agent?`, `on_timeout` |
-| `inbox.replied` | `inbox_id`, `text` |
+| `inbox.created` | `inbox_id`, `kind`, `question`, `agent?`, `on_timeout`, `authorization_id?`, `action_digest?` |
+| `inbox.replied` | `inbox_id`, `decision`, `text?`, `principal?`, `authorization_id?`, `action_digest?` |
 | `inbox.timeout` | `inbox_id` |
 
 `on_timeout` is decided **when the question is created**, not when it expires: at

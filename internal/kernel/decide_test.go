@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -692,6 +693,218 @@ func TestInboxRepliedUnblocksAndOpensTurn(t *testing.T) {
 	}
 }
 
+func authorizationRequest(actor string) Event {
+	return ev(AuthorizationRequested, actor, map[string]any{
+		"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "inbox_id": "approval-1",
+		"requester_principal": "agent:backend", "suspension_id": "suspension-1", "parent_work_id": "work-parent-1",
+		"provider_call_id": "call-1", "tool": "bash", "argument_digest": strings.Repeat("a", 64),
+		"action_digest": strings.Repeat("b", 64), "tool_schema_version": "arxi.tool.bash/v1",
+		"policy_version": "policy-1", "workspace_profile_id": "workspace-1",
+		"expires_at": "2026-08-26T00:05:00Z", "after_ms": int64(300000),
+	})
+}
+
+func grantAuthorization() Event {
+	e := ev(AuthorizationGranted, "", map[string]any{
+		"schema": "arxi.authorization/v1", "authorization_id": "authorization-1",
+		"action_digest": strings.Repeat("b", 64), "approver_principal": "operator:alice",
+		"expires_at": "2026-08-26T00:05:00Z",
+	})
+	e.Payload["grant_event_id"] = e.ID
+	return e
+}
+
+func quietAuthorizationConfig() Config {
+	c := bp()
+	c.Watchers = nil
+	return c
+}
+
+func TestAuthorizationRequestCreatesExactBlockAndTimer(t *testing.T) {
+	c := quietAuthorizationConfig()
+	base := started(c)
+	before, _ := json.Marshal(base)
+	s, fx := Decide(base, authorizationRequest("backend"), c)
+
+	if len(s.Authorizations) != 1 || len(s.Inbox) != 1 {
+		t.Fatalf("a valid request produced %d authorizations and %d inbox items: exact approval would be lost or duplicated; create one linked record and one question", len(s.Authorizations), len(s.Inbox))
+	}
+	a, item, member := s.Authorizations[0], s.Inbox[0], s.Member("backend")
+	if item.AuthorizationID != a.ID || item.ActionDigest != a.ActionDigest || item.Kind != "tool_approval" {
+		t.Fatalf("inbox item %#v is not bound to authorization %#v: a reply could approve different work; copy both immutable identifiers onto the tool_approval item", item, a)
+	}
+	wantRef := map[string]any{"inbox_id": a.InboxID, "authorization_id": a.ID, "action_digest": a.ActionDigest, "tool": a.Tool, "policy": "ask"}
+	if !reflect.DeepEqual(member.BlockedOn, wantRef) {
+		t.Fatalf("blocked_ref = %#v, want %#v: run why or a mutation adapter could target the wrong action; preserve every exact approval reference", member.BlockedOn, wantRef)
+	}
+	timer, ok := firstEffect[SetTimer](fx)
+	if !ok || timer.ID != "authorization:authorization-1" || timer.FiresAtMs != 300000 {
+		t.Fatalf("authorization timer = %#v, present %v: downtime could extend authority; arm authorization:<id> with the recorded after_ms", timer, ok)
+	}
+	ask, ok := firstEffect[AskHuman](fx)
+	if !ok || ask.AuthorizationID != a.ID || ask.ActionDigest != a.ActionDigest {
+		t.Fatalf("question effect = %#v, present %v: inbox persistence could drop the exact binding; carry authorization and action references independently", ask, ok)
+	}
+	a.Decision = "mutated"
+	s.Inbox[0].Replied = true
+	member.BlockedOn["tool"] = "mutated"
+	after, _ := json.Marshal(base)
+	if string(before) != string(after) {
+		t.Fatal("mutating the authorization result changed Decide's input: replay would depend on fold order; deep-copy authorizations, inbox items and blocked references")
+	}
+
+	cloneSource := s
+	cloneSource.Authorizations = append(cloneSource.Authorizations[:0:0], cloneSource.Authorizations...)
+	clone := cloneSource.Clone()
+	clone.Authorizations[0].Decision = "cloned-mutation"
+	if cloneSource.Authorizations[0].Decision == "cloned-mutation" {
+		t.Fatal("State.Clone shared the authorization slice: snapshots or later folds could rewrite earlier authority; allocate and copy every authorization record")
+	}
+}
+
+func TestMalformedAuthorizationRequestsFailClosed(t *testing.T) {
+	c := quietAuthorizationConfig()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{"wrong schema", func(e *Event) { e.Payload["schema"] = "arxi.authorization/v2" }},
+		{"missing suspension", func(e *Event) { delete(e.Payload, "suspension_id") }},
+		{"malformed argument digest", func(e *Event) { e.Payload["argument_digest"] = "bad" }},
+		{"nonpositive timer", func(e *Event) { e.Payload["after_ms"] = 0 }},
+		{"unknown member", func(e *Event) { e.Actor = "missing" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := started(c)
+			e := authorizationRequest("backend")
+			tc.mutate(&e)
+			got, fx := Decide(s, e, c)
+			if len(got.Authorizations) != 0 || len(got.Inbox) != 0 ||
+				countEffects[SetTimer](fx) != 0 || countEffects[AskHuman](fx) != 0 || countEffects[ResumeAuthorization](fx) != 0 {
+				t.Fatalf("malformed %s request created authority, a question, or executable work: incomplete authority could become executable; reject it without authorization side effects", tc.name)
+			}
+		})
+	}
+}
+
+func TestAuthorizationGrantResumesExactSuspensionOnce(t *testing.T) {
+	c := quietAuthorizationConfig()
+	s, _ := Decide(started(c), authorizationRequest("backend"), c)
+	grant := grantAuthorization()
+	granted, fx := Decide(s, grant, c)
+	resume, ok := firstEffect[ResumeAuthorization](fx)
+	if !ok || resume.AuthorizationID != "authorization-1" || resume.SuspensionID != "suspension-1" || resume.ActionDigest != strings.Repeat("b", 64) {
+		t.Fatalf("grant resume = %#v, present %v: approval could open a fresh turn or different call; emit only the exact authorization, suspension and action references", resume, ok)
+	}
+	if countEffects[SpawnTurn](fx) != 0 || countEffects[CancelTimer](fx) != 0 {
+		t.Fatalf("grant effects = %#v: approval must neither reprompt nor disarm expiry before consumption; return only ResumeAuthorization", fx)
+	}
+	if granted.Authorizations[0].ApproverPrincipal != "operator:alice" || granted.Authorizations[0].GrantEventID != grant.ID || !granted.Inbox[0].Replied {
+		t.Fatalf("grant state = %#v / inbox %#v: replay could not prove the decision; persist the approver, event identity and replied item", granted.Authorizations[0], granted.Inbox[0])
+	}
+	againEvent := grantAuthorization()
+	again, againFX := Decide(granted, againEvent, c)
+	if countEffects[ResumeAuthorization](againFX) != 0 || again.Authorizations[0].GrantEventID != grant.ID {
+		t.Fatal("a second grant changed authority or resumed twice: one approval could dispatch twice; accept decisions only while pending")
+	}
+}
+
+func TestAuthorizationGrantRejectsSelfApprovalAndMismatches(t *testing.T) {
+	c := quietAuthorizationConfig()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{"self approval", func(e *Event) { e.Payload["approver_principal"] = "agent:backend" }},
+		{"wrong digest", func(e *Event) { e.Payload["action_digest"] = strings.Repeat("c", 64) }},
+		{"wrong expiry", func(e *Event) { e.Payload["expires_at"] = "2026-08-26T00:06:00Z" }},
+		{"wrong event id", func(e *Event) { e.Payload["grant_event_id"] = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := Decide(started(c), authorizationRequest("backend"), c)
+			e := grantAuthorization()
+			tc.mutate(&e)
+			got, fx := Decide(s, e, c)
+			if got.Authorizations[0].Decision != "" || got.Inbox[0].Replied || len(fx) != 0 {
+				t.Fatalf("%s grant was accepted: authority could escape its principal or action binding; leave the request pending and emit nothing", tc.name)
+			}
+		})
+	}
+}
+
+func TestAuthorizationDeniedAndExpiredTerminateWithoutModelTurn(t *testing.T) {
+	c := quietAuthorizationConfig()
+	for _, tc := range []struct {
+		name string
+		e    func() Event
+	}{
+		{"denied", func() Event {
+			return ev(AuthorizationDenied, "", map[string]any{"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64), "principal": "operator:alice", "reason": "unsafe"})
+		}},
+		{"expired", func() Event {
+			return ev(AuthorizationExpired, "", map[string]any{"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64), "expired_at": "2026-08-26T00:05:00Z"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := Decide(started(c), authorizationRequest("backend"), c)
+			got, fx := Decide(s, tc.e(), c)
+			if got.Authorizations[0].Decision != tc.name || got.Member("backend").State != MemberIdle || !got.Inbox[0].Replied {
+				t.Fatalf("%s state = %#v: terminal refusal left executable authority or a permanent block; mark the decision, item and member consistently", tc.name, got.Authorizations[0])
+			}
+			if countEffects[CancelTimer](fx) != 1 || countEffects[SpawnTurn](fx) != 0 || countEffects[ResumeAuthorization](fx) != 0 {
+				t.Fatalf("%s effects = %#v: terminal refusal must only disarm its timer; never start a model turn or suspended action", tc.name, fx)
+			}
+		})
+	}
+}
+
+func TestAuthorizationConsumptionRequiresExactGrantAndWorkOnce(t *testing.T) {
+	c := quietAuthorizationConfig()
+	s, _ := Decide(started(c), authorizationRequest("backend"), c)
+	grant := grantAuthorization()
+	s, _ = Decide(s, grant, c)
+	consume := ev(AuthorizationConsumed, "", map[string]any{
+		"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64),
+		"grant_event_id": grant.ID, "work_id": "work-child-1",
+	})
+	consumed, fx := Decide(s, consume, c)
+	if consumed.Authorizations[0].ConsumingWorkID != "work-child-1" || consumed.Member("backend").State != MemberWaiting || countEffects[CancelTimer](fx) != 1 {
+		t.Fatalf("consumption = %#v with effects %#v and member %q: a valid grant could remain reusable or bypass canonical continuation ownership; bind the child work, cancel expiry and leave resume lifecycle to its adapter", consumed.Authorizations[0], fx, consumed.Member("backend").State)
+	}
+	again, againFX := Decide(consumed, consume, c)
+	if again.Authorizations[0].ConsumingWorkID != "work-child-1" || len(againFX) != 0 {
+		t.Fatal("a second consumption changed state or emitted effects: one grant could start external work twice; reject every event after consuming_work_id is set")
+	}
+
+	pending, _ := Decide(started(c), authorizationRequest("backend"), c)
+	bad := consume
+	bad.Payload = map[string]any{"schema": "arxi.authorization/v1", "authorization_id": "authorization-1", "action_digest": strings.Repeat("b", 64), "grant_event_id": grant.ID, "work_id": "work-child-1"}
+	ungranted, badFX := Decide(pending, bad, c)
+	if ungranted.Authorizations[0].ConsumingWorkID != "" || len(badFX) != 0 {
+		t.Fatal("an ungranted request was consumed: external work could bypass human approval; require a matching recorded grant before binding work")
+	}
+}
+
+func TestAuthorizationTimerTickMaterializesExpiry(t *testing.T) {
+	c := quietAuthorizationConfig()
+	s, _ := Decide(started(c), authorizationRequest("backend"), c)
+	_, fx := Decide(s, ev(TimerTick, "", map[string]any{"timer_id": "authorization:authorization-1"}), c)
+	emit, ok := firstEffect[Emit](fx)
+	if !ok || emit.Event.Type != AuthorizationExpired || emit.Event.Str("action_digest") != strings.Repeat("b", 64) {
+		t.Fatalf("authorization tick effects = %#v: replay would depend on a wall clock; materialize authorization.expired with the recorded binding", fx)
+	}
+}
+
+func TestLegacyApprovalLifecycleRemainsUnchanged(t *testing.T) {
+	c := bp()
+	s, askFX := Decide(started(c), ev(ToolCallDenied, "backend", map[string]any{"tool": "bash", "policy": "ask"}), c)
+	id := s.Inbox[0].ID
+	resumed, replyFX := Decide(s, ev(InboxReplied, "", map[string]any{"inbox_id": id, "text": "go ahead"}), c)
+	if len(s.Authorizations) != 0 || countEffects[AskHuman](askFX) != 1 || countEffects[SpawnTurn](replyFX) != 1 || resumed.Member("backend").State != MemberIdle {
+		t.Fatalf("legacy approval changed under exact authorization: historical logs would replay differently; keep ToolCallDenied and InboxReplied on their original path")
+	}
+}
+
 // -------------------------------------------------------------------- budget
 
 // Protects the ceiling that makes --budget mean something with nested spawn.
@@ -1199,18 +1412,19 @@ func TestFoldIsDeterministicAndDoesNotMutateInput(t *testing.T) {
 }
 
 // This test is the replacement for the exhaustive `match` that Rust gives for
-// free (see ADR-0007). If somebody adds an Effect variant and does not register
-// it, this fails and tells them exactly what to do.
+// free (see ADR-0007). New variants must also update every external type switch;
+// while a slice is intentionally kernel-only, those packages can pin a smaller
+// supported set until their later lifecycle slice lands.
 func TestEffectExhaustive(t *testing.T) {
-	got := len(EffectVariants())
-	const want = 7
+	got := len(KernelEffectVariants())
+	const want = 8
 	if got != want {
 		t.Fatalf("registered variants = %d, expected %d.\n"+
 			"If you added an Effect variant, add it to allEffectVariants "+
 			"and review ALL the switches over Effect (grep 'case SpawnTurn').", got, want)
 	}
 	seen := map[string]bool{}
-	for _, v := range EffectVariants() {
+	for _, v := range KernelEffectVariants() {
 		name := fmt.Sprintf("%T", v)
 		if seen[name] {
 			t.Errorf("duplicate variant in the registry: %s", name)

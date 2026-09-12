@@ -18,6 +18,7 @@ type Options struct {
 	Provider              TextProvider
 	Tools                 ToolExecutor
 	Workspaces            WorkspaceProvisioner
+	WorkspaceCapabilities *WorkspaceCapabilitiesV1
 	Storage               JobStorage
 	Coordination          Coordination
 	CoordinationHeartbeat time.Duration

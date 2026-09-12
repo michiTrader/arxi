@@ -13,6 +13,8 @@ import (
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
+	"github.com/michiTrader/arxi/internal/workspace"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
 const DefaultCommandLimit = 32
@@ -56,6 +58,11 @@ type DispatchClaim interface {
 // offer trustworthy receipt lookup rather than only returning response IDs.
 type Reconciler interface {
 	Reconcile(context.Context, string) (bool, error)
+}
+
+type workspaceLifecycle interface {
+	CloseWorkspaces() error
+	ReleaseWorkspaces(context.Context) error
 }
 
 // Options are process-level dependencies; run state is never supplied here.
@@ -352,6 +359,8 @@ type worker struct {
 	stopOnce     sync.Once
 	errMu        sync.Mutex
 	closeErr     error
+	workspace    workspaceLifecycle
+	released     bool
 }
 
 func newWorker(dir, id string, opts Options) *worker {
@@ -378,6 +387,11 @@ func (w *worker) close() {
 func (w *worker) run() {
 	defer close(w.done)
 	defer close(w.results)
+	defer func() {
+		if w.workspace != nil && !w.released {
+			w.setErr(w.workspace.CloseWorkspaces())
+		}
+	}()
 	store, effective, loop, err := w.restore()
 	w.readyErr = err
 	close(w.ready)
@@ -430,6 +444,16 @@ func (w *worker) run() {
 				result.Err = errors.Join(result.Err, finishErr)
 			}
 		}
+		if runErr == nil && out.StoppedBy == exec.StopTerminal && out.State.Status == kernel.StatusSucceeded && w.workspace != nil && !w.released {
+			if closeErr := w.workspace.CloseWorkspaces(); closeErr != nil {
+				result.Err = errors.Join(result.Err, closeErr)
+			} else if releaseErr := w.workspace.ReleaseWorkspaces(context.Background()); releaseErr != nil {
+				result.Err = errors.Join(result.Err, releaseErr)
+			} else {
+				w.released = true
+			}
+		}
+
 		w.publish(result)
 
 		drained := w.drain(store)
@@ -468,6 +492,25 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 	effective, err = runconfig.VerifyBinding(w.dir, w.id, events)
 	if err != nil {
 		return fail(fmt.Errorf("verify immutable execution config: %w", err))
+	}
+	if effective.SupportsWorkspaceContract() {
+		contract := effective.WorkspaceContract
+		platform, platformErr := workspaceContractPlatform(contract)
+		if platformErr != nil {
+			return fail(platformErr)
+		}
+		if contract.Source.Kind == "git" {
+			if _, verifyErr := workspacefs.Verify(context.Background(), contract.Source); verifyErr != nil {
+				return fail(fmt.Errorf("verify frozen workspace source: %w", verifyErr))
+			}
+		}
+		current, verifyErr := currentWorkspaceContract(effective.Config, contract.Source, platform)
+		if verifyErr != nil {
+			return fail(fmt.Errorf("verify live workspace capabilities: %w", verifyErr))
+		}
+		if verifyErr := effective.VerifyWorkspaceContract(current); verifyErr != nil {
+			return fail(fmt.Errorf("verify live workspace contract: %w", verifyErr))
+		}
 	}
 	recovery, err := exec.Recover(events)
 	if err != nil {
@@ -509,6 +552,9 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 	if err != nil {
 		return fail(fmt.Errorf("build executor: %w", err))
 	}
+	if lifecycle, ok := executor.(workspaceLifecycle); ok {
+		w.workspace = lifecycle
+	}
 
 	var clock exec.Clock
 	var timekeeper exec.Timekeeper
@@ -537,7 +583,12 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		}
 	}
 	runner := &exec.Runner{Log: store, Clock: clock, Executor: executor,
-		Config: effective.Config, RunID: w.id, Now: now}
+		Config: effective.Config, RunID: w.id, JobID: w.id, Now: now,
+		Authorization: exec.AuthorizationConfig{
+			ToolSchemaVersion: effective.ToolSchemaVersion, PolicyVersion: effective.PolicyVersion,
+			WorkspaceProfileID: effective.WorkspaceProfileID, TTLMS: effective.AuthorizationTTLMS,
+		},
+	}
 	if dispatches, ok := w.opts.Claim.(DispatchClaim); ok {
 		runner.JobID = w.id
 		runner.Dispatches = dispatches
@@ -548,6 +599,63 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		loop.Progress = w.opts.Claim.Checkpoint
 	}
 	return store, effective, loop, nil
+}
+
+func workspaceContractPlatform(contract *runconfig.WorkspaceContract) (string, error) {
+	if contract == nil {
+		return "", errors.New("workspace contract is absent")
+	}
+	if len(contract.Decisions) == 0 {
+		if len(contract.Requirements) != 0 {
+			return "", errors.New("workspace contract has requirements without platform decisions")
+		}
+		return "unknown", nil
+	}
+	platform := contract.Decisions[0].Platform
+	for _, decision := range contract.Decisions[1:] {
+		if decision.Platform != platform {
+			return "", errors.New("workspace contract mixes platform decisions")
+		}
+	}
+	return platform, nil
+}
+
+func currentWorkspaceContract(config kernel.Config, source workspace.SourceIdentity, platform string) (runconfig.WorkspaceContract, error) {
+	topLevel := workspace.Mode(config.Workspace)
+	if topLevel == workspace.ModeNone {
+		for _, member := range config.Members {
+			for _, tool := range member.Tools {
+				if tool == "read" || tool == "grep" || tool == "write" || tool == "edit" || tool == "bash" {
+					topLevel = ""
+				}
+			}
+		}
+	}
+	members := make([]workspace.Member, len(config.Members))
+	for i, member := range config.Members {
+		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
+	}
+	stages := make([]workspace.Stage, len(config.Stages))
+	for i, stage := range config.Stages {
+		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
+	}
+	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: topLevel, Members: members, Stages: stages})
+	if err != nil {
+		return runconfig.WorkspaceContract{}, err
+	}
+	capabilities := workspace.CurrentCapabilities(platform)
+	if source.Kind == "git" {
+		probe, probeErr := workspacefs.Verify(context.Background(), source)
+		if probeErr != nil {
+			return runconfig.WorkspaceContract{}, probeErr
+		}
+		capabilities = probe.Capabilities
+	}
+	decisions, err := workspace.Preflight(requirements, capabilities)
+	if err != nil {
+		return runconfig.WorkspaceContract{}, err
+	}
+	return runconfig.WorkspaceContract{Schema: workspace.SchemaV1, Source: source, Requirements: requirements, Decisions: decisions}, nil
 }
 
 func (w *worker) heartbeat(stop <-chan struct{}, done chan<- struct{}) {

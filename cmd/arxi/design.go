@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
@@ -105,7 +104,7 @@ func cmdDesign(args []string) {
 	// title away. Buffered by one because the size is re-read after the signal, so
 	// a second one that arrives while the first is being handled is already stale.
 	resize := make(chan os.Signal, 1)
-	signal.Notify(resize, syscall.SIGWINCH)
+	notifyResize(resize)
 
 	// A signal that would kill the process has to restore the terminal on the way
 	// out. Without this, closing the window or `kill <pid>` leaves the shell in raw
@@ -117,7 +116,7 @@ func cmdDesign(args []string) {
 	// keyboard. 128+n is the exit code a shell reports for a signal, and reporting
 	// the real one keeps `arxi design; echo $?` honest.
 	dying := make(chan os.Signal, 1)
-	signal.Notify(dying, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	notifyTerminalExit(dying)
 	go func() {
 		s := <-dying
 		leave()

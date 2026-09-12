@@ -51,6 +51,7 @@ import (
 	"strings"
 
 	"github.com/michiTrader/arxi/internal/eval"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 )
 
 // DefaultDir is where runs live, relative to the working directory.
@@ -272,11 +273,9 @@ func (s *Store) write(sum *eval.RunSummary) error {
 	}
 	// The rename is a directory operation. Fsyncing the file does not make the
 	// entry that names it durable, so the directory needs its own sync.
-	return fsyncDir(s.dir)
+	return fsdurability.SyncDirectory(s.dir)
 }
 
-// Load reads one run and validates it.
-//
 // Validation happens on the way IN as well as on the way out, because these are
 // text files a human can edit and will: the temptation to fix a status by hand
 // is exactly what Validate's status check exists for, and a run edited to say
@@ -381,19 +380,4 @@ func (s *Store) ids() ([]string, error) {
 // sortIDs orders ids newest first. See List.
 func sortIDs(ids []string) {
 	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
-}
-
-// fsyncDir makes a directory's own metadata durable. Creating and renaming a
-// file are directory operations, and fsyncing the file does not make the entry
-// that names it durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("evalstore: open directory for fsync: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("evalstore: fsync directory %s: %w", dir, err)
-	}
-	return nil
 }

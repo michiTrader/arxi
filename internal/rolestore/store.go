@@ -60,6 +60,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/tool"
 )
 
@@ -349,17 +350,5 @@ func (s *Store) write(name string, body []byte) error {
 	if err := os.Rename(tmpName, s.Path(name)); err != nil {
 		return fmt.Errorf("rolestore: publish role %q: %w", name, err)
 	}
-	return fsyncDir(s.dir)
-}
-
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("rolestore: open %s to sync: %w", dir, err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("rolestore: sync %s: %w", dir, err)
-	}
-	return nil
+	return fsdurability.SyncDirectory(s.dir)
 }

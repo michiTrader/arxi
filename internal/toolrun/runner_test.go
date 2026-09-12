@@ -1,20 +1,51 @@
+//go:build linux
+
 package toolrun
 
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/michiTrader/arxi/internal/tool"
+	"github.com/michiTrader/arxi/internal/workspace"
+	"github.com/michiTrader/arxi/internal/workspacefs"
 )
+
+type testSessions struct {
+	root   string
+	shared bool
+}
+
+func (p testSessions) Provision(_ context.Context, req workspacefs.Request) (workspacefs.Session, error) {
+	root := filepath.Join(p.root, req.Member)
+	if p.shared {
+		root = p.root
+	}
+	if req.Command != nil {
+		return workspacefs.OpenLocalCommandSession(root, req.JobID+"/"+req.Member, *req.Command)
+	}
+	return workspacefs.OpenLocalSession(root, req.JobID+"/"+req.Member)
+}
+func (testSessions) Release(context.Context, workspacefs.Request, workspacefs.Session) error {
+	return nil
+}
 
 func runner(t *testing.T) *Runner {
 	t.Helper()
-	return &Runner{Root: filepath.Join(t.TempDir(), "run")}
+	root := filepath.Join(t.TempDir(), "run")
+	requests := map[string]workspacefs.Request{}
+	for _, member := range []string{"backend", "frontend"} {
+		command := &workspace.CommandProfile{Schema: workspace.CommandSchemaV1, RunnerVersion: "arxi.command.operator-unrestricted/test-v1",
+			Executable: "bash", EnvironmentVersion: workspace.EnvironmentAllowlistV1, Descendants: "process-group",
+			Filesystem: "unrestricted", Network: "unrestricted", OutputLimitBytes: maxOutputBytes}
+		requests[member] = workspacefs.Request{JobID: "test", Member: member, Mode: workspace.ModeCopy,
+			ProfileID: workspace.DirectFilesProfileID, ProfileIdentity: "test-unrestricted", ProvisionerVersion: "test", Command: command}
+	}
+	return &Runner{Sessions: testSessions{root: root}, Requests: requests}
 }
 
 func TestEachMemberGetsItsOwnWorkspaceByDefault(t *testing.T) {
@@ -45,7 +76,8 @@ func TestEachMemberGetsItsOwnWorkspaceByDefault(t *testing.T) {
 
 func TestSharedWorkspaceIsOptInRatherThanTheDefault(t *testing.T) {
 	r := runner(t)
-	r.Shared = true
+	root := t.TempDir()
+	r.Sessions = testSessions{root: root, shared: true}
 	a, err := r.workspaceFor("backend")
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +96,11 @@ func TestSharedWorkspaceIsOptInRatherThanTheDefault(t *testing.T) {
 
 func TestTheSameMemberKeepsTheSameWorkspace(t *testing.T) {
 	r := runner(t)
-	a, _ := r.workspaceFor("backend")
+	a, err := r.workspaceFor("backend")
+	if err != nil {
+		t.Fatalf("opening the first workspace for a repeat call failed: %v\n"+
+			"  the persistence assertion cannot dereference a workspace the platform refused", err)
+	}
 	if err := a.WriteFile("state.txt", []byte("step 1")); err != nil {
 		t.Fatal(err)
 	}
@@ -297,20 +333,15 @@ func TestWritingWithNoContentCreatesAnEmptyFile(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesTheRunButIsNeverAutomatic(t *testing.T) {
+func TestReleaseUsesProvisionerOwnershipInsteadOfDeletingAPath(t *testing.T) {
 	r := runner(t)
 	if _, err := r.RunTool(context.Background(), "backend", "write",
 		map[string]any{"path": "f.txt", "content": "x"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Cleanup(); err != nil {
-		t.Fatalf("Cleanup: %v", err)
+	if err := r.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
 	}
-	if _, err := os.Stat(r.Root); !os.IsNotExist(err) {
-		t.Error("Cleanup left the run directory behind")
-	}
-	// That it is not automatic is asserted by the absence of any finaliser: a
-	// failed run's workspace is the evidence `run why` sends the user to look at,
-	// and a runner that tidied up on its way out would delete the one artefact
-	// worth having.
+	// testSessions deliberately retains its roots. Release delegating rather than
+	// removing an invented runner path is the ownership guarantee under test.
 }

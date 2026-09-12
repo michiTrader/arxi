@@ -17,12 +17,14 @@ import (
 
 	"github.com/michiTrader/arxi/internal/blueprint"
 	"github.com/michiTrader/arxi/internal/exec"
+	"github.com/michiTrader/arxi/internal/fsdurability"
 	"github.com/michiTrader/arxi/internal/job"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
 	"github.com/michiTrader/arxi/internal/runconfig"
 	"github.com/michiTrader/arxi/internal/runread"
 	"github.com/michiTrader/arxi/internal/supervisor"
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 // Lifecycle is the narrow handoff between durable acceptance and a process
@@ -85,7 +87,12 @@ type PreparedSubmission struct {
 	Location       string
 	IdempotencyKey string
 	RequestDigest  job.Digest
-	OnAccepted     func(SubmitResult, string, kernel.Config)
+	// Prepare completes and verifies external prerequisites while the run is still
+	// unpublished. It must be durably restartable because a crash may leave its
+	// side effects behind without a run.started record.
+	Prepare      func(context.Context, string) error
+	AbortPrepare func(context.Context, string) error
+	OnAccepted   func(SubmitResult, string, kernel.Config)
 }
 
 // Submission is an accepted run and its resident lifecycle endpoint.
@@ -119,6 +126,9 @@ type AcceptanceServices struct {
 	Now          func() time.Time
 	DefaultModel string
 	Routes       []runconfig.Route
+	Platform     string
+	Source       workspace.SourceIdentity
+	Capabilities *workspace.Capabilities
 }
 
 // Submit validates and durably accepts one job. Before run.started is confirmed,
@@ -163,7 +173,17 @@ func (s AcceptanceServices) Submit(ctx context.Context, req SubmitRequest) (Subm
 		mode = "sim"
 	}
 	artifact := runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil)
-	digest, err := submissionDigest(actor, bp.Raw, artifact, req.BudgetUSD, req.MaxTurns)
+	legacyDigest, err := submissionDigest(actor, bp.Raw, artifact, req.BudgetUSD, req.MaxTurns)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
+	}
+	artifact, err = s.freezeWorkspace(artifact)
+	if err != nil {
+		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
+	}
+	artifactForDigest := artifact
+	artifactForDigest.RunID = ""
+	digest, err := submissionDigest(actor, bp.Raw, artifactForDigest, req.BudgetUSD, req.MaxTurns)
 	if err != nil {
 		return SubmitResult{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: err}
 	}
@@ -171,19 +191,27 @@ func (s AcceptanceServices) Submit(ctx context.Context, req SubmitRequest) (Subm
 		return SubmitResult{}, &Error{Kind: Conflict, Op: "submit", JobID: id, Cause: errors.New("supplied request digest disagrees with canonical submission")}
 	}
 	if req.IdempotencyKey != "" {
-		bound, err := s.bindSubmission(SubmissionBinding{Key: req.IdempotencyKey, RequestDigest: digest, JobID: job.JobID(id)})
+		bindingDigest := digest
+		// A durable key created before workspace contracts landed keeps naming its
+		// original request. Accepting that exact legacy digest prevents an upgrade
+		// from inventing a second job while the new artifact still freezes the
+		// stronger contract before publication.
+		if req.RequestDigest == "" {
+			bindingDigest = legacyDigest
+		}
+		bound, err := s.bindSubmission(SubmissionBinding{Key: req.IdempotencyKey, RequestDigest: bindingDigest, JobID: job.JobID(id)})
 		if err != nil {
 			return SubmitResult{}, err
 		}
 		id = string(bound.JobID)
-		artifact = runconfig.New(id, mode, bp.SHA, req.Prompt, s.DefaultModel, bp.Config, s.Routes, nil)
+		artifact.RunID = id
 	}
 	prepared := PreparedSubmission{
 		JobID: id, Actor: actor, Blueprint: bp.Raw,
 		Artifact:      artifact,
 		BudgetUSD:     req.BudgetUSD,
 		MaxTurns:      req.MaxTurns,
-		RequestDigest: digest,
+		RequestDigest: "",
 	}
 	submission, err := s.SubmitPrepared(ctx, prepared)
 	return submission.Result, err
@@ -214,6 +242,13 @@ func (s AcceptanceServices) SubmitPrepared(ctx context.Context, req PreparedSubm
 	}
 	if len(req.Blueprint) == 0 || req.Artifact.BlueprintSHA == "" {
 		return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: errors.New("prepared blueprint is required")}
+	}
+	if req.Artifact.WorkspaceContract == nil {
+		var freezeErr error
+		req.Artifact, freezeErr = s.freezeWorkspace(req.Artifact)
+		if freezeErr != nil {
+			return Submission{}, &Error{Kind: InvalidArgument, Op: "submit", JobID: id, Cause: freezeErr}
+		}
 	}
 	blueprintSum := sha256.Sum256(req.Blueprint)
 	if got := hex.EncodeToString(blueprintSum[:]); got != req.Artifact.BlueprintSHA {
@@ -274,18 +309,38 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
+	recoveredPreparation := false
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		if os.IsExist(err) {
-			return s.adoptPublished(id, dir, req)
+			adopted, adoptErr := s.adoptPublished(id, dir, req)
+			if adoptErr == nil {
+				return adopted, nil
+			}
+			if req.Prepare == nil || !recoverableUnpublished(dir) {
+				return result, adoptErr
+			}
+			if prepareErr := req.Prepare(context.Background(), dir); prepareErr != nil {
+				return result, &Error{Kind: StorageUnavailable, Op: "prepare", JobID: id, Cause: prepareErr}
+			}
+			recoveredPreparation = true
+		} else {
+			return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 		}
-		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
 	accepted := false
 	defer func() {
 		if !accepted {
+			if req.AbortPrepare != nil {
+				_ = req.AbortPrepare(context.Background(), dir)
+			}
 			_ = os.RemoveAll(dir)
 		}
 	}()
+	if req.Prepare != nil && !recoveredPreparation {
+		if err := req.Prepare(context.Background(), dir); err != nil {
+			return result, &Error{Kind: StorageUnavailable, Op: "prepare", JobID: id, Cause: err}
+		}
+	}
 	if err := writeSyncedFile(filepath.Join(dir, "blueprint.snapshot.yaml"), req.Blueprint, 0o644); err != nil {
 		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
@@ -338,6 +393,15 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 	}
 	accepted = true
 	return SubmitResult{JobID: id, AcceptedSeq: written[0].Seq, Status: string(kernel.StatusRunning)}, nil
+}
+
+func recoverableUnpublished(dir string) bool {
+	for _, name := range []string{"blueprint.snapshot.yaml", runconfig.FileName, "events.ndjson"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil || !os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s AcceptanceServices) adoptPublished(id, dir string, req PreparedSubmission) (SubmitResult, error) {
@@ -433,12 +497,7 @@ func writeSyncedFile(path string, body []byte, mode os.FileMode) error {
 }
 
 func syncDirectory(dir string) error {
-	opened, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer opened.Close()
-	return opened.Sync()
+	return fsdurability.SyncDirectory(dir)
 }
 
 // Wait observes retained supervisor generations according to a private policy.
@@ -458,6 +517,82 @@ func Wait(ctx context.Context, submission Submission, policy WaitPolicy) (WaitRe
 			return WaitResult{Outcome: result.Outcome, Err: result.Err}, nil
 		}
 	}
+}
+
+// FreezeWorkspace resolves and preflights the immutable workspace contract. CLI
+// composition uses it before deriving concrete pre-accept provisioning work.
+func (s AcceptanceServices) FreezeWorkspace(artifact runconfig.Artifact) (runconfig.Artifact, error) {
+	return s.freezeWorkspace(artifact)
+}
+
+func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runconfig.Artifact, error) {
+	topLevel := workspace.Mode(artifact.Config.Workspace)
+	// ResolveDefaults historically materialized "none" for an omitted declaration.
+	// A member that needs files still carries enough evidence to recognize that old
+	// default; treating it as explicit would turn every pre-Phase-4 writer into an
+	// impossible none request rather than applying ADR-0012's writer default.
+	if topLevel == workspace.ModeNone {
+		for _, member := range artifact.Config.Members {
+			for _, tool := range member.Tools {
+				if tool == "read" || tool == "grep" || tool == "write" || tool == "edit" || tool == "bash" {
+					topLevel = ""
+				}
+			}
+		}
+	}
+	members := make([]workspace.Member, len(artifact.Config.Members))
+	for i, member := range artifact.Config.Members {
+		members[i] = workspace.Member{Name: member.Name, Tools: append([]string(nil), member.Tools...), Stages: append([]string(nil), member.Stages...)}
+	}
+	stages := make([]workspace.Stage, len(artifact.Config.Stages))
+	for i, stage := range artifact.Config.Stages {
+		stages[i] = workspace.Stage{Name: stage.Name, Mode: workspace.Mode(stage.Workspace)}
+	}
+	requirements, err := workspace.Resolve(workspace.ResolutionInput{TopLevel: topLevel, Members: members, Stages: stages})
+	if err != nil {
+		return artifact, fmt.Errorf("resolve workspace requirements: %w", err)
+	}
+	platform := s.Platform
+	if platform == "" {
+		platform = "unknown"
+	}
+	capabilities := workspace.CurrentCapabilities(platform)
+	source := s.Source
+	needsSource := false
+	for _, requirement := range requirements {
+		needsSource = needsSource || requirement.RequiresSource
+	}
+	if s.Capabilities != nil {
+		capabilities = *s.Capabilities
+	} else if needsSource && source.Schema == "" && platform != "simulation" {
+		modes := make([]string, 0, len(requirements))
+		for _, requirement := range requirements {
+			modes = append(modes, string(requirement.Mode))
+		}
+		return artifact, fmt.Errorf("workspace modes %s require source identity and probed capabilities before acceptance", strings.Join(modes, ", "))
+	}
+	decisions, err := workspace.Preflight(requirements, capabilities)
+	if err != nil {
+		return artifact, fmt.Errorf("workspace preflight: %w", err)
+	}
+	if source.Schema == "" {
+		source = workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none",
+			DirtyPolicy: "excluded", UntrackedPolicy: "excluded", IgnoredPolicy: "excluded",
+			SubmodulePolicy: "refused", SymlinkPolicy: "internal-relative-only", SpecialFilePolicy: "refused"}
+	}
+	artifact.WorkspaceContract = &runconfig.WorkspaceContract{Schema: workspace.SchemaV1, Source: source,
+		Requirements: requirements, Decisions: decisions}
+	if len(decisions) > 0 {
+		profile := decisions[0].ProfileIdentity
+		for _, decision := range decisions[1:] {
+			if decision.ProfileIdentity != profile {
+				profile = workspace.MixedProfileIdentity(decisions)
+				break
+			}
+		}
+		artifact.WorkspaceProfileID = profile
+	}
+	return artifact, nil
 }
 
 func (s AcceptanceServices) newID() string {

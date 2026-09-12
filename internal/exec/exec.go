@@ -44,6 +44,12 @@ type Log interface {
 	// runner does not assign it either, for the same reason. Only the log does.
 	Append(events []kernel.Event) ([]kernel.Event, error)
 
+	// AppendIfSeq atomically appends only at the confirmed version the caller
+	// verified. Exact authorization consumption and its external start boundary
+	// must share this operation; two separate appends would leave a crash gap in
+	// which authority was consumed without started work, or vice versa.
+	AppendIfSeq(expectedSeq int64, events []kernel.Event) ([]kernel.Event, error)
+
 	// Read exposes confirmed events for durable work recovery. The runner rebuilds
 	// prepared/started/finished state from these records before dispatching.
 	Read(fromSeq, toSeq int64) ([]kernel.Event, error)
@@ -202,6 +208,9 @@ type Runner struct {
 
 	// Dispatches is the optional fenced registration and receipt journal adapter.
 	Dispatches DispatchCoordinator
+
+	// Authorization freezes versions and expiry used to bind an ask suspension.
+	Authorization AuthorizationConfig
 
 	// Now supplies the timestamp stamped onto events that arrive without one.
 	//
@@ -573,6 +582,16 @@ func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, resumin
 			}(i)
 			continue
 		}
+		if _, resume := work[i].Effect.(kernel.ResumeAuthorization); resume {
+			started++
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				effect := work[i].Effect.(kernel.ResumeAuthorization)
+				outcomes[i].events, outcomes[i].err = r.resumeAuthorization(ctx, work[i], effect)
+			}(i)
+			continue
+		}
 		start := r.progressEvent(kernel.ExecWorkStarted, map[string]any{"work_id": work[i].ID}, work[i].Source)
 		if _, err := r.Log.Append(r.stamp([]kernel.Event{start})); err != nil {
 			startErr = fmt.Errorf("append start of %s: %w", work[i].ID, err)
@@ -587,6 +606,10 @@ func (r *Runner) runDurableIndependent(ctx context.Context, work []Work, resumin
 					outcomes[i].err = fmt.Errorf("effect %T panicked: %v", work[i].Effect, p)
 				}
 			}()
+			if effect, ok := work[i].Effect.(kernel.ResumeAuthorization); ok {
+				outcomes[i].events, outcomes[i].err = r.resumeAuthorization(ctx, work[i], effect)
+				return
+			}
 			if effect, ok := work[i].Effect.(kernel.SpawnTurn); ok {
 				if turnExecutor, ok := r.Executor.(TurnExecutor); ok {
 					if gate, gated := r.Executor.(NativeTurnGate); !gated || gate.NativeTurnEnabled(effect) {
@@ -927,6 +950,8 @@ func (r *Runner) dispatch(ctx context.Context, e kernel.Effect) ([]kernel.Event,
 		return r.Executor.CallTool(ctx, v)
 	case kernel.AskHuman:
 		return r.Executor.AskHuman(ctx, v)
+	case kernel.ResumeAuthorization:
+		return r.resumeAuthorization(ctx, Work{Effect: v}, v)
 	default:
 		return nil, fmt.Errorf("unhandled independent effect %T: it was added to "+
 			"kernel.Effect but not to exec.dispatch, so the reducer's decision "+

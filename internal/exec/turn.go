@@ -7,12 +7,39 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/turn"
 )
 
-const maxNativeTurnRounds = 64
+const (
+	maxNativeTurnRounds           = 64
+	authorizationSuspensionSchema = "arxi.authorization-suspension/v1"
+)
+
+// AuthorizationConfig freezes every execution-context version included in an
+// exact action grant. Empty values disable live exact authorization so legacy
+// artifacts can replay without gaining authority they never recorded.
+type AuthorizationConfig struct {
+	ToolSchemaVersion  string
+	PolicyVersion      string
+	WorkspaceProfileID string
+	TTLMS              int64
+}
+
+// TurnToolPolicyResolver separates a policy decision from external dispatch.
+// The runner must know ask before it writes exec.work_started for the tool.
+type TurnToolPolicyResolver interface {
+	ResolveTurnToolPolicy(kernel.SpawnTurn, turn.ToolCall) string
+}
+
+// AuthorizedTurnToolExecutor dispatches only after the runner has atomically
+// consumed an exact grant. It must not resolve policy again: the grant, rather
+// than a mutable lookup, is the authority for this call.
+type AuthorizedTurnToolExecutor interface {
+	ExecuteAuthorizedTurnTool(context.Context, kernel.SpawnTurn, turn.ToolCall) (TurnToolOutcome, error)
+}
 
 // TurnExecutor is the optional provider-neutral seam for native tool loops.
 // Executor remains supported for text-only implementations; when this interface
@@ -54,12 +81,38 @@ type TurnEntry struct {
 
 type turnChild struct {
 	ID           string
+	ParentWorkID string
 	Kind         string
 	Slot         string
 	PreparedJSON string
 	Started      bool
 	Status       string
 	ResultJSON   string
+}
+
+type authorizationSuspension struct {
+	Schema             string           `json:"schema"`
+	AuthorizationID    string           `json:"authorization_id"`
+	SuspensionID       string           `json:"suspension_id"`
+	JobID              string           `json:"job_id"`
+	RunID              string           `json:"run_id"`
+	RequesterPrincipal string           `json:"requester_principal"`
+	ParentWorkID       string           `json:"parent_work_id"`
+	SourceSeq          int64            `json:"source_seq"`
+	Round              int              `json:"round"`
+	CallIndex          int              `json:"call_index"`
+	Effect             kernel.SpawnTurn `json:"effect"`
+	Request            turn.Request     `json:"request"`
+	Trace              []TurnEntry      `json:"trace"`
+	Seen               []turn.ToolCall  `json:"seen"`
+	PendingCalls       []turn.ToolCall  `json:"pending_calls"`
+	Call               turn.ToolCall    `json:"call"`
+	ChildID            string           `json:"child_id"`
+	ChildSlot          string           `json:"child_slot"`
+	ToolSchemaVersion  string           `json:"tool_schema_version"`
+	PolicyVersion      string           `json:"policy_version"`
+	WorkspaceProfileID string           `json:"workspace_profile_id"`
+	ActionDigest       string           `json:"action_digest"`
 }
 
 type durableTurnProgress struct {
@@ -115,9 +168,32 @@ func (r *Runner) runDurableTurn(ctx context.Context, w Work, e kernel.SpawnTurn,
 		}
 		req.Messages = append(req.Messages, turn.Message{Role: turn.RoleAssistant, Content: resp.Content})
 		resultBlocks := make([]turn.ContentBlock, 0, len(calls))
-		continueLoop := true
-		for _, call := range calls {
-			outcome, err := r.runToolChild(ctx, w, e, round, call, x, &progress)
+		for callIndex, call := range calls {
+			policy := "allow"
+			if resolver, ok := x.(TurnToolPolicyResolver); ok {
+				policy = resolver.ResolveTurnToolPolicy(e, call)
+			}
+			if policy == "ask" {
+				if !r.exactAuthorizationEnabled() {
+					outcome, err := r.runStoppedToolChild(ctx, w, e, round, call, x, &progress)
+					if err != nil {
+						return nil, err
+					}
+					entry := TurnToolEntry{Call: call, Outcome: outcome}
+					trace = append(trace, TurnEntry{Tool: &entry})
+					return x.FinishTurn(e, trace)
+				}
+				if err := r.suspendAuthorization(w, e, round, callIndex, req, trace, seen, calls, call, &progress); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			}
+			var outcome TurnToolOutcome
+			if policy == "deny" {
+				outcome, err = r.runStoppedToolChild(ctx, w, e, round, call, x, &progress)
+			} else {
+				outcome, err = r.runToolChild(ctx, w, e, round, call, x, &progress)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -127,17 +203,12 @@ func (r *Runner) runDurableTurn(ctx context.Context, w Work, e kernel.SpawnTurn,
 			resultBlocks = append(resultBlocks, turn.ContentBlock{Type: turn.BlockToolResult, ToolResult: &result})
 			seen[call.ID] = call
 			if !outcome.Continue {
-				continueLoop = false
-				break
+				events, err := x.FinishTurn(e, trace)
+				if err != nil {
+					return nil, NotDispatched(fmt.Errorf("finish interrupted native turn for %s: %w", e.Agent, err))
+				}
+				return events, nil
 			}
-		}
-		if !continueLoop {
-
-			events, err := x.FinishTurn(e, trace)
-			if err != nil {
-				return nil, NotDispatched(fmt.Errorf("finish interrupted native turn for %s: %w", e.Agent, err))
-			}
-			return events, nil
 		}
 		req.Messages = append(req.Messages, turn.Message{Role: turn.RoleTool, Content: resultBlocks})
 	}
@@ -335,6 +406,441 @@ func (r *Runner) runModelChild(ctx context.Context, parent Work, round int, req 
 	return resp, nil
 }
 
+func (r *Runner) exactAuthorizationEnabled() bool {
+	cfg := r.Authorization
+	return r.JobID != "" && r.RunID != "" && cfg.ToolSchemaVersion != "" && cfg.PolicyVersion != "" &&
+		cfg.WorkspaceProfileID != "" && cfg.TTLMS > 0 && r.Now != nil
+}
+
+func (r *Runner) resumeAuthorization(ctx context.Context, resumeWork Work, effect kernel.ResumeAuthorization) ([]kernel.Event, error) {
+	events, err := r.Log.Read(1, 0)
+	if err != nil {
+		return nil, NotDispatched(fmt.Errorf("read exact authorization history: %w", err))
+	}
+	if len(events) == 0 || events[len(events)-1].Seq <= 0 {
+		return nil, NotDispatched(fmt.Errorf("authorization %s has no confirmed history", effect.AuthorizationID))
+	}
+	verifiedSeq := events[len(events)-1].Seq
+	state, _ := kernel.Fold(kernel.State{}, events, r.Config)
+	a := state.Authorization(effect.AuthorizationID)
+	if a == nil || a.Schema != "arxi.authorization/v1" || a.SuspensionID != effect.SuspensionID ||
+		a.ActionDigest != effect.ActionDigest || a.Decision != "granted" || a.GrantEventID == "" {
+		return nil, NotDispatched(fmt.Errorf("authorization %s is not a current exact grant", effect.AuthorizationID))
+	}
+	var suspensionJSON, suspensionDigest string
+	for _, event := range events {
+		if event.Type == kernel.ExecWorkPrepared && event.Str("child_kind") == "authorization" {
+			var candidate authorizationSuspension
+			if json.Unmarshal([]byte(event.Str("request_json")), &candidate) == nil && candidate.SuspensionID == effect.SuspensionID {
+				if suspensionJSON != "" {
+					return nil, NotDispatched(fmt.Errorf("authorization %s has duplicate suspension records", effect.AuthorizationID))
+				}
+				suspensionJSON, suspensionDigest = event.Str("request_json"), event.Str("request_digest")
+			}
+		}
+	}
+	if suspensionJSON == "" {
+		return nil, NotDispatched(fmt.Errorf("authorization %s has no exact suspension bytes", effect.AuthorizationID))
+	}
+	if requestDigest([]byte(suspensionJSON)) != suspensionDigest {
+		return nil, NotDispatched(fmt.Errorf("authorization %s suspension bytes do not match their persisted digest", effect.AuthorizationID))
+	}
+	var suspension authorizationSuspension
+	if err := json.Unmarshal([]byte(suspensionJSON), &suspension); err != nil {
+		return nil, NotDispatched(fmt.Errorf("decode authorization suspension: %w", err))
+	}
+	if err := r.validateAuthorizationSuspension(*a, suspension); err != nil {
+		return nil, NotDispatched(err)
+	}
+	var child turnChild
+	foundChild := false
+	for _, event := range events {
+		if event.Str("work_id") != suspension.ChildID {
+			continue
+		}
+		switch event.Type {
+		case kernel.ExecWorkPrepared:
+			child = turnChild{ID: suspension.ChildID, ParentWorkID: suspension.ParentWorkID,
+				Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), PreparedJSON: event.Str("request_json")}
+			foundChild = true
+		case kernel.ExecWorkStarted:
+			child.Started = true
+		case kernel.ExecWorkFinished:
+			child.Status, child.ResultJSON = event.Str("status"), event.Str("result_json")
+		}
+	}
+	prepared, _ := json.Marshal(suspension.Call)
+	if !foundChild || child.Kind != "tool" || child.Slot != suspension.ChildSlot || child.PreparedJSON != string(prepared) {
+		return nil, NotDispatched(fmt.Errorf("authorization %s exact child bytes or identity changed", a.ID))
+	}
+	if child.Status == "completed" {
+		return r.continueAuthorization(ctx, resumeWork, suspension, child)
+	}
+	if a.ConsumingWorkID != "" && a.ConsumingWorkID != child.ID {
+		return nil, NotDispatched(fmt.Errorf("authorization %s was consumed by different work %s", a.ID, a.ConsumingWorkID))
+	}
+	if a.ConsumingWorkID != "" && !child.Started {
+		return nil, NotDispatched(fmt.Errorf("authorization %s consumption has no matching started child", a.ID))
+	}
+	if child.Started {
+		if child.Status == "unknown" {
+			return nil, fmt.Errorf("%w: authorized child %s has a durable unknown outcome", ErrUnknownWork, child.ID)
+		}
+		meta := childMetadata(r, &child, "tool", WorkNonIdempotent, false)
+		if r.Dispatches != nil {
+			receipt, found, lookupErr := r.Dispatches.Receipt(meta)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if found {
+				var outcome TurnToolOutcome
+				if err := json.Unmarshal(receipt.CanonicalOutcome, &outcome); err != nil {
+					return nil, NotDispatched(fmt.Errorf("decode authorized tool receipt %s: %w", child.ID, err))
+				}
+				if err := validateToolOutcome(suspension.Call, outcome); err != nil {
+					return nil, NotDispatched(err)
+				}
+				if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, "completed", receipt.CanonicalOutcome, nil); err != nil {
+					return nil, err
+				}
+				child.Status, child.ResultJSON = "completed", string(receipt.CanonicalOutcome)
+				return r.continueAuthorization(ctx, resumeWork, suspension, child)
+			}
+		}
+		if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, "unknown", nil,
+			fmt.Errorf("process stopped after authorized dispatch began and before a terminal outcome was committed")); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: authorized child %s started without a committed outcome", ErrUnknownWork, child.ID)
+	}
+	authorized, ok := r.Executor.(AuthorizedTurnToolExecutor)
+	if !ok {
+		return nil, NotDispatched(fmt.Errorf("executor cannot dispatch exact authorized native tools"))
+	}
+	if a.ConsumingWorkID != "" {
+		return nil, NotDispatched(fmt.Errorf("authorization %s was already consumed", a.ID))
+	}
+	if err := r.register(childMetadata(r, &child, "tool", WorkNonIdempotent, false)); err != nil {
+		return nil, NotDispatched(fmt.Errorf("register authorized tool dispatch %s: %w", child.ID, err))
+	}
+	if r.Clock.NowMs() > 0 {
+		expires, parseErr := time.Parse(time.RFC3339Nano, a.ExpiresAt)
+		if parseErr != nil {
+			return nil, NotDispatched(fmt.Errorf("authorization %s has invalid expiry: %w", a.ID, parseErr))
+		}
+		if r.Now == nil {
+			return nil, NotDispatched(fmt.Errorf("authorization %s cannot verify live expiry without an injected clock", a.ID))
+		}
+		now, parseErr := time.Parse(time.RFC3339Nano, r.Now())
+		if parseErr != nil {
+			return nil, NotDispatched(fmt.Errorf("authorization %s current time is invalid: %w", a.ID, parseErr))
+		}
+		if !now.Before(expires) {
+			expired := kernel.Event{ID: "authorization-expired-" + a.ID, Type: kernel.AuthorizationExpired,
+				Ts: now.UTC().Format(time.RFC3339Nano), Source: kernel.SourceRuntime, Payload: map[string]any{
+					"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+					"expired_at": a.ExpiresAt,
+				}}
+			if _, err := r.Log.AppendIfSeq(verifiedSeq, r.stamp([]kernel.Event{expired})); err != nil {
+				return nil, NotDispatched(fmt.Errorf("materialize expired authorization %s: %w", a.ID, err))
+			}
+			return nil, NotDispatched(fmt.Errorf("authorization %s expired before consumption", a.ID))
+		}
+	}
+	consumed := kernel.Event{ID: "authorization-consumed-" + a.ID, Type: kernel.AuthorizationConsumed,
+		Source: kernel.SourceRuntime, Actor: suspension.Effect.Agent, Payload: map[string]any{
+			"schema": a.Schema, "authorization_id": a.ID, "action_digest": a.ActionDigest,
+			"grant_event_id": a.GrantEventID, "work_id": child.ID,
+		}}
+	started := r.progressEvent(kernel.ExecWorkStarted, map[string]any{
+		"work_id": child.ID, "parent_work_id": suspension.ParentWorkID, "work_scope": "turn_child",
+	}, resumeWork.Source)
+	if _, err := r.Log.AppendIfSeq(verifiedSeq, r.stamp([]kernel.Event{consumed, started})); err != nil {
+		return nil, NotDispatched(fmt.Errorf("consume authorization %s: %w", a.ID, err))
+	}
+	child.Started = true
+	outcome, callErr := authorized.ExecuteAuthorizedTurnTool(ctx, suspension.Effect, suspension.Call)
+	if callErr == nil {
+		callErr = validateToolOutcome(suspension.Call, outcome)
+	}
+	if callErr != nil {
+		status := "unknown"
+		if errors.Is(callErr, ErrNotDispatched) {
+			status = "failed"
+		}
+		if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, status, nil, callErr); err != nil {
+			return nil, err
+		}
+		if status == "unknown" {
+			return nil, fmt.Errorf("%w: authorized tool call %s: %v", ErrUnknownWork, child.ID, callErr)
+		}
+		return nil, callErr
+	}
+	body, err := json.Marshal(outcome)
+	if err != nil {
+		return nil, err
+	}
+	meta := childMetadata(r, &child, "tool", WorkNonIdempotent, false)
+	if err := r.recordReceipt(meta, &DispatchReceipt{Status: OutcomeSucceeded, CanonicalOutcome: body}); err != nil {
+		return nil, fmt.Errorf("record authorized tool receipt %s: %w", child.ID, err)
+	}
+	if err := r.finishTurnChild(Work{ID: suspension.ParentWorkID, Source: resumeWork.Source}, &child, "completed", body, nil); err != nil {
+		return nil, err
+	}
+	child.Status, child.ResultJSON = "completed", string(body)
+	return r.continueAuthorization(ctx, resumeWork, suspension, child)
+}
+
+func (r *Runner) validateAuthorizationSuspension(a kernel.Authorization, s authorizationSuspension) error {
+	if s.Schema != authorizationSuspensionSchema || s.AuthorizationID != a.ID || s.SuspensionID != a.SuspensionID ||
+		s.JobID != r.JobID || s.RunID != r.RunID || s.RequesterPrincipal != a.RequesterPrincipal ||
+		s.ParentWorkID != a.ParentWorkID || s.Call.ID != a.ProviderCallID || s.Call.Name != a.Tool ||
+		s.Call.ArgumentDigest != a.ArgumentDigest || s.ToolSchemaVersion != a.ToolSchemaVersion ||
+		s.PolicyVersion != a.PolicyVersion || s.WorkspaceProfileID != a.WorkspaceProfileID ||
+		s.ActionDigest != a.ActionDigest || r.Authorization.ToolSchemaVersion != a.ToolSchemaVersion ||
+		r.Authorization.PolicyVersion != a.PolicyVersion || r.Authorization.WorkspaceProfileID != a.WorkspaceProfileID {
+		return fmt.Errorf("authorization %s bindings changed from the persisted exact suspension", a.ID)
+	}
+	if len(s.PendingCalls) == 0 || s.CallIndex < 0 || s.CallIndex >= len(s.PendingCalls) ||
+		s.PendingCalls[s.CallIndex].ID != s.Call.ID || s.PendingCalls[s.CallIndex].Name != s.Call.Name ||
+		s.PendingCalls[s.CallIndex].ArgumentDigest != s.Call.ArgumentDigest {
+		return fmt.Errorf("authorization %s provider call order changed in the exact suspension", a.ID)
+	}
+	if err := turn.ValidateToolCall(s.Call); err != nil {
+		return fmt.Errorf("authorization %s call is invalid: %w", a.ID, err)
+	}
+	digest := exactActionDigest(s.JobID, s.RunID, s.RequesterPrincipal, s.ParentWorkID, s.Call.ID,
+		s.Call.Name, s.Call.ArgumentDigest, s.ToolSchemaVersion, s.PolicyVersion, s.WorkspaceProfileID)
+	if digest != a.ActionDigest {
+		return fmt.Errorf("authorization %s action digest does not match exact suspension bytes", a.ID)
+	}
+	return nil
+}
+
+func (r *Runner) continueAuthorization(ctx context.Context, resumeWork Work, s authorizationSuspension, child turnChild) ([]kernel.Event, error) {
+	var outcome TurnToolOutcome
+	if err := json.Unmarshal([]byte(child.ResultJSON), &outcome); err != nil {
+		return nil, NotDispatched(fmt.Errorf("decode authorized tool outcome %s: %w", child.ID, err))
+	}
+	if err := validateToolOutcome(s.Call, outcome); err != nil {
+		return nil, NotDispatched(err)
+	}
+	trace := append([]TurnEntry(nil), s.Trace...)
+	seen := make(map[string]turn.ToolCall, len(s.Seen)+1)
+	for _, call := range s.Seen {
+		seen[call.ID] = call
+	}
+	entry := TurnToolEntry{Call: s.Call, Outcome: outcome}
+	trace = append(trace, TurnEntry{Tool: &entry})
+	seen[s.Call.ID] = s.Call
+	results := []turn.ContentBlock{{Type: turn.BlockToolResult, ToolResult: &outcome.Result}}
+	x, ok := r.Executor.(TurnExecutor)
+	if !ok {
+		return nil, NotDispatched(fmt.Errorf("executor cannot continue exact native turn"))
+	}
+	progress, err := r.loadTurnProgress(Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source})
+	if err != nil {
+		return nil, err
+	}
+	for i := s.CallIndex + 1; i < len(s.PendingCalls); i++ {
+		call := s.PendingCalls[i]
+		policy := "allow"
+		if resolver, ok := x.(TurnToolPolicyResolver); ok {
+			policy = resolver.ResolveTurnToolPolicy(s.Effect, call)
+		}
+		if policy == "ask" {
+			if err := r.suspendAuthorization(Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, s.Effect,
+				s.Round, i, s.Request, trace, seen, s.PendingCalls, call, &progress); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		var next TurnToolOutcome
+		if policy == "deny" {
+			next, err = r.runStoppedToolChild(ctx, Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, s.Effect, s.Round, call, x, &progress)
+		} else {
+			next, err = r.runToolChild(ctx, Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, s.Effect, s.Round, call, x, &progress)
+		}
+		if err != nil {
+			return nil, err
+		}
+		nextEntry := TurnToolEntry{Call: call, Outcome: next}
+		trace = append(trace, TurnEntry{Tool: &nextEntry})
+		seen[call.ID] = call
+		results = append(results, turn.ContentBlock{Type: turn.BlockToolResult, ToolResult: &next.Result})
+		if !next.Continue {
+			return x.FinishTurn(s.Effect, trace)
+		}
+	}
+	req := s.Request
+	req.Messages = append(req.Messages, turn.Message{Role: turn.RoleTool, Content: results})
+	for round := s.Round + 1; round < maxNativeTurnRounds; round++ {
+		resp, err := r.runModelChild(ctx, Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, round, req, x, &progress)
+		if err != nil {
+			return nil, err
+		}
+		trace = append(trace, TurnEntry{Response: &resp})
+		calls, err := responseToolCalls(resp)
+		if err != nil {
+			return nil, NotDispatched(err)
+		}
+		if len(calls) == 0 {
+			return x.FinishTurn(s.Effect, trace)
+		}
+		if err := validateRoundCalls(calls, seen); err != nil {
+			return nil, NotDispatched(err)
+		}
+		req.Messages = append(req.Messages, turn.Message{Role: turn.RoleAssistant, Content: resp.Content})
+		resultBlocks := make([]turn.ContentBlock, 0, len(calls))
+		for i, call := range calls {
+			policy := "allow"
+			if resolver, ok := x.(TurnToolPolicyResolver); ok {
+				policy = resolver.ResolveTurnToolPolicy(s.Effect, call)
+			}
+			if policy == "ask" {
+				if err := r.suspendAuthorization(Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, s.Effect,
+					round, i, req, trace, seen, calls, call, &progress); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			}
+			var next TurnToolOutcome
+			if policy == "deny" {
+				next, err = r.runStoppedToolChild(ctx, Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, s.Effect, round, call, x, &progress)
+			} else {
+				next, err = r.runToolChild(ctx, Work{ID: s.ParentWorkID, SourceSeq: s.SourceSeq, Source: resumeWork.Source}, s.Effect, round, call, x, &progress)
+			}
+			if err != nil {
+				return nil, err
+			}
+			nextEntry := TurnToolEntry{Call: call, Outcome: next}
+			trace = append(trace, TurnEntry{Tool: &nextEntry})
+			seen[call.ID] = call
+			resultBlocks = append(resultBlocks, turn.ContentBlock{Type: turn.BlockToolResult, ToolResult: &next.Result})
+			if !next.Continue {
+				return x.FinishTurn(s.Effect, trace)
+			}
+		}
+		req.Messages = append(req.Messages, turn.Message{Role: turn.RoleTool, Content: resultBlocks})
+	}
+	return nil, NotDispatched(fmt.Errorf("native turn exceeded %d model rounds after authorization", maxNativeTurnRounds))
+}
+
+func (r *Runner) suspendAuthorization(parent Work, effect kernel.SpawnTurn, round, callIndex int, req turn.Request, trace []TurnEntry, seen map[string]turn.ToolCall, calls []turn.ToolCall, call turn.ToolCall, progress *durableTurnProgress) error {
+	cfg := r.Authorization
+	if r.JobID == "" || r.RunID == "" || cfg.ToolSchemaVersion == "" || cfg.PolicyVersion == "" || cfg.WorkspaceProfileID == "" || cfg.TTLMS <= 0 {
+		return NotDispatched(fmt.Errorf("exact authorization bindings are absent; legacy asks cannot resume live"))
+	}
+	prepared, err := json.Marshal(call)
+	if err != nil {
+		return NotDispatched(err)
+	}
+	slot := fmt.Sprintf("tool/%d/%s", round, call.ID)
+	childID := turnChildID(parent.ID, slot+"/"+call.Name+"/"+call.ArgumentDigest, string(prepared))
+	if _, err := r.ensureTurnChild(parent, childID, "tool", slot, string(prepared), progress); err != nil {
+		return err
+	}
+	authorizationID := "authorization-" + childID[len("work-"):]
+	suspensionID := "suspension-" + childID[len("work-"):]
+	actionDigest := exactActionDigest(r.JobID, r.RunID, "agent:"+effect.Agent, parent.ID, call.ID, call.Name,
+		call.ArgumentDigest, cfg.ToolSchemaVersion, cfg.PolicyVersion, cfg.WorkspaceProfileID)
+	orderedSeen := make([]turn.ToolCall, 0, len(seen))
+	for _, entry := range trace {
+		if entry.Tool != nil {
+			orderedSeen = append(orderedSeen, entry.Tool.Call)
+		}
+	}
+	suspension := authorizationSuspension{
+		Schema: authorizationSuspensionSchema, AuthorizationID: authorizationID, SuspensionID: suspensionID,
+		JobID: r.JobID, RunID: r.RunID, RequesterPrincipal: "agent:" + effect.Agent,
+		ParentWorkID: parent.ID, SourceSeq: parent.SourceSeq, Round: round, CallIndex: callIndex,
+		Effect: effect, Request: req, Trace: trace, Seen: orderedSeen, PendingCalls: calls, Call: call,
+		ChildID: childID, ChildSlot: slot, ToolSchemaVersion: cfg.ToolSchemaVersion,
+		PolicyVersion: cfg.PolicyVersion, WorkspaceProfileID: cfg.WorkspaceProfileID, ActionDigest: actionDigest,
+	}
+	body, err := json.Marshal(suspension)
+	if err != nil {
+		return NotDispatched(err)
+	}
+	suspensionWork := "authorization-suspension-" + childID[len("work-"):]
+	if existing := progress.bySlot["authorization/"+call.ID]; existing != nil {
+		if existing.ID != suspensionWork || existing.PreparedJSON != string(body) {
+			return NotDispatched(fmt.Errorf("authorization suspension %s changed after it was prepared", suspensionID))
+		}
+		return nil
+	}
+	metaChild := &turnChild{ID: suspensionWork, ParentWorkID: parent.ID, Kind: "authorization", Slot: "authorization/" + call.ID, PreparedJSON: string(body)}
+	meta := childMetadata(r, metaChild, "authorization", WorkNonIdempotent, false)
+	preparedEvent := r.progressEvent(kernel.ExecWorkPrepared, map[string]any{
+		"work_id": suspensionWork, "parent_work_id": parent.ID, "work_scope": "turn_child",
+		"source_seq": parent.SourceSeq, "child_kind": "authorization", "child_slot": metaChild.Slot,
+		"request_json": string(body), "work_class": string(meta.WorkClass), "dispatch_key": meta.DispatchKey,
+		"request_digest": meta.RequestDigest, "provider": meta.Provider,
+	}, parent.Source)
+	now := r.Now
+	if now == nil {
+		return NotDispatched(fmt.Errorf("exact authorization requires an injected timestamp"))
+	}
+	requestedAt, err := time.Parse(time.RFC3339Nano, now())
+	if err != nil {
+		return NotDispatched(fmt.Errorf("parse authorization timestamp: %w", err))
+	}
+	expires := requestedAt.Add(time.Duration(cfg.TTLMS) * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	inboxID := "inbox-authorization-" + childID[len("work-"):12+len("work-")]
+	requestEvent := kernel.Event{ID: "authorization-requested-" + authorizationID, Type: kernel.AuthorizationRequested,
+		Ts: requestedAt.UTC().Format(time.RFC3339Nano), Source: kernel.SourceRuntime, Actor: effect.Agent, Payload: map[string]any{
+			"schema": "arxi.authorization/v1", "authorization_id": authorizationID, "inbox_id": inboxID,
+			"requester_principal": suspension.RequesterPrincipal, "suspension_id": suspensionID,
+			"parent_work_id": parent.ID, "provider_call_id": call.ID, "tool": call.Name,
+			"argument_digest": call.ArgumentDigest, "action_digest": actionDigest,
+			"tool_schema_version": cfg.ToolSchemaVersion, "policy_version": cfg.PolicyVersion,
+			"workspace_profile_id": cfg.WorkspaceProfileID, "expires_at": expires, "after_ms": cfg.TTLMS,
+		}}
+	if _, err := r.Log.Append(r.stamp([]kernel.Event{preparedEvent, requestEvent})); err != nil {
+		return fmt.Errorf("persist exact authorization suspension %s: %w", suspensionID, err)
+	}
+	progress.byID[suspensionWork], progress.bySlot[metaChild.Slot] = metaChild, metaChild
+	return nil
+}
+
+func (r *Runner) runStoppedToolChild(ctx context.Context, parent Work, effect kernel.SpawnTurn, round int, call turn.ToolCall, x TurnExecutor, progress *durableTurnProgress) (TurnToolOutcome, error) {
+	if err := turn.ValidateToolCall(call); err != nil {
+		return TurnToolOutcome{}, NotDispatched(err)
+	}
+	prepared, err := json.Marshal(call)
+	if err != nil {
+		return TurnToolOutcome{}, NotDispatched(err)
+	}
+	slot := fmt.Sprintf("tool/%d/%s", round, call.ID)
+	id := turnChildID(parent.ID, slot+"/"+call.Name+"/"+call.ArgumentDigest, string(prepared))
+	child, err := r.ensureTurnChild(parent, id, "tool", slot, string(prepared), progress)
+	if err != nil {
+		return TurnToolOutcome{}, err
+	}
+	if child.Status == "completed" {
+		var outcome TurnToolOutcome
+		if err := json.Unmarshal([]byte(child.ResultJSON), &outcome); err != nil {
+			return TurnToolOutcome{}, err
+		}
+		return outcome, validateToolOutcome(call, outcome)
+	}
+	outcome, err := x.ExecuteTurnTool(ctx, effect, call)
+	if err != nil {
+		return TurnToolOutcome{}, err
+	}
+	if err := validateToolOutcome(call, outcome); err != nil {
+		return TurnToolOutcome{}, NotDispatched(err)
+	}
+	body, err := json.Marshal(outcome)
+	if err != nil {
+		return TurnToolOutcome{}, err
+	}
+	if err := r.finishTurnChild(parent, child, "completed", body, nil); err != nil {
+		return TurnToolOutcome{}, err
+	}
+	return outcome, nil
+}
+
 func (r *Runner) runToolChild(ctx context.Context, parent Work, effect kernel.SpawnTurn, round int, call turn.ToolCall, x TurnExecutor, progress *durableTurnProgress) (TurnToolOutcome, error) {
 	if err := turn.ValidateToolCall(call); err != nil {
 		return TurnToolOutcome{}, NotDispatched(err)
@@ -458,7 +964,7 @@ func (r *Runner) loadTurnProgress(parent Work) (durableTurnProgress, error) {
 			if id == "" || event.Str("work_scope") != "turn_child" {
 				continue
 			}
-			child := &turnChild{ID: id, Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), PreparedJSON: event.Str("request_json")}
+			child := &turnChild{ID: id, ParentWorkID: event.Str("parent_work_id"), Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), PreparedJSON: event.Str("request_json")}
 			if old := out.bySlot[child.Slot]; old != nil && (old.ID != child.ID || old.PreparedJSON != child.PreparedJSON) {
 				return out, fmt.Errorf("native turn slot %s has conflicting prepared identities", child.Slot)
 			}
@@ -484,7 +990,7 @@ func (r *Runner) ensureTurnChild(parent Work, id, kind, slot, prepared string, p
 		}
 		return existing, nil
 	}
-	child := &turnChild{ID: id, Kind: kind, Slot: slot, PreparedJSON: prepared}
+	child := &turnChild{ID: id, ParentWorkID: parent.ID, Kind: kind, Slot: slot, PreparedJSON: prepared}
 	provider, class, honors := "external", WorkNonIdempotent, false
 	if classifier, ok := r.Executor.(TurnDispatchClassifier); ok {
 		if kind == "model" {
