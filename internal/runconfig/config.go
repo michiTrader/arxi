@@ -299,8 +299,10 @@ func Validate(a Artifact) error {
 			if err := workspace.ValidateRequirement(requirement); err != nil {
 				return err
 			}
-			if decision := a.WorkspaceContract.Decisions[i]; decision.Schema != workspace.SchemaV1 || decision.Member != requirement.Member || decision.ProfileID != requirement.ProfileID || decision.Platform == "" || decision.CapabilityVersion == "" || decision.ProvisionerVersion == "" {
-				return fmt.Errorf("workspace platform decision for member %q does not bind its frozen requirement", requirement.Member)
+			decision := a.WorkspaceContract.Decisions[i]
+			if decision.Schema != workspace.SchemaV1 || decision.Member != requirement.Member || decision.ProfileID != requirement.ProfileID ||
+				decision.ProfileIdentity == "" || decision.Platform == "" || decision.CapabilityVersion == "" || decision.ProvisionerVersion == "" {
+				return fmt.Errorf("workspace platform decision for member %q does not bind its frozen requirement and exact profile identity", requirement.Member)
 			}
 		}
 	}
