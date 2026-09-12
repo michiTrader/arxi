@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -25,20 +26,32 @@ func TestPreflightRefusesUnsupportedProcessGuarantees(t *testing.T) {
 }
 
 func TestCurrentLinuxAndWindowsCapabilitiesReportOnlyProvenGuarantees(t *testing.T) {
-	for _, platform := range []string{"linux", "windows"} {
-		capabilities := CurrentCapabilities(platform)
+	for _, tc := range []struct {
+		platform string
+		profiles []string
+	}{
+		{platform: "windows", profiles: []string{NoToolsProfileID}},
+		{platform: "linux", profiles: []string{NoToolsProfileID, DirectFilesProfileID}},
+	} {
+		capabilities := CurrentCapabilities(tc.platform)
 		if err := ValidateCapabilities(capabilities); err != nil {
-			t.Fatalf("%s current capabilities are internally invalid: an adapter cannot make an honest preflight decision: %v", platform, err)
+			t.Fatalf("%s current capabilities are internally invalid: an adapter cannot make an honest preflight decision: %v", tc.platform, err)
 		}
 		if len(capabilities.Modes) != 1 || capabilities.Modes[0] != ModeNone {
-			t.Errorf("%s modes = %v: shared cannot claim a verified source view yet, and copy/worktree must stay unadvertised until their real provisioners land", platform, capabilities.Modes)
+			t.Errorf("%s modes = %v: shared cannot claim a verified source view yet, and copy/worktree must stay unadvertised until their production provisioners guarantee the full contract", tc.platform, capabilities.Modes)
 		}
-		if platform == "linux" {
-			if len(capabilities.Profiles) != 2 || !capabilities.Profiles[1].FinalLinkRaceFree {
-				t.Errorf("Linux direct-file profile = %#v: handle-relative openat plus O_NOFOLLOW must be the advertised strong guarantee", capabilities.Profiles)
+		gotProfiles := make([]string, len(capabilities.Profiles))
+		for i, profile := range capabilities.Profiles {
+			gotProfiles[i] = profile.ID
+			if profile.Command != nil || profile.ID == ContainedProcessProfileID {
+				t.Errorf("%s profile %q advertises command containment: no native platform may expose bash until descendant, filesystem, environment, and network guarantees are all enforced", tc.platform, profile.ID)
 			}
-		} else if len(capabilities.Profiles) != 1 {
-			t.Errorf("Windows profiles = %#v: no direct-file profile may be advertised until reparse-safe handle traversal exists", capabilities.Profiles)
+		}
+		if !reflect.DeepEqual(gotProfiles, tc.profiles) {
+			t.Errorf("%s profile IDs = %v, want %v: platform documentation and preflight must describe the exact advertised profiles", tc.platform, gotProfiles, tc.profiles)
+		}
+		if tc.platform == "linux" && !capabilities.Profiles[1].HandleRelative || tc.platform == "linux" && !capabilities.Profiles[1].FinalLinkRaceFree {
+			t.Errorf("Linux direct-file profile = %#v: handle-relative openat plus O_NOFOLLOW must be the advertised strong guarantee", capabilities.Profiles[1])
 		}
 	}
 }
