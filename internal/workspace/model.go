@@ -107,6 +107,15 @@ func (p Profile) Identity() (string, error) {
 	return p.ID + ":" + hex.EncodeToString(sum[:]), nil
 }
 
+func MixedProfileIdentity(decisions []PlatformDecision) string {
+	body, err := json.Marshal(decisions)
+	if err != nil {
+		panic("workspace platform decisions contain only JSON values: " + err.Error())
+	}
+	sum := sha256.Sum256(body)
+	return "arxi.workspace/mixed-v1:" + hex.EncodeToString(sum[:])
+}
+
 func CurrentCapabilities(platform string) Capabilities {
 	capabilities := Capabilities{
 		Schema: SchemaV1, CapabilityVersion: CapabilityVersionInitialV1, Platform: platform,

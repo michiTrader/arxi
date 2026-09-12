@@ -546,11 +546,11 @@ func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runcon
 	}
 	artifact.WorkspaceContract = &runconfig.WorkspaceContract{Schema: workspace.SchemaV1, Source: source,
 		Requirements: requirements, Decisions: decisions}
-	if len(requirements) > 0 {
-		profile := requirements[0].ProfileID
-		for _, requirement := range requirements[1:] {
-			if requirement.ProfileID != profile {
-				profile = "arxi.workspace/mixed-v1"
+	if len(decisions) > 0 {
+		profile := decisions[0].ProfileIdentity
+		for _, decision := range decisions[1:] {
+			if decision.ProfileIdentity != profile {
+				profile = workspace.MixedProfileIdentity(decisions)
 				break
 			}
 		}
