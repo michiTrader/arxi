@@ -75,10 +75,18 @@ A process profile separately declares:
 - inherited environment;
 - network reach.
 
+A command is frozen as a versioned command profile plus an explicit command
+specification: provisioned opaque root, executable, argv or script, constructed
+environment, deadline/cancellation behavior and one shared output bound. The
+profile identity is the digest of the complete profile, not its display name;
+exact authorization and resume bind that identity so a changed environment or
+runner version invalidates the grant.
+
 Child environments are constructed from an allowlist. Provider credentials and
-undeclared variables are absent by default. Network and filesystem denial are
-claimed only when the platform adapter can enforce them for the whole process
-tree. Git layout alone never satisfies either claim.
+undeclared variables are absent by default. Environment names are matched
+case-insensitively on Windows. Network and filesystem denial are claimed only
+when the platform adapter can enforce them for the whole process tree. Git
+layout alone never satisfies either claim.
 
 The built-in runner refuses `bash` when the selected profile requires a guarantee
 that its platform adapter cannot enforce. It does not fall back to an inherited,
