@@ -1,11 +1,19 @@
 // Package workspace defines pure workspace requirements and platform capabilities.
 package workspace
 
-import "fmt"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+)
 
 const (
-	SchemaV1        = "arxi.workspace/v1"
-	ProfileSchemaV1 = "arxi.workspace-profile/v1"
+	SchemaV1                   = "arxi.workspace/v1"
+	ProfileSchemaV1            = "arxi.workspace-profile/v1"
+	CommandSchemaV1            = "arxi.command-spec/v1"
+	EnvironmentAllowlistV1     = "arxi.command-environment/allowlist-v1"
+	CapabilityVersionInitialV1 = "arxi.workspace-capabilities/initial-v1"
 )
 
 type Mode string
@@ -66,27 +74,53 @@ type ProcessProfile struct {
 	Network     string `json:"network"`
 }
 
+type CommandProfile struct {
+	Schema             string `json:"schema"`
+	RunnerVersion      string `json:"runner_version"`
+	Executable         string `json:"executable"`
+	EnvironmentVersion string `json:"environment_version"`
+	Descendants        string `json:"descendants"`
+	Filesystem         string `json:"filesystem"`
+	Network            string `json:"network"`
+	OutputLimitBytes   int    `json:"output_limit_bytes"`
+}
+
 type Profile struct {
-	Schema            string         `json:"schema"`
-	ID                string         `json:"id"`
-	FileAccess        FileAccess     `json:"file_access"`
-	HandleRelative    bool           `json:"handle_relative"`
-	FinalLinkRaceFree bool           `json:"final_link_race_free"`
-	Process           ProcessProfile `json:"process"`
+	Schema            string          `json:"schema"`
+	ID                string          `json:"id"`
+	FileAccess        FileAccess      `json:"file_access"`
+	HandleRelative    bool            `json:"handle_relative"`
+	FinalLinkRaceFree bool            `json:"final_link_race_free"`
+	Process           ProcessProfile  `json:"process"`
+	Command           *CommandProfile `json:"command,omitempty"`
+}
+
+func (p Profile) Identity() (string, error) {
+	if p.Schema != ProfileSchemaV1 || p.ID == "" {
+		return "", fmt.Errorf("workspace profile identity requires a versioned profile")
+	}
+	body, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("encode workspace profile identity: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	return p.ID + ":" + hex.EncodeToString(sum[:]), nil
 }
 
 func CurrentCapabilities(platform string) Capabilities {
 	capabilities := Capabilities{
-		Schema: SchemaV1, CapabilityVersion: "arxi.workspace-capabilities/initial-v1", Platform: platform,
+		Schema: SchemaV1, CapabilityVersion: CapabilityVersionInitialV1, Platform: platform,
 		Modes: []Mode{ModeNone},
 		Profiles: []Profile{
 			{Schema: ProfileSchemaV1, ID: NoToolsProfileID, FileAccess: FileAccessNone,
 				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
-			{Schema: ProfileSchemaV1, ID: DirectFilesProfileID, FileAccess: FileAccessWrite,
-				HandleRelative: true, FinalLinkRaceFree: platform != "windows",
-				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
 		},
 		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1"},
+	}
+	if platform == "linux" {
+		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesProfileID,
+			FileAccess: FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
+			Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}})
 	}
 	if platform == "simulation" {
 		capabilities.Modes = []Mode{ModeNone, ModeShared, ModeCopy, ModeWorktree}
@@ -122,12 +156,14 @@ type Capabilities struct {
 }
 
 type PlatformDecision struct {
-	Schema             string `json:"schema"`
-	Member             string `json:"member"`
-	Platform           string `json:"platform"`
-	CapabilityVersion  string `json:"capability_version"`
-	ProfileID          string `json:"profile_id"`
-	ProvisionerVersion string `json:"provisioner_version"`
+	Schema             string          `json:"schema"`
+	Member             string          `json:"member"`
+	Platform           string          `json:"platform"`
+	CapabilityVersion  string          `json:"capability_version"`
+	ProfileID          string          `json:"profile_id"`
+	ProfileIdentity    string          `json:"profile_identity"`
+	ProvisionerVersion string          `json:"provisioner_version"`
+	Command            *CommandProfile `json:"command,omitempty"`
 }
 
 type Member struct {
