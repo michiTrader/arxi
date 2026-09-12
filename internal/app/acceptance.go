@@ -502,6 +502,12 @@ func Wait(ctx context.Context, submission Submission, policy WaitPolicy) (WaitRe
 	}
 }
 
+// FreezeWorkspace resolves and preflights the immutable workspace contract. CLI
+// composition uses it before deriving concrete pre-accept provisioning work.
+func (s AcceptanceServices) FreezeWorkspace(artifact runconfig.Artifact) (runconfig.Artifact, error) {
+	return s.freezeWorkspace(artifact)
+}
+
 func (s AcceptanceServices) freezeWorkspace(artifact runconfig.Artifact) (runconfig.Artifact, error) {
 	topLevel := workspace.Mode(artifact.Config.Workspace)
 	// ResolveDefaults historically materialized "none" for an omitted declaration.
