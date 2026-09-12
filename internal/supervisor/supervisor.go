@@ -60,6 +60,11 @@ type Reconciler interface {
 	Reconcile(context.Context, string) (bool, error)
 }
 
+type workspaceLifecycle interface {
+	CloseWorkspaces() error
+	ReleaseWorkspaces(context.Context) error
+}
+
 // Options are process-level dependencies; run state is never supplied here.
 type Options struct {
 	Build        Build
@@ -354,6 +359,8 @@ type worker struct {
 	stopOnce     sync.Once
 	errMu        sync.Mutex
 	closeErr     error
+	workspace    workspaceLifecycle
+	released     bool
 }
 
 func newWorker(dir, id string, opts Options) *worker {
@@ -380,6 +387,11 @@ func (w *worker) close() {
 func (w *worker) run() {
 	defer close(w.done)
 	defer close(w.results)
+	defer func() {
+		if w.workspace != nil && !w.released {
+			w.setErr(w.workspace.CloseWorkspaces())
+		}
+	}()
 	store, effective, loop, err := w.restore()
 	w.readyErr = err
 	close(w.ready)
@@ -430,6 +442,13 @@ func (w *worker) run() {
 		if w.opts.Claim != nil && (runErr != nil || out.StoppedBy == exec.StopTerminal) {
 			if finishErr := w.opts.Claim.Finish(out, runErr); finishErr != nil {
 				result.Err = errors.Join(result.Err, finishErr)
+			}
+		}
+		if runErr == nil && out.StoppedBy == exec.StopTerminal && out.State.Status == kernel.StatusSucceeded && w.workspace != nil && !w.released {
+			if releaseErr := w.workspace.ReleaseWorkspaces(context.Background()); releaseErr != nil {
+				result.Err = errors.Join(result.Err, releaseErr)
+			} else {
+				w.released = true
 			}
 		}
 		w.publish(result)
@@ -529,6 +548,9 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 	executor, err := w.opts.Build(w.dir, effective)
 	if err != nil {
 		return fail(fmt.Errorf("build executor: %w", err))
+	}
+	if lifecycle, ok := executor.(workspaceLifecycle); ok {
+		w.workspace = lifecycle
 	}
 
 	var clock exec.Clock
