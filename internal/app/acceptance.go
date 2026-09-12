@@ -86,6 +86,11 @@ type PreparedSubmission struct {
 	Location       string
 	IdempotencyKey string
 	RequestDigest  job.Digest
+	// Prepare completes and verifies external prerequisites while the run is still
+	// unpublished. It must be durably restartable because a crash may leave its
+	// side effects behind without a run.started record.
+	Prepare        func(context.Context, string) error
+	AbortPrepare   func(context.Context, string) error
 	OnAccepted     func(SubmitResult, string, kernel.Config)
 }
 
@@ -309,13 +314,21 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 		}
 		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
-	accepted := false
-	defer func() {
-		if !accepted {
-			_ = os.RemoveAll(dir)
+		accepted := false
+		defer func() {
+			if !accepted {
+				if req.AbortPrepare != nil {
+					_ = req.AbortPrepare(context.Background(), dir)
+				}
+				_ = os.RemoveAll(dir)
+			}
+		}()
+		if req.Prepare != nil {
+			if err := req.Prepare(ctx, dir); err != nil {
+				return result, &Error{Kind: StorageUnavailable, Op: "prepare", JobID: id, Cause: err}
+			}
 		}
-	}()
-	if err := writeSyncedFile(filepath.Join(dir, "blueprint.snapshot.yaml"), req.Blueprint, 0o644); err != nil {
+		if err := writeSyncedFile(filepath.Join(dir, "blueprint.snapshot.yaml"), req.Blueprint, 0o644); err != nil {
 		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
 	if err := syncDirectory(dir); err != nil {
