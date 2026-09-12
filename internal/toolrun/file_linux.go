@@ -38,6 +38,9 @@ func (w *Workspace) openRelative(path string, flags int, perm os.FileMode) (*os.
 	}
 	_ = syscall.Close(root)
 	if openErr != nil {
+		if openErr == syscall.ELOOP {
+			return nil, fmt.Errorf("toolrun: refuse final symlink %q: %w", parts[len(parts)-1], openErr)
+		}
 		return nil, fmt.Errorf("toolrun: refuse final component %q: %w", parts[len(parts)-1], openErr)
 	}
 	return os.NewFile(uintptr(fd), filepath.Base(path)), nil
