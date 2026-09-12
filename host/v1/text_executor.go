@@ -23,7 +23,7 @@ type textExecutor struct {
 	effective  runconfig.Artifact
 
 	mu       sync.Mutex
-	handles  map[string]Workspace
+	sessions map[string]WorkspaceSessionV1
 	requests map[string]WorkspaceRequest
 }
 
@@ -104,35 +104,39 @@ func (x *textExecutor) CallTool(ctx context.Context, effect kernel.CallTool) ([]
 func (x *textExecutor) workspace(ctx context.Context, actor string) (Workspace, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if handle := x.handles[actor]; handle != "" {
-		return handle, nil
+	if session := x.sessions[actor]; session.Workspace != "" {
+		return session.Workspace, nil
+	}
+	provisioner, ok := x.workspaces.(RecoverableWorkspaceProvisionerV1)
+	if !ok {
+		return "", fmt.Errorf("workspace-backed tool dispatch requires RecoverableWorkspaceProvisionerV1")
 	}
 	req := WorkspaceRequest{JobID: x.jobID, Actor: actor}
-	handle, err := x.workspaces.Provision(ctx, req)
+	session, err := provisioner.ProvisionSession(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("provision workspace for job %s actor %q: %w", x.jobID, actor, err)
 	}
-	if handle == "" {
-		return "", fmt.Errorf("workspace provisioner returned an empty handle for job %s actor %q", x.jobID, actor)
+	if session.ID == "" || session.Workspace == "" {
+		return "", fmt.Errorf("workspace provisioner returned an empty session identity or handle for job %s actor %q", x.jobID, actor)
 	}
-	if x.handles == nil {
-		x.handles, x.requests = map[string]Workspace{}, map[string]WorkspaceRequest{}
+	if x.sessions == nil {
+		x.sessions, x.requests = map[string]WorkspaceSessionV1{}, map[string]WorkspaceRequest{}
 	}
-	x.handles[actor], x.requests[actor] = handle, req
-	return handle, nil
+	x.sessions[actor], x.requests[actor] = session, req
+	return session.Workspace, nil
 }
 
 func (x *textExecutor) release(ctx context.Context) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	var releaseErr error
-	for actor, handle := range x.handles {
-		if err := x.workspaces.Release(ctx, handle); err != nil {
+	for actor, session := range x.sessions {
+		if err := x.workspaces.Release(ctx, session.Workspace); err != nil {
 			releaseErr = errors.Join(releaseErr, fmt.Errorf("release workspace for %s: %w", actor, err))
 		}
 	}
 	if releaseErr == nil {
-		x.handles = nil
+		x.sessions = nil
 	}
 	return releaseErr
 }

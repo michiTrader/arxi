@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,14 +23,15 @@ import (
 )
 
 type storageBackend struct {
-	storage      JobStorage
-	coordination Coordination
-	heartbeat    time.Duration
-	provider     TextProvider
-	tools        ToolExecutor
-	workspaces   WorkspaceProvisioner
-	now          func() time.Time
-	capabilities *capabilityResolver
+	storage       JobStorage
+	coordination  Coordination
+	heartbeat     time.Duration
+	provider      TextProvider
+	tools         ToolExecutor
+	workspaces    WorkspaceProvisioner
+	workspaceCaps *WorkspaceCapabilitiesV1
+	now           func() time.Time
+	capabilities  *capabilityResolver
 
 	mu       sync.Mutex
 	workers  map[JobID]*storageWorker
@@ -40,8 +42,9 @@ type storageBackend struct {
 }
 
 type storedJobMetadata struct {
-	Effective runconfig.Artifact `json:"effective"`
-	Simulated bool               `json:"simulated"`
+	Effective         runconfig.Artifact            `json:"effective"`
+	Simulated         bool                          `json:"simulated"`
+	WorkspaceSessions map[string]WorkspaceSessionV1 `json:"workspace_sessions,omitempty"`
 }
 
 func newBackend(options Options) backend {
@@ -73,7 +76,8 @@ func newBackend(options Options) backend {
 	backend := &storageBackend{
 		storage: options.Storage, coordination: options.Coordination, heartbeat: heartbeat,
 		provider: options.Provider, tools: options.Tools, workspaces: options.Workspaces,
-		now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
+		workspaceCaps: cloneWorkspaceCapabilities(options.WorkspaceCapabilities),
+		now:           options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
 	}
 	if options.Provider != nil && options.Coordination != nil {
 		if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
@@ -143,26 +147,34 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	if err != nil {
 		return SubmitResult{}, invalidArgument(CapabilitySubmit, "resolve workspace requirements: "+err.Error())
 	}
-	if hostRequiresTools(requirements) && (b.tools == nil || b.workspaces == nil) {
-		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require both Options.Tools and Options.Workspaces before acceptance")
+	if hostRequiresTools(requirements) && (b.tools == nil || b.workspaces == nil || b.workspaceCaps == nil) {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require Options.Tools, Options.Workspaces, and explicit Options.WorkspaceCapabilities before acceptance")
 	}
-	preparedHandles := map[string]Workspace{}
-	if b.workspaces != nil {
+	preparedSessions := map[string]WorkspaceSessionV1{}
+	if hostRequiresTools(requirements) {
+		provisioner, recoverable := b.workspaces.(RecoverableWorkspaceProvisionerV1)
+		if !recoverable {
+			return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require RecoverableWorkspaceProvisionerV1 so durable session identity does not depend on process-local handles")
+		}
 		for _, requirement := range requirements {
 			if requirement.FileAccess == workspace.FileAccessNone && !requirement.RequiresBash {
 				continue
 			}
-			handle, provisionErr := b.workspaces.Provision(ctx, WorkspaceRequest{JobID: id, Actor: requirement.Member})
+			session, provisionErr := provisioner.ProvisionSession(ctx, WorkspaceRequest{JobID: id, Actor: requirement.Member})
 			if provisionErr != nil {
 				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provision before acceptance: "+provisionErr.Error())
 			}
-			if handle == "" {
-				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provisioner returned an empty handle before acceptance")
+			if session.ID == "" || session.Workspace == "" {
+				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provisioner returned an empty session identity or handle before acceptance")
 			}
-			preparedHandles[requirement.Member] = handle
+			preparedSessions[requirement.Member] = session
 		}
 	}
-	decisions, err := workspace.Preflight(requirements, hostWorkspaceCapabilities(requirements, b.tools, b.workspaces))
+	capabilities, err := hostWorkspaceCapabilities(b.workspaceCaps)
+	if err != nil {
+		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace capability declaration: "+err.Error())
+	}
+	decisions, err := workspace.Preflight(requirements, capabilities)
 	if err != nil {
 		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace preflight: "+err.Error())
 	}
@@ -171,10 +183,11 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 			UntrackedPolicy: "excluded", IgnoredPolicy: "excluded", SubmodulePolicy: "refused",
 			SymlinkPolicy: "internal-relative-only", SpecialFilePolicy: "refused"},
 		Requirements: requirements, Decisions: decisions}
-	if len(requirements) > 0 {
-		effective.WorkspaceProfileID = requirements[0].ProfileID
+	if len(decisions) > 0 {
+		effective.WorkspaceProfileID = stableWorkspaceProfileIdentity(decisions, preparedSessions)
 	}
-	metadata, err := json.Marshal(storedJobMetadata{Effective: effective, Simulated: req.Simulated})
+	metadata, err := json.Marshal(storedJobMetadata{Effective: effective, Simulated: req.Simulated,
+		WorkspaceSessions: preparedSessions})
 	if err != nil {
 		return SubmitResult{}, adaptStorageError(CapabilitySubmit, id, 0, err)
 	}
@@ -224,7 +237,7 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 		executionClaim = claim
 		created.Writer = writer
 	}
-	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.tools, b.workspaces, preparedHandles, b.now, start)
+	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.tools, b.workspaces, preparedSessions, b.now, start)
 	if b.coordination != nil {
 		worker.coordination = &workerCoordination{port: b.coordination, claim: executionClaim}
 		worker.heartbeat = b.heartbeat
@@ -258,19 +271,90 @@ func hostRequiresTools(requirements []workspace.Requirement) bool {
 	return false
 }
 
-func hostWorkspaceCapabilities(requirements []workspace.Requirement, tools ToolExecutor, provisioner WorkspaceProvisioner) workspace.Capabilities {
-	capabilities := workspace.CurrentCapabilities(runtime.GOOS)
-	if tools == nil || provisioner == nil || !hostRequiresTools(requirements) {
-		return capabilities
+func hostWorkspaceCapabilities(declared *WorkspaceCapabilitiesV1) (workspace.Capabilities, error) {
+	if declared == nil {
+		return workspace.CurrentCapabilities(runtime.GOOS), nil
 	}
-	capabilities.CapabilityVersion = "arxi.host.workspace-ports/v1"
-	capabilities.Modes = []workspace.Mode{workspace.ModeNone, workspace.ModeShared, workspace.ModeCopy, workspace.ModeWorktree}
-	capabilities.SourceKinds = []string{"host-opaque"}
-	capabilities.Provisioners = map[workspace.Mode]string{
-		workspace.ModeNone: "arxi.workspace.none/v1", workspace.ModeShared: "arxi.host.workspace-provisioner/v1",
-		workspace.ModeCopy: "arxi.host.workspace-provisioner/v1", workspace.ModeWorktree: "arxi.host.workspace-provisioner/v1",
+	if declared.Schema != WorkspaceCapabilitiesSchemaV1 {
+		return workspace.Capabilities{}, fmt.Errorf("schema %q is unsupported", declared.Schema)
 	}
-	return capabilities
+	capabilities := workspace.Capabilities{Schema: workspace.SchemaV1,
+		CapabilityVersion: declared.CapabilityVersion, Platform: declared.Platform,
+		SourceKinds: append([]string(nil), declared.SourceKinds...), Provisioners: map[workspace.Mode]string{}}
+	for _, mode := range declared.Modes {
+		capabilities.Modes = append(capabilities.Modes, workspace.Mode(mode))
+	}
+	for mode, version := range declared.Provisioners {
+		capabilities.Provisioners[workspace.Mode(mode)] = version
+	}
+	for _, profile := range declared.Profiles {
+		if profile.Schema != WorkspaceProfileSchemaV1 {
+			return workspace.Capabilities{}, fmt.Errorf("profile %q schema %q is unsupported", profile.ID, profile.Schema)
+		}
+		converted := workspace.Profile{Schema: workspace.ProfileSchemaV1, ID: profile.ID,
+			FileAccess: workspace.FileAccess(profile.FileAccess), HandleRelative: profile.HandleRelative,
+			FinalLinkRaceFree: profile.FinalLinkRaceFree, Process: workspace.ProcessProfile(profile.Process)}
+		if profile.Command != nil {
+			if profile.Command.Schema != WorkspaceCommandSchemaV1 {
+				return workspace.Capabilities{}, fmt.Errorf("profile %q command schema %q is unsupported", profile.ID, profile.Command.Schema)
+			}
+			converted.Command = &workspace.CommandProfile{Schema: workspace.CommandSchemaV1,
+				RunnerVersion: profile.Command.RunnerVersion, Executable: profile.Command.Executable,
+				EnvironmentVersion: profile.Command.EnvironmentVersion, Descendants: profile.Command.Descendants,
+				Filesystem: profile.Command.Filesystem, Network: profile.Command.Network,
+				OutputLimitBytes: profile.Command.OutputLimitBytes}
+		}
+		capabilities.Profiles = append(capabilities.Profiles, converted)
+	}
+	return capabilities, nil
+}
+
+func cloneWorkspaceCapabilities(in *WorkspaceCapabilitiesV1) *WorkspaceCapabilitiesV1 {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Modes, out.SourceKinds = append([]string(nil), in.Modes...), append([]string(nil), in.SourceKinds...)
+	out.Profiles = append([]WorkspaceProfileV1(nil), in.Profiles...)
+	for i := range out.Profiles {
+		if in.Profiles[i].Command != nil {
+			command := *in.Profiles[i].Command
+			out.Profiles[i].Command = &command
+		}
+	}
+	out.Provisioners = make(map[string]string, len(in.Provisioners))
+	for mode, version := range in.Provisioners {
+		out.Provisioners[mode] = version
+	}
+	return &out
+}
+
+func stableWorkspaceProfileIdentity(decisions []workspace.PlatformDecision, sessions map[string]WorkspaceSessionV1) string {
+	members := make([]string, 0, len(sessions))
+	for member := range sessions {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+	bound := struct {
+		Schema    string                       `json:"schema"`
+		Decisions []workspace.PlatformDecision `json:"decisions"`
+		Sessions  []struct {
+			Member string `json:"member"`
+			ID     string `json:"id"`
+		} `json:"sessions"`
+	}{Schema: "arxi.host.workspace-authorization/v1", Decisions: decisions}
+	for _, member := range members {
+		bound.Sessions = append(bound.Sessions, struct {
+			Member string `json:"member"`
+			ID     string `json:"id"`
+		}{Member: member, ID: sessions[member].ID})
+	}
+	body, err := json.Marshal(bound)
+	if err != nil {
+		panic("host workspace bindings contain only JSON values: " + err.Error())
+	}
+	sum := sha256.Sum256(body)
+	return "arxi.host.workspace-authorization/v1:" + hex.EncodeToString(sum[:])
 }
 
 func (b *storageBackend) Inspect(ctx context.Context, req InspectRequest) (Job, error) {
@@ -704,7 +788,7 @@ func (b *storageBackend) claimWorker(ctx context.Context, id JobID) (*storageWor
 		_ = writer.Close()
 		return nil, err
 	}
-	worker, err := newRecoveredStorageWorker(id, record, writer, b.provider, b.tools, b.workspaces, b.now, events,
+	worker, err := newRecoveredStorageWorker(ctx, id, record, writer, b.provider, b.tools, b.workspaces, b.now, events,
 		&workerCoordination{port: b.coordination, claim: claim}, b.heartbeat)
 	if err != nil {
 		_ = writer.Close()

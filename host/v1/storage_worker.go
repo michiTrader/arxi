@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,7 +20,7 @@ type storageWorker struct {
 	provider     TextProvider
 	tools        ToolExecutor
 	workspaces   WorkspaceProvisioner
-	prepared     map[string]Workspace
+	prepared     map[string]WorkspaceSessionV1
 	now          func() time.Time
 	coordination *workerCoordination
 	heartbeat    time.Duration
@@ -44,7 +46,7 @@ type storageCommand struct {
 }
 
 func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider, tools ToolExecutor,
-	workspaces WorkspaceProvisioner, prepared map[string]Workspace, now func() time.Time, start kernel.Event) *storageWorker {
+	workspaces WorkspaceProvisioner, prepared map[string]WorkspaceSessionV1, now func() time.Time, start kernel.Event) *storageWorker {
 	start.Seq = 1
 	return &storageWorker{id: id, record: record, writer: writer, provider: provider, tools: tools, workspaces: workspaces,
 		prepared: prepared, now: now,
@@ -52,7 +54,7 @@ func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider Tex
 		commands: make(chan storageCommand, 32), wake: make(chan struct{}, 1), stop: make(chan struct{})}
 }
 
-func newRecoveredStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider,
+func newRecoveredStorageWorker(ctx context.Context, id JobID, record JobRecord, writer JobWriter, provider TextProvider,
 	tools ToolExecutor, workspaces WorkspaceProvisioner, now func() time.Time, events []kernel.Event,
 	coordination *workerCoordination, heartbeat time.Duration) (*storageWorker, error) {
 	recovery, err := exec.Recover(events)
@@ -62,11 +64,54 @@ func newRecoveredStorageWorker(id JobID, record JobRecord, writer JobWriter, pro
 	if !recovery.HasProgress {
 		return nil, errors.New("job has no durable execution progress")
 	}
+	metadata, err := decodeStoredMetadata(record)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := recoverWorkspaceSessions(ctx, id, workspaces, metadata.WorkspaceSessions)
+	if err != nil {
+		return nil, err
+	}
 	return &storageWorker{id: id, record: record, writer: writer, provider: provider, tools: tools,
-		workspaces: workspaces, now: now,
+		workspaces: workspaces, prepared: prepared, now: now,
 		coordination: coordination, heartbeat: heartbeat, events: append([]kernel.Event(nil), events...),
 		changed: make(chan struct{}), done: make(chan struct{}), commands: make(chan storageCommand, 32),
 		wake: make(chan struct{}, 1), stop: make(chan struct{})}, nil
+}
+
+func recoverWorkspaceSessions(ctx context.Context, id JobID, provisioner WorkspaceProvisioner,
+	frozen map[string]WorkspaceSessionV1) (map[string]WorkspaceSessionV1, error) {
+	if len(frozen) == 0 {
+		return nil, nil
+	}
+	recoverable, ok := provisioner.(RecoverableWorkspaceProvisionerV1)
+	if !ok {
+		return nil, errors.New("recovered workspace-backed job requires RecoverableWorkspaceProvisionerV1")
+	}
+	members := make([]string, 0, len(frozen))
+	for member := range frozen {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+	recovered := make(map[string]WorkspaceSessionV1, len(frozen))
+	for _, member := range members {
+		expected := frozen[member]
+		if expected.ID == "" || expected.Workspace == "" {
+			return nil, fmt.Errorf("workspace session for member %q has no durable identity or handle", member)
+		}
+		actual, err := recoverable.RecoverSession(ctx, WorkspaceRecoveryRequestV1{
+			WorkspaceRequest: WorkspaceRequest{JobID: id, Actor: member},
+			SessionID:        expected.ID, Workspace: expected.Workspace,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("recover workspace session for member %q: %w", member, err)
+		}
+		if actual.ID != expected.ID || actual.Workspace != expected.Workspace {
+			return nil, fmt.Errorf("recovered workspace session for member %q changed its durable identity or exact opaque handle", member)
+		}
+		recovered[member] = actual
+	}
+	return recovered, nil
 }
 
 func (w *storageWorker) start() { go w.run() }
@@ -98,7 +143,8 @@ func (w *storageWorker) run() {
 		clock, timekeeper = real, exec.RealTime{C: real}
 	}
 	executor := &textExecutor{provider: w.provider, tools: w.tools, workspaces: w.workspaces,
-		jobID: w.id, effective: metadata.Effective, handles: w.prepared}
+		jobID: w.id, effective: metadata.Effective, sessions: w.prepared}
+
 	runner := &exec.Runner{Log: log, Clock: clock,
 		Executor: executor,
 		Config:   metadata.Effective.Config, RunID: string(w.id), JobID: string(w.id),
