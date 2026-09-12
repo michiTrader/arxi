@@ -37,8 +37,11 @@ func runner(t *testing.T) *Runner {
 	root := filepath.Join(t.TempDir(), "run")
 	requests := map[string]workspacefs.Request{}
 	for _, member := range []string{"backend", "frontend"} {
+		command := &workspace.CommandProfile{Schema: workspace.CommandSchemaV1, RunnerVersion: "arxi.command.operator-unrestricted/test-v1",
+			Executable: "bash", EnvironmentVersion: workspace.EnvironmentAllowlistV1, Descendants: "process-group",
+			Filesystem: "unrestricted", Network: "unrestricted", OutputLimitBytes: maxOutputBytes}
 		requests[member] = workspacefs.Request{JobID: "test", Member: member, Mode: workspace.ModeCopy,
-			ProfileID: workspace.DirectFilesProfileID, ProvisionerVersion: "test"}
+			ProfileID: workspace.DirectFilesProfileID, ProfileIdentity: "test-unrestricted", ProvisionerVersion: "test", Command: command}
 	}
 	return &Runner{Sessions: testSessions{root: root}, Requests: requests}
 }
