@@ -53,7 +53,8 @@ type Workspace struct {
 	// sends the reader to the wrong blueprint.
 	Member string
 
-	command *workspace.CommandProfile
+	rootHandle *os.File
+	command    *workspace.CommandProfile
 }
 
 // OpenWorkspace prepares dir as the root for member's tools.
@@ -93,7 +94,11 @@ func OpenWorkspace(dir, member string) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("toolrun: resolve workspace %s: %w", abs, err)
 	}
-	return &Workspace{Root: real, Member: member}, nil
+	rootHandle, err := openWorkspaceRoot(real)
+	if err != nil {
+		return nil, fmt.Errorf("toolrun: open workspace root %s: %w", real, err)
+	}
+	return &Workspace{Root: real, Member: member, rootHandle: rootHandle}, nil
 }
 
 // Resolve turns a tool-supplied path into an absolute one inside the workspace,

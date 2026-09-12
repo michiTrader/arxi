@@ -16,9 +16,9 @@ func (w *Workspace) openRelative(path string, flags int, perm os.FileMode) (*os.
 	if err != nil {
 		return nil, fmt.Errorf("toolrun: %s: %w", w.Member, err)
 	}
-	root, err := syscall.Open(w.Root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, fmt.Errorf("toolrun: open workspace root: %w", err)
+	root := int(w.rootHandle.Fd())
+	if root < 0 {
+		return nil, fmt.Errorf("toolrun: workspace root handle is closed")
 	}
 	current := root
 	for _, component := range parts[:len(parts)-1] {
@@ -27,7 +27,6 @@ func (w *Workspace) openRelative(path string, flags int, perm os.FileMode) (*os.
 			_ = syscall.Close(current)
 		}
 		if openErr != nil {
-			_ = syscall.Close(root)
 			return nil, fmt.Errorf("toolrun: refuse parent component %q: %w", component, openErr)
 		}
 		current = next
@@ -36,7 +35,6 @@ func (w *Workspace) openRelative(path string, flags int, perm os.FileMode) (*os.
 	if current != root {
 		_ = syscall.Close(current)
 	}
-	_ = syscall.Close(root)
 	if openErr != nil {
 		if openErr == syscall.ELOOP {
 			return nil, fmt.Errorf("toolrun: refuse final symlink %q: %w", parts[len(parts)-1], openErr)
@@ -44,6 +42,14 @@ func (w *Workspace) openRelative(path string, flags int, perm os.FileMode) (*os.
 		return nil, fmt.Errorf("toolrun: refuse final component %q: %w", parts[len(parts)-1], openErr)
 	}
 	return os.NewFile(uintptr(fd), filepath.Base(path)), nil
+}
+
+func openWorkspaceRoot(root string) (*os.File, error) {
+	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), root), nil
 }
 
 func relativeParts(path string) ([]string, error) {
