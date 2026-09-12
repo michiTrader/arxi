@@ -25,7 +25,9 @@ type Request struct {
 	Member             string
 	Mode               workspace.Mode
 	ProfileID          string
+	ProfileIdentity    string
 	ProvisionerVersion string
+	Command            *workspace.CommandProfile
 	Source             workspace.SourceIdentity
 }
 
@@ -34,6 +36,7 @@ type Request struct {
 type Session interface {
 	WorkspaceRoot() (string, bool)
 	Identity() string
+	CommandProfile() (*workspace.CommandProfile, bool)
 }
 
 // Provisioner allocates and verifies stable member sessions.
@@ -45,10 +48,14 @@ type Provisioner interface {
 type session struct {
 	id, root string
 	hasRoot  bool
+	command  *workspace.CommandProfile
 }
 
 func (s session) WorkspaceRoot() (string, bool) { return s.root, s.hasRoot }
 func (s session) Identity() string              { return s.id }
+func (s session) CommandProfile() (*workspace.CommandProfile, bool) {
+	return s.command, s.command != nil
+}
 
 // OpenLocalSession is an internal adapter for already-selected verified roots.
 func OpenLocalSession(root, identity string) (Session, error) {
@@ -62,14 +69,27 @@ func OpenLocalSession(root, identity string) (Session, error) {
 	return session{id: identity, root: canonicalRoot, hasRoot: true}, nil
 }
 
+// OpenLocalCommandSession is an internal adapter for an already-preflighted profile.
+func OpenLocalCommandSession(root, identity string, command workspace.CommandProfile) (Session, error) {
+	opened, err := OpenLocalSession(root, identity)
+	if err != nil {
+		return nil, err
+	}
+	local := opened.(session)
+	local.command = &command
+	return local, nil
+}
+
 type marker struct {
-	Schema             string                   `json:"schema"`
-	JobID              string                   `json:"job_id"`
-	Member             string                   `json:"member"`
-	Mode               workspace.Mode           `json:"mode"`
-	ProfileID          string                   `json:"profile_id"`
-	ProvisionerVersion string                   `json:"provisioner_version"`
-	Source             workspace.SourceIdentity `json:"source"`
+	Schema             string                    `json:"schema"`
+	JobID              string                    `json:"job_id"`
+	Member             string                    `json:"member"`
+	Mode               workspace.Mode            `json:"mode"`
+	ProfileID          string                    `json:"profile_id"`
+	ProfileIdentity    string                    `json:"profile_identity"`
+	ProvisionerVersion string                    `json:"provisioner_version"`
+	Command            *workspace.CommandProfile `json:"command,omitempty"`
+	Source             workspace.SourceIdentity  `json:"source"`
 }
 
 // Manager provisions source layouts beneath a private managed root.
@@ -93,7 +113,7 @@ func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 	var err error
 	switch req.Mode {
 	case workspace.ModeNone:
-		got = session{id: key}
+		got = session{id: key, command: req.Command}
 	case workspace.ModeShared:
 		shared := req
 		shared.Member = "shared"
@@ -130,7 +150,7 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 		if err := verifySnapshot(ctx, root, req); err != nil {
 			return nil, err
 		}
-		return session{id: key, root: root, hasRoot: true}, nil
+		return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create shared workspace parent: %w", err)
@@ -155,7 +175,7 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 	if err := os.Rename(tmp, root); err != nil {
 		return nil, fmt.Errorf("publish shared workspace: %w", err)
 	}
-	return session{id: key, root: root, hasRoot: true}, nil
+	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 }
 
 func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (Session, error) {
@@ -167,7 +187,7 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 		if err := verifySnapshot(ctx, root, req); err != nil {
 			return nil, err
 		}
-		return session{id: key, root: root, hasRoot: true}, nil
+		return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create workspace parent: %w", err)
@@ -197,13 +217,13 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 		if exists(root) {
 			if verifyErr := verifyMarker(root, req); verifyErr == nil {
 				ok = true
-				return session{id: key, root: root, hasRoot: true}, nil
+				return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 			}
 		}
 		return nil, fmt.Errorf("publish copy workspace: %w", err)
 	}
 	ok = true
-	return session{id: key, root: root, hasRoot: true}, nil
+	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 }
 
 func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string) (Session, error) {
@@ -215,7 +235,7 @@ func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string
 		if err := verifyWorktree(ctx, root, req); err != nil {
 			return nil, err
 		}
-		return session{id: key, root: root, hasRoot: true}, nil
+		return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create worktree parent: %w", err)
@@ -231,7 +251,7 @@ func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string
 	if err := writeMarker(root, req); err != nil {
 		return nil, fmt.Errorf("record worktree ownership: %w", err)
 	}
-	return session{id: key, root: root, hasRoot: true}, nil
+	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
 }
 
 func (m *Manager) Release(ctx context.Context, req Request, got Session) error {
@@ -270,7 +290,7 @@ func (m *Manager) Release(ctx context.Context, req Request, got Session) error {
 }
 
 func validateRequest(req Request) error {
-	if req.JobID == "" || req.Member == "" || req.ProfileID == "" || req.ProvisionerVersion == "" {
+	if req.JobID == "" || req.Member == "" || req.ProfileID == "" || req.ProfileIdentity == "" || req.ProvisionerVersion == "" {
 		return errors.New("workspace request requires job, member, profile, and provisioner identities")
 	}
 	if req.Mode != workspace.ModeNone && (req.Source.Kind != "git" || req.Source.CanonicalRoot == "" || req.Source.Commit == "" || req.Source.Tree == "") {
@@ -280,7 +300,7 @@ func validateRequest(req Request) error {
 }
 
 func sessionKey(req Request) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{req.JobID, req.Member, string(req.Mode), req.ProfileID, req.ProvisionerVersion, req.Source.CanonicalRoot, req.Source.Commit, req.Source.Tree}, "\x00")))
+	sum := sha256.Sum256([]byte(strings.Join([]string{req.JobID, req.Member, string(req.Mode), req.ProfileID, req.ProfileIdentity, req.ProvisionerVersion, req.Source.CanonicalRoot, req.Source.Commit, req.Source.Tree}, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -301,7 +321,7 @@ func safeComponent(value string) string {
 
 func expectedMarker(req Request) marker {
 	return marker{Schema: "arxi.workspace-owner/v1", JobID: req.JobID, Member: req.Member, Mode: req.Mode,
-		ProfileID: req.ProfileID, ProvisionerVersion: req.ProvisionerVersion, Source: req.Source}
+		ProfileID: req.ProfileID, ProfileIdentity: req.ProfileIdentity, ProvisionerVersion: req.ProvisionerVersion, Command: req.Command, Source: req.Source}
 }
 
 func writeMarker(root string, req Request) error {
