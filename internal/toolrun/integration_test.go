@@ -29,7 +29,11 @@ func TestTheConfinementHoldsForACommandThatTriesToEscape(t *testing.T) {
 	// the frozen blueprint. Opening a workspace creates the run directory, so
 	// this has to come after the first tool call below; the path is computed
 	// here and the sentinel written once it exists.
-	outside := filepath.Join(r.Root, "outside.txt")
+	backend, err := r.workspaceFor("backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(backend.Root), "outside.txt")
 
 	// These are the two honest cases, and the distinction is the point.
 	//

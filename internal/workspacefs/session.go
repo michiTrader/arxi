@@ -50,6 +50,18 @@ type session struct {
 func (s session) WorkspaceRoot() (string, bool) { return s.root, s.hasRoot }
 func (s session) Identity() string              { return s.id }
 
+// OpenLocalSession is an internal adapter for already-selected verified roots.
+func OpenLocalSession(root, identity string) (Session, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, err
+	}
+	canonicalRoot, err := canonical(root)
+	if err != nil {
+		return nil, err
+	}
+	return session{id: identity, root: canonicalRoot, hasRoot: true}, nil
+}
+
 type marker struct {
 	Schema             string                   `json:"schema"`
 	JobID              string                   `json:"job_id"`
