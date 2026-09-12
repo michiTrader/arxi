@@ -3,6 +3,7 @@ package trigstore
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -484,9 +485,13 @@ func TestTheStoredFileIsReadableAndNotExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if got := fi.Mode().Perm(); got != 0o644 {
-		t.Errorf("mode = %o, want 644 (os.CreateTemp defaults to 600, which "+
-			"makes the file unreadable to anyone but its creator)", got)
+	if runtime.GOOS != "windows" {
+		// Windows exposes only its read-only attribute through Go permission bits,
+		// so an exact Unix mode assertion would reject a readable trigger as 0666.
+		if got := fi.Mode().Perm(); got != 0o644 {
+			t.Errorf("mode = %o, want 644 (os.CreateTemp defaults to 600, which "+
+				"makes the file unreadable to anyone but its creator)", got)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -692,10 +693,14 @@ func TestRoleDefineNamesAFileThatCanBeReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o644 {
-		t.Errorf("the role file is mode %04o, want 0644\n"+
-			"  consequence: a role is a default a team commits and reads; a "+
-			"credential-grade mode locks out the review without protecting a secret.",
-			perm)
+	if runtime.GOOS != "windows" {
+		// Windows exposes only its read-only attribute through Go permission bits,
+		// so an exact Unix mode assertion would reject a readable role as 0666.
+		if perm := info.Mode().Perm(); perm != 0o644 {
+			t.Errorf("the role file is mode %04o, want 0644\n"+
+				"  consequence: a role is a default a team commits and reads; a "+
+				"credential-grade mode locks out the review without protecting a secret.",
+				perm)
+		}
 	}
 }
