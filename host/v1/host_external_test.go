@@ -25,6 +25,13 @@ type workspaces struct{}
 func (workspaces) Provision(_ context.Context, req host.WorkspaceRequest) (host.Workspace, error) {
 	return host.Workspace("workspace:" + req.Actor), nil
 }
+func (workspaces) ProvisionSession(ctx context.Context, req host.WorkspaceRequest) (host.WorkspaceSessionV1, error) {
+	handle, err := (workspaces{}).Provision(ctx, req)
+	return host.WorkspaceSessionV1{ID: "session:" + string(req.JobID) + ":" + req.Actor, Workspace: handle}, err
+}
+func (workspaces) RecoverSession(_ context.Context, req host.WorkspaceRecoveryRequestV1) (host.WorkspaceSessionV1, error) {
+	return host.WorkspaceSessionV1{ID: req.SessionID, Workspace: req.Workspace}, nil
+}
 
 func (workspaces) Release(context.Context, host.Workspace) error { return nil }
 
@@ -38,6 +45,7 @@ func TestExternalPackageCanImplementExtensionPorts(t *testing.T) {
 	var _ host.TextProvider = textProvider{}
 	var _ host.ToolExecutor = tools{}
 	var _ host.WorkspaceProvisioner = workspaces{}
+	var _ host.RecoverableWorkspaceProvisionerV1 = workspaces{}
 	var _ host.Authorizer = authorizer{}
 
 	h := host.New(host.Options{
