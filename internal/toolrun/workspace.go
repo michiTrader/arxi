@@ -24,26 +24,12 @@
 //
 // # What this package does NOT protect against
 //
-// Path confinement applies to tool ARGUMENTS. `bash` takes a script, and a
-// script is a program: `echo x > ../../etc/thing` contains no argument for
-// Resolve to inspect, so nothing here refuses it. What `bash` gets is the
-// workspace as its working directory, which makes every careless RELATIVE path
-// land in the right place — and careless-relative is the common case, not
-// deliberate-absolute.
-//
-// The reach is worth stating precisely rather than softening: one level up from
-// a member's workspace is the RUN directory, which holds the append-only log and
-// the frozen blueprint. A command that writes there can damage the very
-// artefacts that make the run explainable. Real confinement for `bash` needs the
-// operating system — a container, a user namespace, seccomp — and this package
-// cannot provide it from inside the same process.
-//
-// This is documented instead of being quietly left out because the alternative
-// is somebody reading "workspace isolation" and concluding that untrusted
-// scripts are safe to run. The tool POLICY is what stands between a model and
-// `bash` today: `bash` resolves to ask for a granted mutating tool, so a human
-// sees the command before it runs. That is a real control, and it is a different
-// one from confinement.
+// A source layout is not process confinement. Command execution is available
+// only through an explicit, frozen command profile. That profile states its
+// filesystem, network, environment and descendant guarantees independently;
+// unsupported strong profiles are refused before this package starts a child.
+// An explicitly named operator profile may say unrestricted, but that is not an
+// isolation mode and cannot satisfy the default bash requirement.
 package toolrun
 
 import (
