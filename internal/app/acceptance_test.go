@@ -51,6 +51,33 @@ func (s *submissionCoordinatorStub) BindSubmission(value SubmissionBinding) (Sub
 	return s.binding, nil
 }
 
+func TestPreparedWorkspaceCrashReconcilesBeforeAcceptance(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "r1")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blueprintBytes := []byte("name: worker\n")
+	sum := sha256.Sum256(blueprintBytes)
+	artifact := runconfig.New("r1", "sim", hex.EncodeToString(sum[:]), "work", "", kernel.Config{Blueprint: "worker"}.ResolveDefaults(), nil, nil)
+	prepared := 0
+	callback := false
+	lifecycle := &lifecycleStub{launchErr: errors.New("stop after recovery")}
+	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle}
+	submission, err := service.SubmitPrepared(context.Background(), PreparedSubmission{
+		JobID: "r1", Actor: "worker", Blueprint: blueprintBytes, Artifact: artifact, BudgetUSD: 1,
+		Prepare:    func(context.Context, string) error { prepared++; return nil },
+		OnAccepted: func(SubmitResult, string, kernel.Config) { callback = true },
+	})
+	if err == nil || prepared != 1 || submission.Result.AcceptedSeq != 1 || !callback || lifecycle.launches != 1 {
+		t.Fatalf("submission/error/prepares/callback/launches = %#v/%v/%d/%v/%d: a preaccept crash must reconcile preparation and publish exactly one accepted run before lifecycle dispatch", submission, err, prepared, callback, lifecycle.launches)
+	}
+	run, inspectErr := NewReadService(root).Inspect(context.Background(), "r1")
+	if inspectErr != nil || run.Sequence != 1 {
+		t.Fatalf("reconciled run = %#v/%v: preparation recovery must publish one confirmed run.started event", run, inspectErr)
+	}
+}
+
 func TestPrepareFailureLeavesNoAcceptedRunCallbackOrLaunch(t *testing.T) {
 	root := t.TempDir()
 	lifecycle := &lifecycleStub{}

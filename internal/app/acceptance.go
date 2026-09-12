@@ -309,11 +309,23 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
+	recoveredPreparation := false
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		if os.IsExist(err) {
-			return s.adoptPublished(id, dir, req)
+			adopted, adoptErr := s.adoptPublished(id, dir, req)
+			if adoptErr == nil {
+				return adopted, nil
+			}
+			if req.Prepare == nil || !recoverableUnpublished(dir) {
+				return result, adoptErr
+			}
+			if prepareErr := req.Prepare(context.Background(), dir); prepareErr != nil {
+				return result, &Error{Kind: StorageUnavailable, Op: "prepare", JobID: id, Cause: prepareErr}
+			}
+			recoveredPreparation = true
+		} else {
+			return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 		}
-		return result, &Error{Kind: StorageUnavailable, Op: "submit", JobID: id, Cause: err}
 	}
 	accepted := false
 	defer func() {
@@ -324,7 +336,7 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 			_ = os.RemoveAll(dir)
 		}
 	}()
-	if req.Prepare != nil {
+	if req.Prepare != nil && !recoveredPreparation {
 		if err := req.Prepare(context.Background(), dir); err != nil {
 			return result, &Error{Kind: StorageUnavailable, Op: "prepare", JobID: id, Cause: err}
 		}
@@ -381,6 +393,15 @@ func (s AcceptanceServices) publishPrepared(id, dir string, req PreparedSubmissi
 	}
 	accepted = true
 	return SubmitResult{JobID: id, AcceptedSeq: written[0].Seq, Status: string(kernel.StatusRunning)}, nil
+}
+
+func recoverableUnpublished(dir string) bool {
+	for _, name := range []string{"blueprint.snapshot.yaml", runconfig.FileName, "events.ndjson"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil || !os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s AcceptanceServices) adoptPublished(id, dir string, req PreparedSubmission) (SubmitResult, error) {
