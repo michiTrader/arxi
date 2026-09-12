@@ -312,8 +312,8 @@ func TestAlreadyRecordedExpiryIsStableAndIdempotent(t *testing.T) {
 	}
 	eventsBefore, _ := readExactApprovalState(t, dir)
 	_, err := DecideExact(dir, "approval-1", Reply{Decision: DecisionReject, Text: "still unsafe", Principal: "operator:bob"}, at.Add(time.Hour))
-	if !errors.Is(err, ErrAlreadyAnswered) {
-		t.Fatalf("decision after recorded expiry = %v, want ErrAlreadyAnswered: the durable terminal fact must win without another expiry append", err)
+	if !errors.Is(err, ErrAuthorizationExpired) {
+		t.Fatalf("decision after recorded expiry = %v, want ErrAuthorizationExpired: retries must return the same fail-closed result without another expiry append", err)
 	}
 	eventsAfter, _ := readExactApprovalState(t, dir)
 	if len(eventsAfter) != len(eventsBefore) {
