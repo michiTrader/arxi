@@ -472,12 +472,17 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		return fail(fmt.Errorf("verify immutable execution config: %w", err))
 	}
 	if effective.SupportsWorkspaceContract() {
-		if effective.WorkspaceContract.Source.Kind == "git" {
-			if _, verifyErr := workspacefs.Verify(context.Background(), effective.WorkspaceContract.Source); verifyErr != nil {
+		contract := effective.WorkspaceContract
+		platform, platformErr := workspaceContractPlatform(contract)
+		if platformErr != nil {
+			return fail(platformErr)
+		}
+		if contract.Source.Kind == "git" {
+			if _, verifyErr := workspacefs.Verify(context.Background(), contract.Source); verifyErr != nil {
 				return fail(fmt.Errorf("verify frozen workspace source: %w", verifyErr))
 			}
 		}
-		current, verifyErr := currentWorkspaceContract(effective.Config, effective.WorkspaceContract.Source, effective.WorkspaceContract.Decisions[0].Platform)
+		current, verifyErr := currentWorkspaceContract(effective.Config, contract.Source, platform)
 		if verifyErr != nil {
 			return fail(fmt.Errorf("verify live workspace capabilities: %w", verifyErr))
 		}
@@ -569,6 +574,25 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		loop.Progress = w.opts.Claim.Checkpoint
 	}
 	return store, effective, loop, nil
+}
+
+func workspaceContractPlatform(contract *runconfig.WorkspaceContract) (string, error) {
+	if contract == nil {
+		return "", errors.New("workspace contract is absent")
+	}
+	if len(contract.Decisions) == 0 {
+		if len(contract.Requirements) != 0 {
+			return "", errors.New("workspace contract has requirements without platform decisions")
+		}
+		return "unknown", nil
+	}
+	platform := contract.Decisions[0].Platform
+	for _, decision := range contract.Decisions[1:] {
+		if decision.Platform != platform {
+			return "", errors.New("workspace contract mixes platform decisions")
+		}
+	}
+	return platform, nil
 }
 
 func currentWorkspaceContract(config kernel.Config, source workspace.SourceIdentity, platform string) (runconfig.WorkspaceContract, error) {
