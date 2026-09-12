@@ -62,8 +62,15 @@ func runGit(t *testing.T, dir string, args ...string) string {
 }
 
 func request(probe ProbeResult, mode workspace.Mode, member string) Request {
+	profile := workspace.Profile{Schema: workspace.ProfileSchemaV1, ID: workspace.DirectFilesProfileID,
+		FileAccess: workspace.FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
+		Process: workspace.ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}}
+	identity, err := profile.Identity()
+	if err != nil {
+		panic(err)
+	}
 	return Request{JobID: "job-1", Member: member, Mode: mode, ProfileID: workspace.DirectFilesProfileID,
-		ProvisionerVersion: probe.Capabilities.Provisioners[mode], Source: probe.Source}
+		ProfileIdentity: identity, ProvisionerVersion: probe.Capabilities.Provisioners[mode], Source: probe.Source}
 }
 
 func TestSourceLayoutsExposeFrozenTrackedTreeWithPromisedVisibility(t *testing.T) {
