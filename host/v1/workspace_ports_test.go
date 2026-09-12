@@ -72,6 +72,20 @@ func TestHostToolExecutionDeliversExactOpaqueHandleOncePerActor(t *testing.T) {
 	}
 }
 
+func TestPreparedOpaqueHandleIsReusedWithoutProvisioning(t *testing.T) {
+	spaces := &recordingProvisioner{}
+	tools := &recordingTools{}
+	handle := Workspace("opaque:prepared")
+	x := &textExecutor{tools: tools, workspaces: spaces, jobID: "job-prepared",
+		handles: map[string]Workspace{"writer": handle}}
+	if _, err := x.CallTool(context.Background(), kernel.CallTool{Agent: "writer", Tool: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	if spaces.calls["writer"] != 0 || len(tools.calls) != 1 || tools.calls[0].Workspace != handle {
+		t.Fatalf("provision calls/tools = %d/%#v: acceptance-prepared handle must reach execution unchanged without a second provision", spaces.calls["writer"], tools.calls)
+	}
+}
+
 func TestWorkspaceProvisionFailurePreventsToolDispatch(t *testing.T) {
 	spaces := &recordingProvisioner{err: errors.New("workspace mode none has no root")}
 	tools := &recordingTools{}

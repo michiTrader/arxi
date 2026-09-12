@@ -18,6 +18,7 @@ type storageWorker struct {
 	provider     TextProvider
 	tools        ToolExecutor
 	workspaces   WorkspaceProvisioner
+	prepared     map[string]Workspace
 	now          func() time.Time
 	coordination *workerCoordination
 	heartbeat    time.Duration
@@ -43,9 +44,10 @@ type storageCommand struct {
 }
 
 func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider, tools ToolExecutor,
-	workspaces WorkspaceProvisioner, now func() time.Time, start kernel.Event) *storageWorker {
+	workspaces WorkspaceProvisioner, prepared map[string]Workspace, now func() time.Time, start kernel.Event) *storageWorker {
 	start.Seq = 1
-	return &storageWorker{id: id, record: record, writer: writer, provider: provider, tools: tools, workspaces: workspaces, now: now,
+	return &storageWorker{id: id, record: record, writer: writer, provider: provider, tools: tools, workspaces: workspaces,
+		prepared: prepared, now: now,
 		events: []kernel.Event{start}, changed: make(chan struct{}), done: make(chan struct{}),
 		commands: make(chan storageCommand, 32), wake: make(chan struct{}, 1), stop: make(chan struct{})}
 }
@@ -96,7 +98,7 @@ func (w *storageWorker) run() {
 		clock, timekeeper = real, exec.RealTime{C: real}
 	}
 	executor := &textExecutor{provider: w.provider, tools: w.tools, workspaces: w.workspaces,
-		jobID: w.id, effective: metadata.Effective}
+		jobID: w.id, effective: metadata.Effective, handles: w.prepared}
 	runner := &exec.Runner{Log: log, Clock: clock,
 		Executor: executor,
 		Config:   metadata.Effective.Config, RunID: string(w.id), JobID: string(w.id),

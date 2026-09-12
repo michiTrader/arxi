@@ -146,6 +146,22 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	if hostRequiresTools(requirements) && (b.tools == nil || b.workspaces == nil) {
 		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace-backed tools require both Options.Tools and Options.Workspaces before acceptance")
 	}
+	preparedHandles := map[string]Workspace{}
+	if b.workspaces != nil {
+		for _, requirement := range requirements {
+			if requirement.FileAccess == workspace.FileAccessNone && !requirement.RequiresBash {
+				continue
+			}
+			handle, provisionErr := b.workspaces.Provision(ctx, WorkspaceRequest{JobID: id, Actor: requirement.Member})
+			if provisionErr != nil {
+				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provision before acceptance: "+provisionErr.Error())
+			}
+			if handle == "" {
+				return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace provisioner returned an empty handle before acceptance")
+			}
+			preparedHandles[requirement.Member] = handle
+		}
+	}
 	decisions, err := workspace.Preflight(requirements, hostWorkspaceCapabilities(requirements, b.tools, b.workspaces))
 	if err != nil {
 		return SubmitResult{}, invalidArgument(CapabilitySubmit, "workspace preflight: "+err.Error())
@@ -208,7 +224,7 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 		executionClaim = claim
 		created.Writer = writer
 	}
-	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.tools, b.workspaces, b.now, start)
+	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.tools, b.workspaces, preparedHandles, b.now, start)
 	if b.coordination != nil {
 		worker.coordination = &workerCoordination{port: b.coordination, claim: executionClaim}
 		worker.heartbeat = b.heartbeat
