@@ -292,7 +292,7 @@ func Validate(a Artifact) error {
 		if a.WorkspaceContract.Source.Schema != workspace.SchemaV1 || a.WorkspaceContract.Source.Kind == "" {
 			return fmt.Errorf("workspace contract requires a versioned source identity")
 		}
-		if len(a.WorkspaceContract.Requirements) == 0 || len(a.WorkspaceContract.Decisions) != len(a.WorkspaceContract.Requirements) {
+		if len(a.WorkspaceContract.Decisions) != len(a.WorkspaceContract.Requirements) {
 			return fmt.Errorf("workspace contract requires one platform decision per member requirement")
 		}
 		for i, requirement := range a.WorkspaceContract.Requirements {

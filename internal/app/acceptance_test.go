@@ -108,8 +108,12 @@ func TestSubmitPreparedPublishesExactArtifactAndCallbackBoundary(t *testing.T) {
 	blueprintSum := sha256.Sum256(blueprintBytes)
 	artifact := runconfig.New("r1", "sim", hex.EncodeToString(blueprintSum[:]), "exact prompt", "exact-model", cfg,
 		[]runconfig.Route{{Ref: "exact-model", Provider: "p", Protocol: model.ProtocolOpenAIChatCompletions, Model: "frozen", BaseURL: "https://example.test"}}, nil)
-	callbackCalled := false
 	service := AcceptanceServices{RunsDir: root, Lifecycle: lifecycle}
+	artifact, err := service.freezeWorkspace(artifact)
+	if err != nil {
+		t.Fatalf("freeze prepared workspace contract: %v", err)
+	}
+	callbackCalled := false
 	submission, err := service.SubmitPrepared(context.Background(), PreparedSubmission{
 		JobID: "r1", Actor: "worker", Blueprint: blueprintBytes, Artifact: artifact,
 		BudgetUSD: 2, MaxTurns: 3,
