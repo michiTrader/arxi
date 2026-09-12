@@ -2,8 +2,11 @@ package v1
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
@@ -13,8 +16,15 @@ import (
 // textExecutor adapts the public, provider-neutral text port to the internal
 // durable effect contract. It deliberately implements only Phase 1 text turns.
 type textExecutor struct {
-	provider  TextProvider
-	effective runconfig.Artifact
+	provider   TextProvider
+	tools      ToolExecutor
+	workspaces WorkspaceProvisioner
+	jobID      JobID
+	effective  runconfig.Artifact
+
+	mu       sync.Mutex
+	handles  map[string]Workspace
+	requests map[string]WorkspaceRequest
 }
 
 func (x *textExecutor) SpawnTurn(ctx context.Context, effect kernel.SpawnTurn) ([]kernel.Event, error) {
@@ -70,8 +80,61 @@ func textSystem(spec kernel.ContextSpec) string {
 	return strings.Join(parts, "\n")
 }
 
-func (x *textExecutor) CallTool(context.Context, kernel.CallTool) ([]kernel.Event, error) {
-	return nil, exec.NotDispatched(fmt.Errorf("public text provider does not support tool calls"))
+func (x *textExecutor) CallTool(ctx context.Context, effect kernel.CallTool) ([]kernel.Event, error) {
+	if x.tools == nil || x.workspaces == nil {
+		return nil, exec.NotDispatched(fmt.Errorf("public text host has no tool executor and workspace provisioner configured"))
+	}
+	handle, err := x.workspace(ctx, effect.Agent)
+	if err != nil {
+		return nil, exec.NotDispatched(err)
+	}
+	arguments, err := json.Marshal(effect.Args)
+	if err != nil {
+		return nil, exec.NotDispatched(fmt.Errorf("encode tool arguments: %w", err))
+	}
+	result, err := x.tools.Execute(ctx, ToolInvocation{JobID: x.jobID, Actor: effect.Agent,
+		Name: effect.Tool, Arguments: append(json.RawMessage(nil), arguments...), Workspace: handle})
+	if err != nil {
+		return nil, err
+	}
+	return []kernel.Event{{Type: kernel.ToolCallCompleted, Source: kernel.SourceAgent, Actor: effect.Agent,
+		Payload: map[string]any{"tool": effect.Tool, "result": string(result.Content)}}}, nil
+}
+
+func (x *textExecutor) workspace(ctx context.Context, actor string) (Workspace, error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if handle := x.handles[actor]; handle != "" {
+		return handle, nil
+	}
+	req := WorkspaceRequest{JobID: x.jobID, Actor: actor}
+	handle, err := x.workspaces.Provision(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("provision workspace for job %s actor %q: %w", x.jobID, actor, err)
+	}
+	if handle == "" {
+		return "", fmt.Errorf("workspace provisioner returned an empty handle for job %s actor %q", x.jobID, actor)
+	}
+	if x.handles == nil {
+		x.handles, x.requests = map[string]Workspace{}, map[string]WorkspaceRequest{}
+	}
+	x.handles[actor], x.requests[actor] = handle, req
+	return handle, nil
+}
+
+func (x *textExecutor) release(ctx context.Context) error {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	var releaseErr error
+	for actor, handle := range x.handles {
+		if err := x.workspaces.Release(ctx, handle); err != nil {
+			releaseErr = errors.Join(releaseErr, fmt.Errorf("release workspace for %s: %w", actor, err))
+		}
+	}
+	if releaseErr == nil {
+		x.handles = nil
+	}
+	return releaseErr
 }
 
 func (x *textExecutor) AskHuman(_ context.Context, effect kernel.AskHuman) ([]kernel.Event, error) {

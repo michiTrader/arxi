@@ -26,6 +26,8 @@ type storageBackend struct {
 	coordination Coordination
 	heartbeat    time.Duration
 	provider     TextProvider
+	tools        ToolExecutor
+	workspaces   WorkspaceProvisioner
 	now          func() time.Time
 	capabilities *capabilityResolver
 
@@ -70,7 +72,8 @@ func newBackend(options Options) backend {
 	}
 	backend := &storageBackend{
 		storage: options.Storage, coordination: options.Coordination, heartbeat: heartbeat,
-		provider: options.Provider, now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
+		provider: options.Provider, tools: options.Tools, workspaces: options.Workspaces,
+		now: options.Now, capabilities: resolver, workers: map[JobID]*storageWorker{},
 	}
 	if options.Provider != nil && options.Coordination != nil {
 		if _, safe := options.Storage.(CoordinatedJobStorageV1); safe {
@@ -202,7 +205,7 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 		executionClaim = claim
 		created.Writer = writer
 	}
-	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.now, start)
+	worker := newStorageWorker(id, created.Record, created.Writer, b.provider, b.tools, b.workspaces, b.now, start)
 	if b.coordination != nil {
 		worker.coordination = &workerCoordination{port: b.coordination, claim: executionClaim}
 		worker.heartbeat = b.heartbeat
@@ -658,7 +661,7 @@ func (b *storageBackend) claimWorker(ctx context.Context, id JobID) (*storageWor
 		_ = writer.Close()
 		return nil, err
 	}
-	worker, err := newRecoveredStorageWorker(id, record, writer, b.provider, b.now, events,
+	worker, err := newRecoveredStorageWorker(id, record, writer, b.provider, b.tools, b.workspaces, b.now, events,
 		&workerCoordination{port: b.coordination, claim: claim}, b.heartbeat)
 	if err != nil {
 		_ = writer.Close()

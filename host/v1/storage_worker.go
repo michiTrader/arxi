@@ -16,6 +16,8 @@ type storageWorker struct {
 	record       JobRecord
 	writer       JobWriter
 	provider     TextProvider
+	tools        ToolExecutor
+	workspaces   WorkspaceProvisioner
 	now          func() time.Time
 	coordination *workerCoordination
 	heartbeat    time.Duration
@@ -40,15 +42,17 @@ type storageCommand struct {
 	reply      chan error
 }
 
-func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider, now func() time.Time, start kernel.Event) *storageWorker {
+func newStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider, tools ToolExecutor,
+	workspaces WorkspaceProvisioner, now func() time.Time, start kernel.Event) *storageWorker {
 	start.Seq = 1
-	return &storageWorker{id: id, record: record, writer: writer, provider: provider, now: now,
+	return &storageWorker{id: id, record: record, writer: writer, provider: provider, tools: tools, workspaces: workspaces, now: now,
 		events: []kernel.Event{start}, changed: make(chan struct{}), done: make(chan struct{}),
 		commands: make(chan storageCommand, 32), wake: make(chan struct{}, 1), stop: make(chan struct{})}
 }
 
 func newRecoveredStorageWorker(id JobID, record JobRecord, writer JobWriter, provider TextProvider,
-	now func() time.Time, events []kernel.Event, coordination *workerCoordination, heartbeat time.Duration) (*storageWorker, error) {
+	tools ToolExecutor, workspaces WorkspaceProvisioner, now func() time.Time, events []kernel.Event,
+	coordination *workerCoordination, heartbeat time.Duration) (*storageWorker, error) {
 	recovery, err := exec.Recover(events)
 	if err != nil {
 		return nil, err
@@ -56,7 +60,8 @@ func newRecoveredStorageWorker(id JobID, record JobRecord, writer JobWriter, pro
 	if !recovery.HasProgress {
 		return nil, errors.New("job has no durable execution progress")
 	}
-	return &storageWorker{id: id, record: record, writer: writer, provider: provider, now: now,
+	return &storageWorker{id: id, record: record, writer: writer, provider: provider, tools: tools,
+		workspaces: workspaces, now: now,
 		coordination: coordination, heartbeat: heartbeat, events: append([]kernel.Event(nil), events...),
 		changed: make(chan struct{}), done: make(chan struct{}), commands: make(chan storageCommand, 32),
 		wake: make(chan struct{}, 1), stop: make(chan struct{})}, nil
@@ -90,8 +95,10 @@ func (w *storageWorker) run() {
 		}
 		clock, timekeeper = real, exec.RealTime{C: real}
 	}
+	executor := &textExecutor{provider: w.provider, tools: w.tools, workspaces: w.workspaces,
+		jobID: w.id, effective: metadata.Effective}
 	runner := &exec.Runner{Log: log, Clock: clock,
-		Executor: &textExecutor{provider: w.provider, effective: metadata.Effective},
+		Executor: executor,
 		Config:   metadata.Effective.Config, RunID: string(w.id), JobID: string(w.id),
 		Authorization: exec.AuthorizationConfig{
 			ToolSchemaVersion: metadata.Effective.ToolSchemaVersion, PolicyVersion: metadata.Effective.PolicyVersion,
