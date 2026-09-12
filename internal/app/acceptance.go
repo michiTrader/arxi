@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -480,7 +481,10 @@ func syncDirectory(dir string) error {
 		return err
 	}
 	defer opened.Close()
-	return opened.Sync()
+	if err := opened.Sync(); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
+	return nil
 }
 
 // Wait observes retained supervisor generations according to a private policy.
