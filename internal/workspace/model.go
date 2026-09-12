@@ -85,16 +85,18 @@ type Requirement struct {
 }
 
 type Capabilities struct {
-	Schema       string          `json:"schema"`
-	Platform     string          `json:"platform"`
-	Modes        []Mode          `json:"modes"`
-	SourceKinds  []string        `json:"source_kinds"`
-	Profiles     []Profile       `json:"profiles"`
-	Provisioners map[Mode]string `json:"provisioners"`
+	Schema            string          `json:"schema"`
+	CapabilityVersion string          `json:"capability_version"`
+	Platform          string          `json:"platform"`
+	Modes             []Mode          `json:"modes"`
+	SourceKinds       []string        `json:"source_kinds"`
+	Profiles          []Profile       `json:"profiles"`
+	Provisioners      map[Mode]string `json:"provisioners"`
 }
 
 type PlatformDecision struct {
 	Schema             string `json:"schema"`
+	Member             string `json:"member"`
 	Platform           string `json:"platform"`
 	CapabilityVersion  string `json:"capability_version"`
 	ProfileID          string `json:"profile_id"`
