@@ -59,12 +59,13 @@ type Artifact struct {
 func Project(runID, subject, effectiveSHA string, events []kernel.Event, through int64) (Artifact, error) {
 	artifact := Artifact{Schema: Schema, RunID: runID, Subject: subject, ProjectorVersion: ProjectorVersion,
 		SourceFromSeq: 1, SourceThroughSeq: through, EffectiveConfigSHA: effectiveSHA, Items: []Item{}}
+	native := nativeModelSegments(events)
 	for _, event := range events {
 		if event.Seq <= 0 || event.Seq > through {
 			continue
 		}
 		artifact.SourceThroughEventID = event.ID
-		if err := projectEvent(&artifact, event, subject); err != nil {
+		if err := projectEvent(&artifact, event, subject, native); err != nil {
 			return Artifact{}, err
 		}
 	}
@@ -76,9 +77,49 @@ func Project(runID, subject, effectiveSHA string, events []kernel.Event, through
 	return artifact, nil
 }
 
-func projectEvent(artifact *Artifact, event kernel.Event, subject string) error {
+// nativeModelSegments marks which llm.response events are the final projection
+// of a native turn whose exact content already survives in committed model
+// child results. The boundary is the actor's previous agent.turn_done: a
+// domain llm.response inside a segment that produced child results is derived
+// evidence and is skipped, while a segment without children is a legacy
+// text-only turn whose llm.response is the only surviving model output.
+func nativeModelSegments(events []kernel.Event) map[int64]bool {
+	native := map[int64]bool{}
+	lastDone := map[string]int64{}
+	children := map[string][]int64{}
+	for _, event := range events {
+		if event.Seq <= 0 {
+			continue
+		}
+		switch event.Type {
+		case kernel.AgentTurnDone:
+			lastDone[event.Actor] = event.Seq
+			children[event.Actor] = nil
+		case kernel.ExecWorkFinished:
+			if event.Str("child_kind") == "model" && event.Str("result_json") != "" {
+				actor := event.Str("agent")
+				children[actor] = append(children[actor], event.Seq)
+			}
+		case kernel.LLMResponse:
+			start := lastDone[event.Actor]
+			for _, seq := range children[event.Actor] {
+				if seq > start && seq < event.Seq {
+					native[event.Seq] = true
+					break
+				}
+			}
+		}
+	}
+	return native
+}
+
+func projectEvent(artifact *Artifact, event kernel.Event, subject string, native map[int64]bool) error {
 	target := event.Str("to")
-	visible := event.Actor == subject || event.Actor == "" && target == "" || target == subject
+	// Native child results are appended by the runtime, not by the member, so
+	// their subject is the agent recorded in the child payload rather than the
+	// event actor.
+	nativeChild := event.Type == kernel.ExecWorkFinished && event.Str("agent") == subject
+	visible := nativeChild || event.Actor == subject || event.Actor == "" && target == "" || target == subject
 	if !visible {
 		return nil
 	}
@@ -95,7 +136,23 @@ func projectEvent(artifact *Artifact, event kernel.Event, subject string) error 
 	case kernel.RunPrompt, kernel.AgentSteered, kernel.AgentNotified:
 		addText(UserInput, event.Str("text"), false)
 	case kernel.LLMResponse:
-		addText(ModelOutput, event.Str("text"), true)
+		// A native segment's exact canonical content is projected from its
+		// committed child results below; adding the derived llm.response text
+		// would duplicate the final round inside one conversation.
+		if !native[event.Seq] {
+			addText(ModelOutput, event.Str("text"), true)
+		}
+	case kernel.ExecWorkFinished:
+		if event.Str("child_kind") == "model" && event.Str("result_json") != "" && event.Str("agent") == subject {
+			var response turn.Response
+			if err := json.Unmarshal([]byte(event.Str("result_json")), &response); err != nil {
+				return fmt.Errorf("decode native model result at seq %d: %w", event.Seq, err)
+			}
+			if len(response.Content) > 0 {
+				artifact.Items = append(artifact.Items, Item{Kind: ModelOutput, Actor: subject,
+					SourceSeq: event.Seq, SourceID: event.ID, Content: response.Content})
+			}
+		}
 	case kernel.ToolCall:
 		call, err := toolCall(event)
 		if err != nil {

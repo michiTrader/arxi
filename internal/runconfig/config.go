@@ -68,12 +68,19 @@ type Artifact struct {
 	SimVersion          int                                  `json:"sim_version,omitempty"`
 	ToolSchemaVersion   string                               `json:"tool_schema_version,omitempty"`
 	PolicyVersion       string                               `json:"policy_version,omitempty"`
+	ContextPrepVersion  string                               `json:"context_prep_version,omitempty"`
 	WorkspaceProfileID  string                               `json:"workspace_profile_id,omitempty"`
 	WorkspaceContract   *WorkspaceContract                   `json:"workspace_contract,omitempty"`
 	AuthorizationTTLMS  int64                                `json:"authorization_ttl_ms,omitempty"`
 	Contracts           Contracts                            `json:"contracts"`
 	legacyAuthorization bool
 }
+
+// DefaultContextPrepVersion names the durable context preparation contract a
+// new run is accepted under. Artifacts without it predate ADR-0013 and keep
+// the legacy single-turn preparation on resume: a run cannot gain a
+// prepared-context proof it never recorded.
+const DefaultContextPrepVersion = "arxi.context-prep/v1"
 
 func New(runID, mode, blueprintSHA, prompt, defaultModel string, cfg kernel.Config,
 	routes []Route, policy map[string]map[string]surface.Policy) Artifact {
@@ -82,6 +89,7 @@ func New(runID, mode, blueprintSHA, prompt, defaultModel string, cfg kernel.Conf
 		Config: cfg, Prompt: prompt, DefaultModel: defaultModel,
 		Routes: routes, ToolPolicy: policy, SimVersion: SimulationNative,
 		ToolSchemaVersion: DefaultToolSchemaVersion, PolicyVersion: DefaultPolicyVersion,
+		ContextPrepVersion: DefaultContextPrepVersion,
 		WorkspaceProfileID: DefaultWorkspaceProfileID, AuthorizationTTLMS: DefaultAuthorizationTTLMS,
 		Contracts: Contracts{Kernel: 1, Effects: 1, Surface: surface.SurfaceVersion},
 	}

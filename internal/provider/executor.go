@@ -282,8 +282,29 @@ func (x *Executor) SpawnTurn(ctx context.Context, e kernel.SpawnTurn) ([]kernel.
 }
 
 // PrepareTurn resolves the model and freezes a provider-neutral request before
-// the durable coordinator records and dispatches the first model child.
+// the durable coordinator records and dispatches the first model child. It is
+// the legacy single-turn path; durable context preparation feeds the same
+// route through PrepareTurnContext instead.
 func (x *Executor) PrepareTurn(ctx context.Context, e kernel.SpawnTurn) (turn.Request, error) {
+	messages := buildMessages(e.Context, x.Prompt)
+	converted := make([]turn.Message, 0, len(messages))
+	for _, msg := range messages {
+		text, ok := msg.Content.(string)
+		if !ok {
+			return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: context message %q is not text", e.Agent, msg.Role))
+		}
+		converted = append(converted, turn.Message{Role: turn.Role(msg.Role), Content: []turn.ContentBlock{{
+			Type: turn.BlockText, Text: text,
+		}}})
+	}
+	return x.PrepareTurnContext(ctx, e, converted)
+}
+
+// PrepareTurnContext combines the frozen route, tools and generation options
+// with the exact presentation the runner verified. The messages are used as
+// given: selecting, reordering or rebuilding them here would silently replace
+// the committed context.prepared with a different prompt.
+func (x *Executor) PrepareTurnContext(ctx context.Context, e kernel.SpawnTurn, messages []turn.Message) (turn.Request, error) {
 	if err := ctx.Err(); err != nil {
 		return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: %w", e.Agent, err))
 	}
@@ -295,20 +316,11 @@ func (x *Executor) PrepareTurn(ctx context.Context, e kernel.SpawnTurn) (turn.Re
 		return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: provider %s uses unsupported protocol %s",
 			e.Agent, res.Provider, res.Protocol))
 	}
-	messages := buildMessages(e.Context, x.Prompt)
 	req := turn.Request{
 		Schema: turn.Schema, Provider: res.Provider, Protocol: res.Protocol,
 		BaseURL: res.BaseURL, APIKeyEnv: res.APIKeyEnv,
 		Model: res.Model, MaxTokens: maxTokensFor(e.Context), Temperature: x.Temperature,
-	}
-	for _, msg := range messages {
-		text, ok := msg.Content.(string)
-		if !ok {
-			return turn.Request{}, exec.NotDispatched(fmt.Errorf("prepare turn for %s: context message %q is not text", e.Agent, msg.Role))
-		}
-		req.Messages = append(req.Messages, turn.Message{Role: turn.Role(msg.Role), Content: []turn.ContentBlock{{
-			Type: turn.BlockText, Text: text,
-		}}})
+		Messages: messages,
 	}
 	for _, name := range x.toolsFor(e.Agent) {
 		schema, err := json.Marshal(toolSchema(name))

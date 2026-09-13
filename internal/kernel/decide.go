@@ -1576,6 +1576,8 @@ func isWatcherDispatched(t EventType) bool {
 
 func isExecutionMetadata(t EventType) bool {
 	switch t {
+	case ContextPrepareRequested, ContextPrepared, ContextPrepareFailed:
+		return true
 	case ExecWorkPrepared, ExecWorkStarted, ExecWorkFinished, ExecStepCompleted,
 		TimerScheduled, TimerCancelled, TimerFired:
 		return true
