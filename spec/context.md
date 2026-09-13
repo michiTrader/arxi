@@ -1,7 +1,9 @@
 # Canonical transcript and prepared context
 
-This specification implements ADR-0013. It defines provider-neutral evidence
-recorded before a model call. It does not define compaction or cross-run memory.
+This specification implements ADR-0013 and ADR-0014. It defines provider-neutral
+evidence recorded before a model call, the budgets and pressure measurement that
+govern it, and the compaction artifact produced when a known limit is exceeded.
+It does not define cross-run memory.
 
 ## Schemas
 
@@ -9,6 +11,10 @@ recorded before a model call. It does not define compaction or cross-run memory.
 - `arxi.prepared-context/v1` is the exact presentation selected for one model
   child.
 - `arxi.context-prepare/v1` identifies one durable preparation request.
+- `arxi.context-budget/v1` is the versioned layer-budget policy derived from a
+  known input limit.
+- `arxi.compaction/v1` is the verified lossy compaction produced when measured
+  pressure exceeds a known limit under `on_overflow: summarize`.
 
 Unknown schemas fail closed. Historical runs without these records retain their
 historical replay meaning and are classified as legacy; they do not acquire a
@@ -29,7 +35,8 @@ and exact bytes. The domains are:
 - `arxi.transcript-content/v1`;
 - `arxi.context-id/v1`;
 - `arxi.context-content/v1`;
-- `arxi.context-presentation/v1`.
+- `arxi.context-presentation/v1`;
+- `arxi.compaction-content/v1`.
 
 Exact bytes remain the evidence. A digest is an integrity binding and index, not
 a replacement for content.
@@ -48,6 +55,12 @@ Every item contains a deterministic item ID, kind, actor, audience, source
 sequence, source event ID, within-source index, canonical content blocks and any
 kind-specific identity. Kinds are `user_input`, `model_output`, `tool_call`,
 `tool_result`, `human_decision` and `artifact_reference`.
+
+Kind-specific identity is load-bearing for `model_output`: an item projected
+from a native model child records the child work ID and the provider response
+ID. Compaction ranges and omission ledgers bind to those durable records, so a
+summary can always be audited against the execution that produced its sources.
+Historical items without the binding replay unchanged.
 
 Ordering is ascending source sequence and then within-source index. Projectors
 must reject duplicate sequence positions or contradictory exact native and domain
@@ -112,6 +125,12 @@ framing. The existing model-child request digest binds the complete
 `arxi.turn/v1` request including route, tools and generation options. These three
 digests are not interchangeable.
 
+The overflow decision records whether measured pressure exceeded a known input
+limit, the mode that governed the outcome, and — when compaction ran — the
+compaction artifact's identity and content digest. A prepared context over a
+known limit without either a verified compaction artifact or a terminal
+preparation failure must not exist.
+
 ## Measurements, memory and overflow
 
 A token measurement records implementation and version, target model, tokens per
@@ -124,9 +143,74 @@ and effective-config digest. The receipt list is empty when no memory contribute
 Semantic retrieval, ranking, autonomous memory and cross-run scope belong to Phase
 7 and are not performed here.
 
-Phase 5 performs no lossy selection. If a known limit is exceeded, preparation
-records a visible failure. It does not honor `on_overflow: summarize` until Phase
-6 supplies a versioned compaction artifact, and it never truncates silently.
+## Pressure, budgets and compaction
+
+Layer budgets are the versioned policy `arxi.context-budget/v1`. When the input
+limit is known, budgets are derived from it in fixed quarters — static 1/4,
+summary 1/8, verbatim 1/2, input 1/8 — by integer division, with the remainder
+left as headroom. The derivation is deterministic, and the budget values that
+governed a preparation are recorded inside the artifacts that obeyed them. When
+the input limit is unknown, pressure is unknown: no budget is derived, no
+compaction is triggered, and no limit is invented.
+
+Pressure is the measured total against the known input limit. A single layer
+over its budget does not trigger anything by itself; the budgets are allocation
+targets the compactor must respect once total pressure exists.
+
+When pressure exceeds a known limit:
+
+- `on_overflow: summarize` produces one compaction artifact under
+  `arxi.compaction/v1`, embedded in the prepared context and committed in the
+  same `context.prepared` batch.
+- any other declared value fails preparation terminally through
+  `context.prepare_failed`. Unknown modes never fall back to summarize.
+- compaction that cannot bring the measured total within the limit — for
+  example a static layer that alone exceeds it — fails visibly. Shrinking the
+  window without an artifact is silent truncation and is forbidden.
+
+## Compaction artifact
+
+`arxi.compaction/v1` contains:
+
+- schema, context ID, run ID, subject and source boundary;
+- generator identity and version, and the budget policy values used;
+- an ordered lossy summary whose every claim cites the transcript item IDs it
+  was extracted from;
+- the recent verbatim window as an ordered list of transcript item IDs;
+- source ranges for the summarized material;
+- retained critical items kept verbatim outside the window only where pair or
+  anchor integrity requires it;
+- an omission ledger recording, by item ID, kind and content digest, every
+  item presented neither verbatim nor through a claim;
+- before and after token counts under the same measurement identity.
+
+The summary is extractive. A claim's text must be contained in the concatenated
+text of exactly the items it cites; a claim that cannot be proven against its
+citation fails closed before the artifact may exist. A claim shortened by the
+summary budget is labelled incomplete rather than silently cut. Generated prose
+that cannot meet this gate does not commit, whatever produced it.
+
+Continuity anchors are user inputs, human decisions and the final model output
+of each completed turn (the model output immediately preceding the next user
+input, or the last item). Every anchor is inside the verbatim window or cited
+by at least one claim; none may appear only in the omission ledger.
+
+The verbatim window is a suffix of the item order and never splits a tool call
+from its result. The presented conversation is therefore always provider-valid:
+a tool result message never appears without its preceding call.
+
+Compaction never modifies the transcript. The prepared context continues to
+embed the full canonical transcript and its digest; only the presentation loses
+material, and the omission ledger accounts for everything lost by identity.
+Recovery that cannot reproduce the ledger's accounting treats the artifact as
+corrupt.
+
+## Compaction failure
+
+Generator errors, verification failures and budgets that cannot be satisfied
+are preparation failures: terminal, classed `compaction`, and visible in the
+event history. A compaction failure never produces a partial presentation, and
+a model child never starts from an unverified summary.
 
 ## Durable events
 
@@ -154,8 +238,12 @@ not create a source step, wake an agent or participate in quiescence.
   versions.
 - If exact artifact bytes exist without `context.prepared`, they are unconfirmed
   data and may be adopted only after byte equality is proven.
-- A valid `context.prepared` is loaded and verified; projector, memory, tokenizer
-  and preparer are not called again.
+- A valid `context.prepared` is loaded and verified; projector, memory, tokenizer,
+  preparer and compaction generator are not called again. A committed compaction
+  artifact is reused byte-for-byte with the rest of the preparation: recovery
+  re-proves its digest and its agreement with the overflow decision, and the
+  deterministic verifier remains available to audit and replay tooling at any
+  time.
 - Missing bytes, digest mismatch, unknown version or conflicting values for one
   context ID is corruption and fails before model dispatch.
 - A prepared but unstarted model child dispatches its exact stored request. A
@@ -171,6 +259,8 @@ not create a source step, wake an agent or participate in quiescence.
 4. No model child starts without a matching verified presentation.
 5. Context selection cannot expand tool, workspace, artifact or memory authority.
 6. Credentials and provider-native objects never enter these artifacts.
-7. The canonical transcript remains intact; Phase 5 performs no compaction.
+7. The canonical transcript remains intact: compaction changes only the
+   presentation, and every transcript item is accounted for — verbatim in the
+   window, cited by a claim, retained, or recorded in the omission ledger.
 8. Public `host/v1` remains source-compatible unless a separate versioned contract
    is introduced.
