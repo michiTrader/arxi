@@ -88,6 +88,13 @@ const (
 	InboxReplied EventType = "inbox.replied"
 	InboxTimeout EventType = "inbox.timeout"
 
+	// --- context preparation ---
+	// These records bind immutable model input before external dispatch. Like
+	// exec.* they are operational facts, not reducer inputs.
+	ContextPrepareRequested EventType = "context.prepare_requested"
+	ContextPrepared         EventType = "context.prepared"
+	ContextPrepareFailed    EventType = "context.prepare_failed"
+
 	// --- durable execution progress ---
 	// These records are operational facts. They never wake watchers or cause
 	// quiescence decisions; the executor uses them to recover effect boundaries.

@@ -22,6 +22,7 @@ has to decide which — not ignore the contradiction.
 | [0010](0010-durable-jobs-attempts-and-scheduling.md) | Durable work uses occurrences, fenced attempts and explicit outcomes | accepted |
 | [0011](0011-exact-single-use-authorization.md) | Authorization binds and consumes one exact action | accepted |
 | [0012](0012-honest-platform-workspaces.md) | Workspace names describe provisioned, platform-verified guarantees | accepted |
+| [0013](0013-confirmed-transcript-prepared-context.md) | Confirmed history is projected once and prepared context is immutable before model dispatch | accepted |
 
 ## Format
 

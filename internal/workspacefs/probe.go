@@ -68,7 +68,11 @@ func Probe(ctx context.Context, source string) (ProbeResult, error) {
 	}
 	caps := workspace.CurrentCapabilities(runtime.GOOS)
 	caps.CapabilityVersion = capabilityVersion
-	caps.Modes = []workspace.Mode{workspace.ModeNone, workspace.ModeShared, workspace.ModeCopy, workspace.ModeWorktree}
+	// The provisioner versions below are evidence for internal provisioning and
+	// its tests, not availability: preflight accepts a mode only when it is in
+	// caps.Modes, and CurrentCapabilities deliberately advertises only `none`.
+	// Widening Modes here would let production runs accept source-backed layouts
+	// before the platform decision can promise their full contract.
 	caps.SourceKinds = []string{"git"}
 	caps.Provisioners = map[workspace.Mode]string{
 		workspace.ModeNone: "arxi.workspace.none/v1", workspace.ModeShared: provisionerVersion,

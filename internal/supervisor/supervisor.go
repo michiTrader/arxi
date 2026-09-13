@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/contextruntime"
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/logstore"
@@ -582,12 +583,17 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 			return time.Now().UTC().Format(time.RFC3339Nano)
 		}
 	}
+	context := contextConfig(events, effective)
 	runner := &exec.Runner{Log: store, Clock: clock, Executor: executor,
 		Config: effective.Config, RunID: w.id, JobID: w.id, Now: now,
 		Authorization: exec.AuthorizationConfig{
 			ToolSchemaVersion: effective.ToolSchemaVersion, PolicyVersion: effective.PolicyVersion,
 			WorkspaceProfileID: effective.WorkspaceProfileID, TTLMS: effective.AuthorizationTTLMS,
 		},
+		Context: context,
+	}
+	if context.EffectiveConfigSHA != "" {
+		runner.Pipeline = contextruntime.Adapter{}
 	}
 	if dispatches, ok := w.opts.Claim.(DispatchClaim); ok {
 		runner.JobID = w.id
@@ -599,6 +605,23 @@ func (w *worker) restore() (*logstore.Store, runconfig.Artifact, *exec.Loop, err
 		loop.Progress = w.opts.Claim.Checkpoint
 	}
 	return store, effective, loop, nil
+}
+
+// contextConfig enables durable context preparation only for runs accepted
+// under the contract and only with the digest run.started froze. VerifyBinding
+// has already proven that digest matches the effective-config bytes on disk,
+// so the prepared transcript binds the exact accepted configuration and a
+// resume can never present content from a different one.
+func contextConfig(events []kernel.Event, effective runconfig.Artifact) exec.ContextConfig {
+	if effective.ContextPrepVersion != runconfig.DefaultContextPrepVersion {
+		return exec.ContextConfig{}
+	}
+	for _, event := range events {
+		if event.Type == kernel.RunStarted {
+			return exec.ContextConfig{EffectiveConfigSHA: event.Str("effective_config_sha")}
+		}
+	}
+	return exec.ContextConfig{}
 }
 
 func workspaceContractPlatform(contract *runconfig.WorkspaceContract) (string, error) {

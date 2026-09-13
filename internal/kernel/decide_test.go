@@ -1764,3 +1764,31 @@ func TestTheReadmeProgressTableMatchesTheEngine(t *testing.T) {
 			want, reduced, len(names))
 	}
 }
+
+// TestContextPreparationEventsAreReducerInert pins the operational status of
+// the context.* records: they are durable evidence, not domain causes. If the
+// reducer ever folded them, a watcher on context.* could wake a member for
+// bookkeeping and replay would bill turns the original run never opened.
+func TestContextPreparationEventsAreReducerInert(t *testing.T) {
+	c := Config{Members: []MemberConfig{{Name: "backend"}}}.ResolveDefaults()
+	s := started(c)
+	before := len(s.Members)
+	for _, event := range []Event{
+		ev(ContextPrepareRequested, "", map[string]any{"schema": "arxi.context-prepare/v1", "context_id": "context-1", "parent_work_id": "work-1", "agent": "backend"}),
+		ev(ContextPrepared, "", map[string]any{"schema": "arxi.context-prepare/v1", "context_id": "context-1", "parent_work_id": "work-1", "agent": "backend", "transcript_digest": "abc", "prepared_context_digest": "def"}),
+		ev(ContextPrepareFailed, "", map[string]any{"schema": "arxi.context-prepare/v1", "context_id": "context-1", "parent_work_id": "work-1", "agent": "backend", "failure_class": "preparation", "error": "overflow"}),
+	} {
+		next, fx := Decide(s, event, c)
+		if len(fx) != 0 {
+			t.Fatalf("%s produced %d effects: operational context records must never open turns, arm timers or wake watchers", event.Type, len(fx))
+		}
+		if len(next.Members) != before {
+			t.Fatalf("%s changed the member roster: execution metadata is not a domain fact and must fold to the same state", event.Type)
+		}
+		for i := range next.Members {
+			if next.Members[i].State != s.Members[i].State {
+				t.Fatalf("%s moved member %q to %s: a context record must not make a run look busy or idle", event.Type, next.Members[i].Name, next.Members[i].State)
+			}
+		}
+	}
+}

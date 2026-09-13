@@ -364,7 +364,8 @@ func boundaryRequested(stop <-chan struct{}) bool {
 
 func isProgressEvent(t kernel.EventType) bool {
 	switch t {
-	case kernel.ExecWorkPrepared, kernel.ExecWorkStarted, kernel.ExecWorkFinished,
+	case kernel.ContextPrepareRequested, kernel.ContextPrepared, kernel.ContextPrepareFailed,
+		kernel.ExecWorkPrepared, kernel.ExecWorkStarted, kernel.ExecWorkFinished,
 		kernel.ExecStepCompleted, kernel.TimerScheduled, kernel.TimerCancelled,
 		kernel.TimerFired:
 		return true

@@ -212,6 +212,19 @@ type Runner struct {
 	// Authorization freezes versions and expiry used to bind an ask suspension.
 	Authorization AuthorizationConfig
 
+	// Context freezes Phase 5 context preparation. An empty EffectiveConfigSHA
+	// preserves legacy execution: turns prepare their request from the SpawnTurn
+	// context alone and record no context.* events, so old runs keep replaying
+	// with the behavior they were accepted under instead of gaining a proof they
+	// never recorded.
+	Context ContextConfig
+
+	// Pipeline performs the domain work behind the durable context barrier.
+	// internal/transcript and internal/contextprep satisfy it at the wiring
+	// site; exec declares the data it needs instead of importing them, which is
+	// what keeps the executor's dependency direction pointing downwards.
+	Pipeline ContextPipeline
+
 	// Now supplies the timestamp stamped onto events that arrive without one.
 	//
 	// Injected rather than read from the package `time` for the same reason

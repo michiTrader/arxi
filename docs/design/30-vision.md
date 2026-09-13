@@ -160,11 +160,19 @@ requirement.
 
 ### Durable execution
 
-**Proposed.** Scheduled and background work should survive process restarts through
-durable jobs, leases, attempts, checkpoints and idempotency. Workspace modes must
-provide the isolation their names claim, with platform-specific behavior tested
-negatively. The service surface should expose only operations that have real,
-authorized handlers.
+**Current.** Coordinated storage records durable jobs, stable trigger
+occurrences, fenced attempts, heartbeats, checkpoints, dispatch registrations,
+external receipts and periodic ledger settlement. Under that installed
+contract, accepted work survives process restarts and stale workers cannot
+commit. Process-local storage remains a supported reduced-capability fallback;
+it must not advertise coordination or restart guarantees it cannot provide.
+Workspace modes provide only the isolation their names claim, with
+platform-specific behavior tested negatively. The service surface exposes only
+operations that have real, authorized handlers.
+
+**Proposed.** Multi-host coordination backends and additional source-backed or
+contained-process profiles remain future capabilities until their complete
+operational and platform guarantees are implemented and verified.
 
 ### Context continuity
 
@@ -261,7 +269,7 @@ turn generated prose into trusted user truth.
 | Model tool use | OpenAI Chat Completions and Anthropic Messages share a durable provider-neutral loop with exact call-ID/result reinjection | Extend canonical content support and expose a separate versioned public turn contract only when external native providers require it |
 | Prompt memory | `ContextSpec.Memory` is frozen blueprint text | Optional scoped cross-run memory with provenance and user control |
 | Context overflow | `on_overflow: summarize` is declared but not executed | Tested compaction with an intact source transcript |
-| Scheduling | Temporal triggers exist, while in-flight execution state is process-local | Recoverable, idempotent scheduled and background work |
+| Scheduling | Coordinated deployments have durable occurrences, fenced attempts, checkpoints, receipts and ledgers; process-local storage remains an explicitly reduced-capability fallback | Extend the specified guarantees to additional coordination topologies without weakening fencing or unknown-outcome semantics |
 | Service integration | The declared protocol surface is broader than its implemented handlers | One honest capability implementation projected across adapters |
 | Workspace isolation | Exact requirements, platform decisions and pre-accept lifecycle are implemented and fail closed. Native Windows advertises only `none`/`no-tools`; native Linux adds `direct-files` but advertises no source-backed mode. Internal shared/copy/worktree provisioners and process containment components are not production availability. | Advertise source-backed and contained-process profiles only after the production capability decision can prove the complete contract on each supported platform |
 

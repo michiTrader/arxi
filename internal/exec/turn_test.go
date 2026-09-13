@@ -137,7 +137,7 @@ func (l *readBarrierLog) Read(fromSeq, toSeq int64) ([]kernel.Event, error) {
 	return events, nil
 }
 
-func exactTestRunner(log *memLog, x *nativeLoopExecutor) *Runner {
+func exactTestRunner(log *memLog, x Executor) *Runner {
 	config := kernel.Config{Members: []kernel.MemberConfig{{Name: "backend"}}}
 	_, _ = log.Append([]kernel.Event{{ID: "run-started", Type: kernel.RunStarted, Source: kernel.SourceHuman,
 		Payload: map[string]any{"run_id": "run-exact", "actor": "backend"}}})

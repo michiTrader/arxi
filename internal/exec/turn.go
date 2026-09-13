@@ -16,6 +16,10 @@ import (
 const (
 	maxNativeTurnRounds           = 64
 	authorizationSuspensionSchema = "arxi.authorization-suspension/v1"
+	// contextRequestSchema names the durable preparation request carried by the
+	// context.* event payloads. The artifact schemas travel inside the pipeline
+	// results so the event layer never parses the artifacts it stores.
+	contextRequestSchema = "arxi.context-prepare/v1"
 )
 
 // AuthorizationConfig freezes every execution-context version included in an
@@ -26,6 +30,87 @@ type AuthorizationConfig struct {
 	PolicyVersion      string
 	WorkspaceProfileID string
 	TTLMS              int64
+}
+
+// ContextConfig gates durable context preparation (ADR-0013). The digest binds
+// every prepared transcript to the exact accepted configuration, so a resume
+// that loads a different effective configuration can never present that
+// content to a model. Empty keeps the legacy path and records no context.*
+// events, which is what keeps historical runs replaying under the behavior
+// they were accepted with.
+type ContextConfig struct {
+	EffectiveConfigSHA string
+}
+
+// ContextPipeline is the seam for durable context preparation. Projection and
+// preparation are provider-neutral domain work that exec must not implement
+// itself: the runner orchestrates the durable barrier and verifies the exact
+// bytes, while the pipeline supplies them from behind this interface.
+type ContextPipeline interface {
+	// Project renders the confirmed prefix into exact transcript artifact
+	// bytes. It receives only confirmed events at or below Through.
+	Project(req ContextProjection) (ContextTranscript, error)
+	// Prepare freezes one presentation from a projected transcript. It must be
+	// a pure function of its inputs so the same request always yields the same
+	// bytes.
+	Prepare(req ContextPreparation) (PreparedContext, error)
+}
+
+// ContextProjection names the confirmed inputs of one transcript projection.
+type ContextProjection struct {
+	RunID              string
+	Subject            string
+	EffectiveConfigSHA string
+	Events             []kernel.Event
+	Through            int64
+}
+
+// ContextTranscript is the projected artifact and the bindings the runner
+// records beside it. JSON and Digest are the exact evidence.
+type ContextTranscript struct {
+	JSON                 string
+	Digest               string
+	Schema               string
+	ProjectorVersion     string
+	SourceFromSeq        int64
+	SourceThroughEventID string
+	ContentDigest        string
+}
+
+// ContextPreparation freezes one presentation request for one parent work.
+type ContextPreparation struct {
+	ContextID          string
+	RunID              string
+	ParentWorkID       string
+	EffectiveConfigSHA string
+	Effect             kernel.SpawnTurn
+	History            ContextTranscript
+}
+
+// PreparedContext is the frozen presentation and every binding the barrier
+// must verify before a model child may start.
+type PreparedContext struct {
+	JSON                    string
+	Digest                  string
+	Schema                  string
+	PreparerVersion         string
+	ContextID               string
+	ParentWorkID            string
+	Subject                 string
+	SourceThroughSeq        int64
+	ContentDigest           string
+	PresentationDigest      string
+	TranscriptContentDigest string
+	Messages                []turn.Message
+}
+
+// ContextPreparedTurnExecutor lets the runner prepare a turn from the durable
+// canonical transcript instead of the SpawnTurn context alone. Implementations
+// receive the exact verified presentation and must not reorder, drop or
+// reconstruct it. Executors without this optional method keep the legacy
+// PrepareTurn path and record no context.* events.
+type ContextPreparedTurnExecutor interface {
+	PrepareTurnContext(ctx context.Context, e kernel.SpawnTurn, messages []turn.Message) (turn.Request, error)
 }
 
 // TurnToolPolicyResolver separates a policy decision from external dispatch.
@@ -84,6 +169,10 @@ type turnChild struct {
 	ParentWorkID string
 	Kind         string
 	Slot         string
+	// Agent attributes this child's exact outcome to a subject in the
+	// canonical transcript. The runtime, not the member, appends the record,
+	// so without it a later turn cannot prove whose model output this was.
+	Agent        string
 	PreparedJSON string
 	Started      bool
 	Status       string
@@ -118,6 +207,14 @@ type authorizationSuspension struct {
 type durableTurnProgress struct {
 	byID   map[string]*turnChild
 	bySlot map[string]*turnChild
+	// agent, contextID and presentationDigest are bindings added to every model
+	// child's exec.work_prepared while this turn runs. agent attributes exact
+	// child results to a subject in the canonical transcript; contextID and
+	// presentationDigest tie the dispatched request to one verified
+	// context.prepared so a model call cannot start from unverified input.
+	agent              string
+	contextID          string
+	presentationDigest string
 }
 
 func newDurableTurnProgress() durableTurnProgress {
@@ -127,17 +224,18 @@ func newDurableTurnProgress() durableTurnProgress {
 // runDurableTurn reconstructs the transcript exclusively from committed child
 // outcomes. A crash after a tool result therefore reinjects the same object and
 // never calls the runner again.
+//
+// Progress is loaded before any request is built: recovery must inspect what is
+// already committed before rebuilding input, or a changed environment could
+// produce different request bytes for work that already has durable identity.
 func (r *Runner) runDurableTurn(ctx context.Context, w Work, e kernel.SpawnTurn, x TurnExecutor) ([]kernel.Event, error) {
-	req, err := x.PrepareTurn(ctx, e)
-	if err != nil {
-		return nil, NotDispatched(fmt.Errorf("prepare native turn for %s: %w", e.Agent, err))
-	}
-	if req.Schema != turn.Schema {
-		return nil, NotDispatched(fmt.Errorf("prepare native turn for %s: schema %q, want %q", e.Agent, req.Schema, turn.Schema))
-	}
 	progress, err := r.loadTurnProgress(w)
 	if err != nil {
 		return nil, NotDispatched(err)
+	}
+	req, err := r.prepareDurableTurn(ctx, w, e, x, &progress)
+	if err != nil {
+		return nil, err
 	}
 
 	var trace []TurnEntry
@@ -213,6 +311,212 @@ func (r *Runner) runDurableTurn(ctx context.Context, w Work, e kernel.SpawnTurn,
 		req.Messages = append(req.Messages, turn.Message{Role: turn.RoleTool, Content: resultBlocks})
 	}
 	return nil, NotDispatched(fmt.Errorf("native turn for %s exceeded %d model rounds", e.Agent, maxNativeTurnRounds))
+}
+
+// prepareDurableTurn applies the ADR-0013 barrier: the confirmed prefix is
+// projected once, the exact presentation is committed as context.prepared, and
+// only then is a model request built from it. Recovery loads the committed
+// artifact instead of preparing again, so a restart can never observe newer
+// events, memory or tokenizer behavior and silently change an already
+// commissioned call. Without the context gate or the optional executor method
+// the legacy single-turn preparation runs unchanged.
+func (r *Runner) prepareDurableTurn(ctx context.Context, w Work, e kernel.SpawnTurn, x TurnExecutor, progress *durableTurnProgress) (turn.Request, error) {
+	progress.agent = e.Agent
+	if r.Context.EffectiveConfigSHA == "" || r.Pipeline == nil {
+		return x.PrepareTurn(ctx, e)
+	}
+	preparedExecutor, ok := x.(ContextPreparedTurnExecutor)
+	if !ok {
+		return x.PrepareTurn(ctx, e)
+	}
+	base, err := preparedExecutor.PrepareTurnContext(ctx, e, nil)
+	if err != nil {
+		return turn.Request{}, NotDispatched(fmt.Errorf("prepare native turn for %s: %w", e.Agent, err))
+	}
+	if base.Schema != turn.Schema {
+		return turn.Request{}, NotDispatched(fmt.Errorf("prepare native turn for %s: schema %q, want %q", e.Agent, base.Schema, turn.Schema))
+	}
+	contextID := contextIdentity(r.RunID, w.ID)
+	req, found, err := r.loadPreparedContext(contextID, w, e, base, progress)
+	if err != nil || found {
+		return req, err
+	}
+	events, err := r.Log.Read(1, 0)
+	if err != nil {
+		return turn.Request{}, NotDispatched(fmt.Errorf("read confirmed history for context %s: %w", contextID, err))
+	}
+	if len(events) == 0 || events[len(events)-1].Seq < w.SourceSeq {
+		return turn.Request{}, NotDispatched(fmt.Errorf("context %s confirmed prefix does not contain source seq %d", contextID, w.SourceSeq))
+	}
+	history, err := r.Pipeline.Project(ContextProjection{RunID: r.RunID, Subject: e.Agent,
+		EffectiveConfigSHA: r.Context.EffectiveConfigSHA, Events: events, Through: w.SourceSeq})
+	if err != nil {
+		return turn.Request{}, r.failContextPreparation(contextID, w, e, err)
+	}
+	artifact, err := r.Pipeline.Prepare(ContextPreparation{ContextID: contextID, RunID: r.RunID,
+		ParentWorkID: w.ID, EffectiveConfigSHA: r.Context.EffectiveConfigSHA, Effect: e, History: history})
+	if err != nil {
+		return turn.Request{}, r.failContextPreparation(contextID, w, e, err)
+	}
+	if err := r.commitContextPreparation(contextID, w, e, history, artifact); err != nil {
+		return turn.Request{}, err
+	}
+	progress.contextID, progress.presentationDigest = contextID, artifact.PresentationDigest
+	base.Messages = artifact.Messages
+	return base, nil
+}
+
+// loadPreparedContext reuses a committed context.prepared byte-for-byte and
+// refuses anything that is not exactly the recorded value for this identity:
+// two values for one context ID, digests that do not match their bytes, or a
+// changed boundary would each let a restart present different input for work
+// that already had one durable identity. A terminal prepare_failed is also
+// final here: retrying a deterministically failed preparation would either
+// repeat the same failure or, worse, succeed differently after the
+// environment moved.
+func (r *Runner) loadPreparedContext(contextID string, w Work, e kernel.SpawnTurn, base turn.Request, progress *durableTurnProgress) (turn.Request, bool, error) {
+	events, err := r.Log.Read(1, 0)
+	if err != nil {
+		return turn.Request{}, false, NotDispatched(fmt.Errorf("read confirmed history for context %s: %w", contextID, err))
+	}
+	found := false
+	var req turn.Request
+	for _, event := range events {
+		if event.Str("context_id") != contextID {
+			continue
+		}
+		switch event.Type {
+		case kernel.ContextPrepared:
+			if found {
+				return turn.Request{}, false, NotDispatched(fmt.Errorf("context %s has conflicting prepared records: one context identity is one exact value", contextID))
+			}
+			artifact, verifyErr := verifyPreparedContext(event, contextID, w, e)
+			if verifyErr != nil {
+				return turn.Request{}, false, verifyErr
+			}
+			progress.contextID, progress.presentationDigest = contextID, artifact.PresentationDigest
+			req = base
+			req.Messages = artifact.Messages
+			found = true
+		case kernel.ContextPrepareFailed:
+			return turn.Request{}, false, NotDispatched(fmt.Errorf("context %s preparation failed terminally: %s", contextID, event.Str("error")))
+		}
+	}
+	return req, found, nil
+}
+
+// preparedContextRecord decodes exactly the fields the barrier must verify.
+// It is declared locally so the runner never imports the artifact packages:
+// the wire shape is the runner's contract, not the projector's type.
+type preparedContextRecord struct {
+	Schema             string `json:"schema"`
+	ContextID          string `json:"context_id"`
+	ParentWorkID       string `json:"parent_work_id"`
+	Subject            string `json:"subject_agent"`
+	SourceThroughSeq   int64  `json:"source_through_seq"`
+	ContentDigest      string `json:"content_digest"`
+	PresentationDigest string `json:"presentation_digest"`
+	Transcript         struct {
+		ContentDigest string `json:"content_digest"`
+	} `json:"transcript"`
+	Messages []turn.Message `json:"messages"`
+}
+
+// verifyPreparedContext proves the exact recorded bytes before anything built
+// from them may dispatch. The byte digests are the integrity binding; the
+// field checks reject a prepared record whose identity was reused for another
+// boundary, subject or parent work.
+func verifyPreparedContext(event kernel.Event, contextID string, w Work, e kernel.SpawnTurn) (preparedContextRecord, error) {
+	var artifact preparedContextRecord
+	transcriptJSON, transcriptDigest := event.Str("transcript_json"), event.Str("transcript_digest")
+	preparedJSON, preparedDigest := event.Str("prepared_context_json"), event.Str("prepared_context_digest")
+	if byteDigest([]byte(transcriptJSON)) != transcriptDigest {
+		return artifact, NotDispatched(fmt.Errorf("context %s transcript bytes do not match their persisted digest", contextID))
+	}
+	if byteDigest([]byte(preparedJSON)) != preparedDigest {
+		return artifact, NotDispatched(fmt.Errorf("context %s prepared-context bytes do not match their persisted digest", contextID))
+	}
+	if err := json.Unmarshal([]byte(preparedJSON), &artifact); err != nil {
+		return artifact, NotDispatched(fmt.Errorf("context %s prepared-context bytes are not decodable: %w", contextID, err))
+	}
+	switch {
+	case artifact.Schema == "":
+		return artifact, NotDispatched(fmt.Errorf("context %s prepared record carries no schema", contextID))
+	case artifact.ContextID != contextID || artifact.ParentWorkID != w.ID || artifact.Subject != e.Agent:
+		return artifact, NotDispatched(fmt.Errorf("context %s identity does not match this turn's parent work and subject", contextID))
+	case artifact.SourceThroughSeq != w.SourceSeq:
+		return artifact, NotDispatched(fmt.Errorf("context %s boundary seq %d does not match source seq %d", contextID, artifact.SourceThroughSeq, w.SourceSeq))
+	case artifact.PresentationDigest != event.Str("presentation_digest") || artifact.ContentDigest != event.Str("content_digest"):
+		return artifact, NotDispatched(fmt.Errorf("context %s internal digests disagree with the committed record", contextID))
+	case artifact.Transcript.ContentDigest == "":
+		return artifact, NotDispatched(fmt.Errorf("context %s transcript binding is absent", contextID))
+	case len(artifact.Messages) == 0:
+		return artifact, NotDispatched(fmt.Errorf("context %s presentation carries no messages", contextID))
+	}
+	var history struct {
+		ContentDigest string `json:"content_digest"`
+	}
+	if err := json.Unmarshal([]byte(transcriptJSON), &history); err != nil {
+		return artifact, NotDispatched(fmt.Errorf("context %s transcript bytes are not decodable: %w", contextID, err))
+	}
+	if history.ContentDigest != artifact.Transcript.ContentDigest {
+		return artifact, NotDispatched(fmt.Errorf("context %s transcript digest disagrees with the prepared artifact", contextID))
+	}
+	return artifact, nil
+}
+
+// commitContextPreparation appends the request and the exact artifacts in one
+// batch. One confirmed append is what makes the barrier real: there is no
+// window in which a request exists whose inputs were never frozen, and no
+// window in which an artifact is authoritative without its bytes.
+func (r *Runner) commitContextPreparation(contextID string, w Work, e kernel.SpawnTurn, history ContextTranscript, artifact PreparedContext) error {
+	requested := r.progressEvent(kernel.ContextPrepareRequested, map[string]any{
+		"schema": contextRequestSchema, "context_id": contextID, "parent_work_id": w.ID,
+		"agent": e.Agent, "source_from_seq": history.SourceFromSeq, "source_through_seq": w.SourceSeq,
+		"source_through_event_id": history.SourceThroughEventID, "effective_config_sha": r.Context.EffectiveConfigSHA,
+		"projector_version": history.ProjectorVersion, "preparer_version": artifact.PreparerVersion,
+	}, w.Source)
+	prepared := r.progressEvent(kernel.ContextPrepared, map[string]any{
+		"schema": contextRequestSchema, "context_id": contextID, "parent_work_id": w.ID,
+		"agent": e.Agent, "source_from_seq": history.SourceFromSeq, "source_through_seq": w.SourceSeq,
+		"source_through_event_id": history.SourceThroughEventID, "effective_config_sha": r.Context.EffectiveConfigSHA,
+		"projector_version": history.ProjectorVersion, "preparer_version": artifact.PreparerVersion,
+		"transcript_schema": history.Schema, "transcript_json": history.JSON, "transcript_digest": history.Digest,
+		"prepared_context_schema": artifact.Schema, "prepared_context_json": artifact.JSON, "prepared_context_digest": artifact.Digest,
+		"content_digest": artifact.ContentDigest, "presentation_digest": artifact.PresentationDigest,
+	}, w.Source)
+	if _, err := r.Log.Append(r.stamp([]kernel.Event{requested, prepared})); err != nil {
+		return fmt.Errorf("persist context preparation %s: %w", contextID, err)
+	}
+	return nil
+}
+
+// failContextPreparation records a terminal, deterministic preparation failure.
+// It is written only for failures that would repeat identically on retry, so
+// recovery can refuse the request instead of half-preparing a different call.
+func (r *Runner) failContextPreparation(contextID string, w Work, e kernel.SpawnTurn, cause error) error {
+	event := r.progressEvent(kernel.ContextPrepareFailed, map[string]any{
+		"schema": contextRequestSchema, "context_id": contextID, "parent_work_id": w.ID,
+		"agent": e.Agent, "source_through_seq": w.SourceSeq, "effective_config_sha": r.Context.EffectiveConfigSHA,
+		"failure_class": "preparation", "error": cause.Error(),
+	}, w.Source)
+	if _, err := r.Log.Append(r.stamp([]kernel.Event{event})); err != nil {
+		return fmt.Errorf("persist context preparation failure %s: %w", contextID, err)
+	}
+	return NotDispatched(fmt.Errorf("prepare context %s for %s: %w", contextID, e.Agent, cause))
+}
+
+// contextIdentity derives one stable identity per parent work. The parent work
+// ID already binds run, source event, effect index and effect bytes, so the
+// same preparation attempt always recomputes the same identity and a retry
+// cannot fork it.
+func contextIdentity(runID, parentWorkID string) string {
+	return "context-" + byteDigest([]byte(runID+"\x00"+parentWorkID))
+}
+
+func byteDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 func responseToolCalls(resp turn.Response) ([]turn.ToolCall, error) {
@@ -964,7 +1268,7 @@ func (r *Runner) loadTurnProgress(parent Work) (durableTurnProgress, error) {
 			if id == "" || event.Str("work_scope") != "turn_child" {
 				continue
 			}
-			child := &turnChild{ID: id, ParentWorkID: event.Str("parent_work_id"), Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), PreparedJSON: event.Str("request_json")}
+			child := &turnChild{ID: id, ParentWorkID: event.Str("parent_work_id"), Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), Agent: event.Str("agent"), PreparedJSON: event.Str("request_json")}
 			if old := out.bySlot[child.Slot]; old != nil && (old.ID != child.ID || old.PreparedJSON != child.PreparedJSON) {
 				return out, fmt.Errorf("native turn slot %s has conflicting prepared identities", child.Slot)
 			}
@@ -990,7 +1294,7 @@ func (r *Runner) ensureTurnChild(parent Work, id, kind, slot, prepared string, p
 		}
 		return existing, nil
 	}
-	child := &turnChild{ID: id, ParentWorkID: parent.ID, Kind: kind, Slot: slot, PreparedJSON: prepared}
+	child := &turnChild{ID: id, ParentWorkID: parent.ID, Kind: kind, Slot: slot, Agent: progress.agent, PreparedJSON: prepared}
 	provider, class, honors := "external", WorkNonIdempotent, false
 	if classifier, ok := r.Executor.(TurnDispatchClassifier); ok {
 		if kind == "model" {
@@ -1001,13 +1305,25 @@ func (r *Runner) ensureTurnChild(parent Work, id, kind, slot, prepared string, p
 		}
 	}
 	meta := childMetadata(r, child, provider, class, honors)
-	event := r.progressEvent(kernel.ExecWorkPrepared, map[string]any{
+	payload := map[string]any{
 		"work_id": id, "parent_work_id": parent.ID, "work_scope": "turn_child",
 		"source_seq": parent.SourceSeq, "child_kind": kind, "child_slot": slot,
 		"request_json": prepared, "work_class": string(meta.WorkClass),
 		"dispatch_key": string(meta.DispatchKey), "request_digest": string(meta.RequestDigest),
 		"provider": meta.Provider,
-	}, parent.Source)
+	}
+	// agent attributes exact child results to a subject in the canonical
+	// transcript; context bindings tie the model request to one verified
+	// context.prepared. A model child without its context binding can only come
+	// from a legacy turn, which is exactly when no such proof exists.
+	if progress.agent != "" {
+		payload["agent"] = progress.agent
+	}
+	if kind == "model" && progress.contextID != "" {
+		payload["context_id"] = progress.contextID
+		payload["presentation_digest"] = progress.presentationDigest
+	}
+	event := r.progressEvent(kernel.ExecWorkPrepared, payload, parent.Source)
 	if _, err := r.Log.Append(r.stamp([]kernel.Event{event})); err != nil {
 		return nil, fmt.Errorf("append preparation of native turn child %s: %w", id, err)
 	}
@@ -1029,6 +1345,12 @@ func (r *Runner) startTurnChild(parent Work, child *turnChild) error {
 func (r *Runner) finishTurnChild(parent Work, child *turnChild, status string, result []byte, cause error) error {
 	payload := map[string]any{
 		"work_id": child.ID, "parent_work_id": parent.ID, "work_scope": "turn_child", "status": status,
+	}
+	// The finish record is what the canonical transcript projects exact native
+	// output from, so it carries the subject attribution the prepared record
+	// froze.
+	if child.Agent != "" {
+		payload["agent"] = child.Agent
 	}
 	if result != nil {
 		payload["result_json"] = string(result)
