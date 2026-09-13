@@ -34,7 +34,7 @@ in it.
 
 | type | payload | notes |
 |---|---|---|
-| `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `parent_run_id?`, `spawn_depth?` | `blueprint_sha` freezes the config: without it, a replay would use today's config. |
+| `run.started` | `run_id`, `actor`, `budget_usd`, `blueprint_sha`, `effective_config_schema`, `effective_config_path`, `effective_config_sha`, `parent_run_id?`, `spawn_depth?` | The blueprint and effective-config bindings freeze the complete accepted input. Historical events without effective-config fields remain inspectable but cannot resume through the modern runtime. |
 | `run.prompt` | `text`, `to?` | Injects a new cause into a live run. |
 | `run.paused` | — | |
 | `run.unpaused` | `budget_usd?` | A **raise** of the tree ceiling, honoured by the reducer, which also clears the block and the 80% warning. Absent means "resume, ceiling unchanged" — reading a missing field as `0` would give every plain resume an unsatisfiable limit. A value at or below the current ceiling is refused by the CLI and ignored by the reducer: one under the spend re-breaches on the next cost, which is the loop a raise exists to end. This is the payload behind the budget remedy below. |
@@ -174,6 +174,21 @@ Historical events remain valid. A legacy `tool.call_denied` and
 to execute an unanswered legacy mutating approval because it lacks immutable
 action, schema, policy and principal bindings.
 
+## Context preparation
+
+The canonical transcript and prepared-context schemas, digest domains and
+recovery rules are defined by [`context.md`](context.md).
+
+| type | payload | notes |
+|---|---|---|
+| `context.prepare_requested` | `schema`, `context_id`, `parent_work_id`, `agent`, `source_from_seq`, `source_through_seq`, `source_through_event_id`, `effective_config_schema`, `effective_config_sha`, `projector_version`, `preparer_version`, `policy_version` | Freezes the confirmed prefix and versions from which one presentation may be prepared. |
+| `context.prepared` | All request bindings plus `transcript_schema`, `transcript_json`, `transcript_digest`, `prepared_context_schema`, `prepared_context_json`, `prepared_context_digest`, `content_digest`, `presentation_digest`, `model_version`, `token_measurement`, `memory_receipt_digests` | Exact bytes and digests commit before any model child may start. |
+| `context.prepare_failed` | Request bindings plus `failure_class`, `error` | Terminal preparation failure; no model call is implied. |
+
+These records are reducer- and watcher-inert execution metadata. A valid
+`context.prepared` is reused by recovery and replay; it is never rebuilt from
+current data.
+
 ## Durable execution progress
 
 Execution metadata records what the runtime did with the effects decided from a
@@ -182,7 +197,7 @@ continuation boundaries, but do not themselves cause more effects.
 
 | type | payload | notes |
 |---|---|---|
-| `exec.work_prepared` | Top-level: `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest`; external top-level work also carries `work_class`, `dispatch_key`, `request_digest`, `provider`. Native child: `work_id`, `parent_work_id`, `work_scope: "turn_child"`, `source_seq`, `child_kind`, `child_slot`, `request_json`, `work_class`, `dispatch_key`, `request_digest`, `provider`. | The full top-level manifest is committed before external dispatch. Child request JSON is the exact provider-neutral model request or tool call that may dispatch. `dispatch_key` derives from stable job/work/request identity and is independent of attempts. `work_class: "idempotent"` is valid only when the concrete adapter declares and actually honors that key; generic tools and production OpenAI/Anthropic adapters remain `non_idempotent`. |
+| `exec.work_prepared` | Top-level: `work_id`, `source_seq`, `source_event_id`, `effect_index`, `effect_kind`, `effect_class`, `effect_digest`; external top-level work also carries `work_class`, `dispatch_key`, `request_digest`, `provider`. Native child: `work_id`, `parent_work_id`, `work_scope: "turn_child"`, `source_seq`, `child_kind`, `child_slot`, `request_json`, `work_class`, `dispatch_key`, `request_digest`, `provider`; model children prepared under Phase 5 also carry `context_id` and `presentation_digest`. | The full top-level manifest is committed before external dispatch. Child request JSON is the exact provider-neutral model request or tool call that may dispatch. A model child's context bindings must match a verified `context.prepared`. `dispatch_key` derives from stable job/work/request identity and is independent of attempts. `work_class: "idempotent"` is valid only when the concrete adapter declares and actually honors that key; generic tools and production OpenAI/Anthropic adapters remain `non_idempotent`. |
 | `exec.work_started` | `work_id`; native children also carry `parent_work_id`, `work_scope: "turn_child"` | Durable boundary immediately before an independent external dispatch. A native parent marker starts coordination; ambiguity is tracked by its model and tool children. |
 | `exec.work_finished` | `work_id`, `status`, `error?`; native children also carry `parent_work_id`, `work_scope: "turn_child"`, `result_json?` | `status` is exactly `completed`, `failed`, or `unknown`. A completed native child stores the exact canonical outcome used by recovery. |
 | `exec.step_completed` | `source_seq`, `source_event_id`, `work_ids` | Commits that every effect of the source event has a durable terminal outcome. `work_ids` preserves effect-list order. |

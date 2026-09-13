@@ -86,14 +86,15 @@ the same canonical events; denied calls never reach a runner.
 
 ## Phase 3 — Durable jobs, attempts and scheduling
 
-Add durable jobs, stable trigger occurrences, attempts, leases, fencing tokens,
-heartbeats, checkpoints, idempotency keys and external receipts. A scheduled
-occurrence uses a stable identity such as `(trigger_id, scheduled_at)`. Replace
-process-local in-flight truth with durable claims and enforce periodic budgets
-through an atomic ledger.
+**Status:** implemented for coordinated storage. Durable jobs use stable trigger
+occurrences, fenced attempts, leases, heartbeats, checkpoints, dispatch
+registrations, external receipts and an atomic periodic ledger. Process-local
+storage remains a supported reduced-capability fallback and does not advertise
+coordination or restart guarantees.
 
-Idempotent effects may retry safely. Non-idempotent effects must reconcile through
-provider receipts or end in an explicit `unknown` outcome rather than retrying or
+Idempotent effects may retry safely only when the concrete adapter honors the
+prepared key. Non-idempotent effects reconcile through trustworthy provider
+receipts or end in an explicit `unknown` outcome rather than retrying or
 guessing.
 
 **Exit evidence:** restart tests at accept, claim, execute, checkpoint and complete
@@ -138,12 +139,13 @@ process tests verify each advertised mode on every supported platform.
 
 ## Phase 5 — Canonical transcript and prepared context
 
-Project confirmed events into transcript items covering user input, model output,
-tool calls/results, human decisions and referenced artifacts. Add a durable
-preparation barrier:
+Project confirmed events and immutable artifacts bound by them into transcript
+items covering user input, model output, tool calls/results, human decisions and
+referenced artifacts. Add a durable preparation barrier:
 
 ```text
-context.prepare_requested -> context.prepared -> model.call_requested
+context.prepare_requested -> context.prepared
+  -> exec.work_prepared (turn_child/model) -> exec.work_started
 ```
 
 The prepared artifact records source boundaries, ordered content, policy and model
