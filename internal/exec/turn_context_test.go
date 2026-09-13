@@ -61,6 +61,38 @@ type contextTurnExecutor struct {
 	prepareCalls int
 }
 
+// FinishTurn projects the trace's tool evidence into domain events the way
+// provider.Executor.FinishTurn does, so the canonical transcript sees the same
+// committed facts a real turn would confirm.
+func (x *contextTurnExecutor) FinishTurn(e kernel.SpawnTurn, trace []TurnEntry) ([]kernel.Event, error) {
+	events := []kernel.Event{{Type: kernel.AgentActivated, Actor: e.Agent}}
+	for _, entry := range trace {
+		if entry.Tool == nil {
+			continue
+		}
+		call, outcome := entry.Tool.Call, entry.Tool.Outcome
+		events = append(events, kernel.Event{Type: kernel.ToolCall, Source: kernel.SourceAgent, Actor: e.Agent,
+			Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments)}})
+		if outcome.Policy == "allow" {
+			text := ""
+			for _, block := range outcome.Result.Content {
+				if block.Type == turn.BlockText {
+					text = block.Text
+				}
+			}
+			events = append(events, kernel.Event{Type: kernel.ToolCallCompleted, Source: kernel.SourceAgent, Actor: e.Agent,
+				Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "result": text}})
+		} else {
+			events = append(events, kernel.Event{Type: kernel.ToolCallDenied, Source: kernel.SourceAgent, Actor: e.Agent,
+				Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "policy": outcome.Policy}})
+		}
+	}
+	events = append(events,
+		kernel.Event{Type: kernel.LLMResponse, Actor: e.Agent, Payload: map[string]any{"ok": true, "text": "done"}},
+		kernel.Event{Type: kernel.AgentTurnDone, Actor: e.Agent})
+	return events, nil
+}
+
 func (x *contextTurnExecutor) PrepareTurnContext(ctx context.Context, e kernel.SpawnTurn, messages []turn.Message) (turn.Request, error) {
 	x.prepareCalls++
 	req, err := x.nativeLoopExecutor.PrepareTurn(ctx, e)
@@ -273,5 +305,93 @@ func TestDurableTurnLegacyPathRecordsNoContextEvents(t *testing.T) {
 	body, err := json.Marshal(x.requests[0])
 	if err != nil || len(body) == 0 {
 		t.Fatalf("marshal prepared request: %v", err)
+	}
+}
+
+// TestLaterTurnReceivesPriorConversationAndToolEvidence is Phase 5's exit
+// evidence: a second turn for the same agent must be prepared from the exact
+// committed history of the first — opening input, native model output and the
+// tool call/result pair — exactly once, without re-reading live state.
+func TestLaterTurnReceivesPriorConversationAndToolEvidence(t *testing.T) {
+	log := newMemLog()
+	x := &contextTurnExecutor{}
+	r := contextTestRunner(log, x)
+	// The shared harness writes run.started without a prompt; give the run its
+	// confirmed opening instruction the way acceptance does.
+	log.events[0].Payload["prompt"] = "build it"
+	first := kernel.SpawnTurn{Agent: "backend"}
+	workOne := contextTestWork(t, r, first)
+	final, err := r.runDurableTurn(context.Background(), workOne, first, x)
+	if err != nil {
+		t.Fatalf("first turn failed: %v", err)
+	}
+	// The real runner appends the returned domain events in finishWork; the
+	// transcript projects from those confirmed records.
+	if _, err := log.Append(r.stamp(final)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second cause arrives and is confirmed before the next turn opens.
+	if _, err := log.Append(r.stamp([]kernel.Event{{ID: "follow-up", Type: kernel.RunPrompt,
+		Source: kernel.SourceHuman, Payload: map[string]any{"text": "continue from the tool result"}}})); err != nil {
+		t.Fatal(err)
+	}
+	second := kernel.SpawnTurn{Agent: "backend"}
+	events, _ := log.Read(1, 0)
+	workTwo, err := manifest(r.RunID, events[len(events)-1], []kernel.Effect{second})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The first turn's fake conversation is already committed; the second turn
+	// presents history, so the provider fake answers with a terminal response.
+	x2 := &contextTurnExecutor{}
+	finalTwo, err := r.runDurableTurn(context.Background(), workTwo[0], second, x2)
+	if err != nil {
+		t.Fatalf("second turn failed: %v", err)
+	}
+	if _, err := log.Append(r.stamp(finalTwo)); err != nil {
+		t.Fatal(err)
+	}
+
+	var secondContext kernel.Event
+	contexts := 0
+	for _, event := range log.events {
+		if event.Type == kernel.ContextPrepared {
+			contexts++
+			if event.Str("context_id") == contextIdentity(r.RunID, workTwo[0].ID) {
+				secondContext = event
+			}
+		}
+	}
+	if contexts != 2 {
+		t.Fatalf("prepared contexts = %d, want one per turn: preparation must happen once per durable turn", contexts)
+	}
+	var artifact struct {
+		Messages []turn.Message `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(secondContext.Str("prepared_context_json")), &artifact); err != nil {
+		t.Fatalf("decode second prepared context: %v", err)
+	}
+	var sawPrompt, sawFollowUp, sawToolCall, sawToolResult int
+	for _, message := range artifact.Messages {
+		for _, block := range message.Content {
+			switch {
+			case block.Text == "build it":
+				sawPrompt++
+			case block.Text == "continue from the tool result":
+				sawFollowUp++
+			case block.Type == turn.BlockToolCall && block.ToolCall != nil:
+				sawToolCall++
+			case block.Type == turn.BlockToolResult && block.ToolResult != nil:
+				sawToolResult++
+			}
+		}
+	}
+	if sawPrompt != 1 || sawFollowUp != 1 {
+		t.Fatalf("opening=%d follow-up=%d: a later turn must receive each confirmed user input exactly once", sawPrompt, sawFollowUp)
+	}
+	if sawToolCall != 1 || sawToolResult != 1 {
+		t.Fatalf("tool calls=%d results=%d: the second turn must inherit the first turn's tool evidence under exact call identity", sawToolCall, sawToolResult)
 	}
 }

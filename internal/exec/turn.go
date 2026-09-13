@@ -169,6 +169,10 @@ type turnChild struct {
 	ParentWorkID string
 	Kind         string
 	Slot         string
+	// Agent attributes this child's exact outcome to a subject in the
+	// canonical transcript. The runtime, not the member, appends the record,
+	// so without it a later turn cannot prove whose model output this was.
+	Agent        string
 	PreparedJSON string
 	Started      bool
 	Status       string
@@ -1264,7 +1268,7 @@ func (r *Runner) loadTurnProgress(parent Work) (durableTurnProgress, error) {
 			if id == "" || event.Str("work_scope") != "turn_child" {
 				continue
 			}
-			child := &turnChild{ID: id, ParentWorkID: event.Str("parent_work_id"), Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), PreparedJSON: event.Str("request_json")}
+			child := &turnChild{ID: id, ParentWorkID: event.Str("parent_work_id"), Kind: event.Str("child_kind"), Slot: event.Str("child_slot"), Agent: event.Str("agent"), PreparedJSON: event.Str("request_json")}
 			if old := out.bySlot[child.Slot]; old != nil && (old.ID != child.ID || old.PreparedJSON != child.PreparedJSON) {
 				return out, fmt.Errorf("native turn slot %s has conflicting prepared identities", child.Slot)
 			}
@@ -1290,7 +1294,7 @@ func (r *Runner) ensureTurnChild(parent Work, id, kind, slot, prepared string, p
 		}
 		return existing, nil
 	}
-	child := &turnChild{ID: id, ParentWorkID: parent.ID, Kind: kind, Slot: slot, PreparedJSON: prepared}
+	child := &turnChild{ID: id, ParentWorkID: parent.ID, Kind: kind, Slot: slot, Agent: progress.agent, PreparedJSON: prepared}
 	provider, class, honors := "external", WorkNonIdempotent, false
 	if classifier, ok := r.Executor.(TurnDispatchClassifier); ok {
 		if kind == "model" {
@@ -1341,6 +1345,12 @@ func (r *Runner) startTurnChild(parent Work, child *turnChild) error {
 func (r *Runner) finishTurnChild(parent Work, child *turnChild, status string, result []byte, cause error) error {
 	payload := map[string]any{
 		"work_id": child.ID, "parent_work_id": parent.ID, "work_scope": "turn_child", "status": status,
+	}
+	// The finish record is what the canonical transcript projects exact native
+	// output from, so it carries the subject attribution the prepared record
+	// froze.
+	if child.Agent != "" {
+		payload["agent"] = child.Agent
 	}
 	if result != nil {
 		payload["result_json"] = string(result)
