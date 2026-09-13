@@ -86,14 +86,15 @@ the same canonical events; denied calls never reach a runner.
 
 ## Phase 3 — Durable jobs, attempts and scheduling
 
-Add durable jobs, stable trigger occurrences, attempts, leases, fencing tokens,
-heartbeats, checkpoints, idempotency keys and external receipts. A scheduled
-occurrence uses a stable identity such as `(trigger_id, scheduled_at)`. Replace
-process-local in-flight truth with durable claims and enforce periodic budgets
-through an atomic ledger.
+**Status:** implemented for coordinated storage. Durable jobs use stable trigger
+occurrences, fenced attempts, leases, heartbeats, checkpoints, dispatch
+registrations, external receipts and an atomic periodic ledger. Process-local
+storage remains a supported reduced-capability fallback and does not advertise
+coordination or restart guarantees.
 
-Idempotent effects may retry safely. Non-idempotent effects must reconcile through
-provider receipts or end in an explicit `unknown` outcome rather than retrying or
+Idempotent effects may retry safely only when the concrete adapter honors the
+prepared key. Non-idempotent effects reconcile through trustworthy provider
+receipts or end in an explicit `unknown` outcome rather than retrying or
 guessing.
 
 **Exit evidence:** restart tests at accept, claim, execute, checkpoint and complete
