@@ -139,12 +139,13 @@ process tests verify each advertised mode on every supported platform.
 
 ## Phase 5 — Canonical transcript and prepared context
 
-Project confirmed events into transcript items covering user input, model output,
-tool calls/results, human decisions and referenced artifacts. Add a durable
-preparation barrier:
+Project confirmed events and immutable artifacts bound by them into transcript
+items covering user input, model output, tool calls/results, human decisions and
+referenced artifacts. Add a durable preparation barrier:
 
 ```text
-context.prepare_requested -> context.prepared -> model.call_requested
+context.prepare_requested -> context.prepared
+  -> exec.work_prepared (turn_child/model) -> exec.work_started
 ```
 
 The prepared artifact records source boundaries, ordered content, policy and model
