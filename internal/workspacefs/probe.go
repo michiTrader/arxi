@@ -68,12 +68,6 @@ func Probe(ctx context.Context, source string) (ProbeResult, error) {
 	}
 	caps := workspace.CurrentCapabilities(runtime.GOOS)
 	caps.CapabilityVersion = capabilityVersion
-	caps.Modes = []workspace.Mode{workspace.ModeNone, workspace.ModeShared, workspace.ModeCopy, workspace.ModeWorktree}
-	caps.SourceKinds = []string{"git"}
-	caps.Provisioners = map[workspace.Mode]string{
-		workspace.ModeNone: "arxi.workspace.none/v1", workspace.ModeShared: provisionerVersion,
-		workspace.ModeCopy: provisionerVersion, workspace.ModeWorktree: provisionerVersion,
-	}
 	return ProbeResult{Source: identity, Capabilities: caps}, nil
 }
 
