@@ -38,7 +38,14 @@ type Item struct {
 	Call        *turn.ToolCall      `json:"call,omitempty"`
 	Result      *turn.ToolResult    `json:"result,omitempty"`
 	Decision    string              `json:"decision,omitempty"`
-	Legacy      bool                `json:"legacy,omitempty"`
+	// WorkID and ResponseID bind a native model_output item to the child work
+	// record and provider response it was projected from. Compaction ranges and
+	// omission ledgers cite items by ID, so without this binding a summary
+	// could not be audited against the durable execution that produced its
+	// sources. Legacy items have neither.
+	WorkID     string `json:"work_id,omitempty"`
+	ResponseID string `json:"response_id,omitempty"`
+	Legacy     bool   `json:"legacy,omitempty"`
 }
 
 type Artifact struct {
@@ -150,7 +157,8 @@ func projectEvent(artifact *Artifact, event kernel.Event, subject string, native
 			}
 			if len(response.Content) > 0 {
 				artifact.Items = append(artifact.Items, Item{Kind: ModelOutput, Actor: subject,
-					SourceSeq: event.Seq, SourceID: event.ID, Content: response.Content})
+					SourceSeq: event.Seq, SourceID: event.ID, Content: response.Content,
+					WorkID: event.Str("work_id"), ResponseID: response.ID})
 			}
 		}
 	case kernel.ToolCall:

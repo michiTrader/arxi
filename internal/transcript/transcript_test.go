@@ -34,17 +34,13 @@ func TestProjectPreservesConfirmedConversationAndAudience(t *testing.T) {
 }
 
 func TestProjectUsesExactNativeResultsWithoutDuplicatingDerivedText(t *testing.T) {
-	native := map[string]any{"schema": "arxi.turn/v1", "finish_reason": "stop",
-		"content": []map[string]any{{"type": "text", "text": "exact canonical answer"}}}
-	body, err := json.Marshal(native)
-	if err != nil {
-		t.Fatal(err)
-	}
+	body := childResult(t, "resp-9", "exact canonical answer")
 	events := []kernel.Event{
 		{Seq: 1, ID: "start", Type: kernel.RunStarted, Payload: map[string]any{"prompt": "build it"}},
 		{Seq: 2, ID: "child-prepared", Type: kernel.ExecWorkPrepared, Payload: map[string]any{"work_scope": "turn_child", "child_kind": "model", "agent": "backend"}},
 		{Seq: 3, ID: "child-finished", Type: kernel.ExecWorkFinished, Actor: "runtime",
-			Payload: map[string]any{"work_scope": "turn_child", "child_kind": "model", "agent": "backend", "result_json": string(body)}},
+			Payload: map[string]any{"work_id": "work-child", "work_scope": "turn_child", "child_kind": "model", "agent": "backend",
+				"result_json": string(body)}},
 		{Seq: 4, ID: "final", Type: kernel.LLMResponse, Actor: "backend", Payload: map[string]any{"text": "exact canonical answer"}},
 		{Seq: 5, ID: "done", Type: kernel.AgentTurnDone, Actor: "backend"},
 	}
@@ -64,6 +60,10 @@ func TestProjectUsesExactNativeResultsWithoutDuplicatingDerivedText(t *testing.T
 		if got := item.Content[0].Text; got != "exact canonical answer" {
 			t.Fatalf("native model text = %q: later turns must receive the exact presented output, not a projection of it", got)
 		}
+		if item.WorkID != "work-child" || item.ResponseID != "resp-9" {
+			t.Fatalf("native model item binding = work %q response %q: compaction evidence must be auditable against the durable child record and provider response it came from",
+				item.WorkID, item.ResponseID)
+		}
 	}
 	if outputs != 1 {
 		t.Fatalf("model outputs = %d: the derived llm.response of a native segment must not duplicate the committed child content", outputs)
@@ -81,4 +81,20 @@ func TestProjectUsesExactNativeResultsWithoutDuplicatingDerivedText(t *testing.T
 	if len(old.Items) != 2 || old.Items[1].Kind != ModelOutput || !old.Items[1].Legacy {
 		t.Fatalf("legacy items = %#v: a text-only turn's llm.response is its only surviving model output and stays explicitly legacy", old.Items)
 	}
+	if old.Items[1].WorkID != "" || old.Items[1].ResponseID != "" {
+		t.Fatalf("legacy binding = work %q response %q: history without a committed child record must not gain an invented one",
+			old.Items[1].WorkID, old.Items[1].ResponseID)
+	}
+}
+
+// childResult builds the exact canonical response body a committed model child
+// record carries, so projection tests bind items to real record shapes.
+func childResult(t *testing.T, id, text string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"schema": "arxi.turn/v1", "id": id, "finish_reason": "stop",
+		"content": []map[string]any{{"type": "text", "text": text}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
