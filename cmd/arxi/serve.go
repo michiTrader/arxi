@@ -132,6 +132,7 @@ type lifecycleHost interface {
 	Reject(context.Context, hostv1.RejectRequest) (hostv1.Job, error)
 	Answer(context.Context, hostv1.AnswerRequest) (hostv1.Job, error)
 	Wait(context.Context, hostv1.WaitRequest) (hostv1.Job, error)
+	Subscribe(context.Context, hostv1.SubscribeRequest) (hostv1.Subscription, error)
 	Capabilities(context.Context, hostv1.CapabilitiesRequest) (hostv1.CapabilitySet, error)
 }
 
@@ -142,6 +143,11 @@ type protoSession struct {
 	host              lifecycleHost
 	capabilities      map[hostv1.Capability]bool
 	capabilitiesKnown bool
+	// streams is set only by a live connection loop; it is where run.attach
+	// hands its subscription to the writer (ADR-0016). Nil under direct
+	// handler tests, which answer not_implemented rather than pretending to
+	// stream into nowhere.
+	streams *connStreams
 }
 
 type lifecycleHandler struct {
@@ -162,10 +168,10 @@ type lifecycleHandler struct {
 // dispatch and make its reauthorization check run against an invented or
 // ambiguous resource.
 //
-// run.attach (Subscribe) stays absent: its multi-response stream cannot
-// preserve this protocol's one-request/one-response framing without
-// subscription IDs, event messages, cancellation, and writer arbitration. It
-// answers not_implemented until that transport change exists on its own record.
+// run.attach lives in streamingHandlers, not here: its dispatch hands a
+// subscription to the connection's writer and its notifications outlive the
+// response, which the sync dispatch signature above cannot express. The
+// framing contract it runs under is ADR-0016's.
 var lifecycleHandlerDescriptors = []lifecycleHandler{
 	{
 		protocolType: "run.start",
@@ -261,6 +267,47 @@ var lifecycleHandlerDescriptors = []lifecycleHandler{
 	},
 }
 
+// streamingHandler opens one subscription-backed stream. It is a separate
+// shape from lifecycleHandler because its dispatch needs the session (the
+// writer the pump emits into lives there), and because its response is an
+// ack whose subscription then outlives the dispatch call.
+type streamingHandler struct {
+	capability hostv1.Capability
+	dispatch   func(ctx context.Context, session *protoSession, id string, params map[string]any) (any, error)
+}
+
+var streamingHandlers = map[string]streamingHandler{
+	"run.attach": {capability: hostv1.CapabilitySubscribe, dispatch: dispatchAttach},
+}
+
+// dispatchAttach subscribes and registers the pump; the ack it returns is
+// written by the loop before the pump is released, which is the whole
+// ack-before-events guarantee.
+func dispatchAttach(ctx context.Context, session *protoSession, id string, params map[string]any) (any, error) {
+	if id == "" {
+		return nil, errors.New("run.attach requires a request id: the id is the subscription identity its notifications carry")
+	}
+	after := int64(numParam(params, "after_seq"))
+	sub, err := session.host.Subscribe(ctx, hostv1.SubscribeRequest{
+		Principal: cloneProtoPrincipal(session.principal),
+		JobID:     hostv1.JobID(stringParam(params, "run")),
+		AfterSeq:  after,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Terminal markers need the inspect capability on the same job; the ack
+	// says whether they will come, because a client waiting for a marker that
+	// was never promised blocks forever.
+	markers := session.capabilities[hostv1.CapabilityInspect]
+	session.streams.register(&subscriptionPump{
+		id: id, jobID: hostv1.JobID(stringParam(params, "run")), after: after, sub: sub,
+		host: session.host, principal: cloneProtoPrincipal(session.principal), markers: markers,
+		release: make(chan struct{}),
+	})
+	return attachAck{Subscription: id, AfterSeq: after, TerminalMarkers: markers}, nil
+}
+
 var lifecycleHandlers = func() map[string]lifecycleHandler {
 	handlers := make(map[string]lifecycleHandler, len(lifecycleHandlerDescriptors))
 	for _, handler := range lifecycleHandlerDescriptors {
@@ -347,12 +394,24 @@ func serveConnSession(r io.Reader, w io.Writer, session protoSession) error {
 
 func serveConnSessionContext(ctx context.Context, r io.Reader, w io.Writer, session protoSession) error {
 	enc := json.NewEncoder(w)
+	// One writer for the whole connection: the loop writes responses, the
+	// subscription pumps write notifications, and the mutex is the entire
+	// arbitration (ADR-0016). Responses keep their strict order because the
+	// loop still writes them one at a time.
+	cw := &connWriter{enc: enc}
+	streams := newConnStreams(ctx, cw)
+	session.streams = streams
+	// closeAll ends every live subscription when the connection ends, which is
+	// the protocol's only cancellation: no detach type exists, by the frozen
+	// surface rule that a new command implements a declared promise and none
+	// was ever declared.
+	defer streams.closeAll()
 
 	hello, err := protoHelloSession(ctx, &session)
 	if err != nil {
 		return fmt.Errorf("resolve effective capabilities: %w", err)
 	}
-	if err := enc.Encode(hello); err != nil {
+	if err := cw.write(hello); err != nil {
 		// Failing to send the hello is fatal for this connection: the client is
 		// entitled to assume the first line tells it the surface version, and one
 		// that never arrives leaves it guessing which vocabulary it may use.
@@ -367,7 +426,7 @@ func serveConnSessionContext(ctx context.Context, r io.Reader, w io.Writer, sess
 
 	for sc.Scan() {
 		if len(sc.Bytes()) > maxLineBytes {
-			writeLineTooLong(enc)
+			writeLineTooLong(cw)
 			return fmt.Errorf("request line over %d bytes", maxLineBytes)
 		}
 		line := strings.TrimSpace(sc.Text())
@@ -377,11 +436,14 @@ func serveConnSessionContext(ctx context.Context, r io.Reader, w io.Writer, sess
 			// well-behaved client generate spurious failures in its own logs.
 			continue
 		}
-		if err := enc.Encode(handleLineSession(ctx, session, line)); err != nil {
+		if err := cw.write(handleLineSession(ctx, session, line)); err != nil {
 			// A write that fails means the client is gone or the pipe broke. There
 			// is nowhere to report it TO, so it ends the connection.
 			return fmt.Errorf("write a response: %w", err)
 		}
+		// Releasing after the write is the ordering guarantee: an attach's ack
+		// is on the wire before that subscription's first event can be.
+		streams.releasePending()
 	}
 
 	if err := sc.Err(); err != nil {
@@ -391,7 +453,7 @@ func serveConnSessionContext(ctx context.Context, r io.Reader, w io.Writer, sess
 			// oversized request would be read as the next one and dispatched as
 			// whatever it happened to parse as. Continuing would turn one
 			// oversized request into an arbitrary command nobody sent.
-			writeLineTooLong(enc)
+			writeLineTooLong(cw)
 			return fmt.Errorf("request line over %d bytes", maxLineBytes)
 		}
 		return fmt.Errorf("read a request: %w", err)
@@ -399,8 +461,8 @@ func serveConnSessionContext(ctx context.Context, r io.Reader, w io.Writer, sess
 	return nil
 }
 
-func writeLineTooLong(enc *json.Encoder) {
-	_ = enc.Encode(protoResponse{OK: false, Error: &protoError{
+func writeLineTooLong(w *connWriter) {
+	_ = w.write(protoResponse{OK: false, Error: &protoError{
 		Code: errLineTooLong,
 		Message: fmt.Sprintf("a request line exceeded %d bytes, so the "+
 			"connection is closing: after a truncated line the rest of it "+
@@ -457,6 +519,20 @@ func handleLineSession(ctx context.Context, session protoSession, line string) p
 			return notImplementedResponse(req.ID, *c)
 		}
 		res, err := handler.dispatch(ctx, session.host, cloneProtoPrincipal(session.principal), req.Params)
+		if err != nil {
+			return hostErrorResponse(req.ID, err)
+		}
+		return protoResponse{ID: req.ID, OK: true, Result: res}
+	}
+
+	if handler, streaming := streamingHandlers[req.Type]; streaming {
+		if session.host == nil || session.streams == nil {
+			return notImplementedResponse(req.ID, *c)
+		}
+		if session.capabilitiesKnown && !session.capabilities[handler.capability] {
+			return notImplementedResponse(req.ID, *c)
+		}
+		res, err := handler.dispatch(ctx, &session, req.ID, req.Params)
 		if err != nil {
 			return hostErrorResponse(req.ID, err)
 		}
@@ -1039,7 +1115,7 @@ func protoHelloSession(ctx context.Context, session *protoSession) (helloMsg, er
 		for _, capability := range set.Capabilities {
 			seenCapabilities[capability] = true
 		}
-		advertised := make(map[hostv1.Capability]bool, len(lifecycleHandlerDescriptors))
+		advertised := make(map[hostv1.Capability]bool, len(lifecycleHandlerDescriptors)+len(streamingHandlers))
 		for _, handler := range lifecycleHandlerDescriptors {
 			if advertised[handler.capability] || !seenCapabilities[handler.capability] {
 				continue
@@ -1047,9 +1123,20 @@ func protoHelloSession(ctx context.Context, session *protoSession) (helloMsg, er
 			advertised[handler.capability] = true
 			capabilities = append(capabilities, handler.capability)
 		}
+		for _, handler := range streamingHandlers {
+			if !advertised[handler.capability] && seenCapabilities[handler.capability] {
+				advertised[handler.capability] = true
+				capabilities = append(capabilities, handler.capability)
+			}
+		}
 		for _, handler := range lifecycleHandlerDescriptors {
 			if advertised[handler.capability] {
 				impl = append(impl, handler.protocolType)
+			}
+		}
+		for ty, handler := range streamingHandlers {
+			if advertised[handler.capability] {
+				impl = append(impl, ty)
 			}
 		}
 		session.capabilities = advertised
