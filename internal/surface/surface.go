@@ -223,7 +223,12 @@ var Registry = []Cmd{
 		Params: []Param{pos(p("run", "string", "run id"))}},
 	{Path: []string{"run", "attach"}, Desc: "follow a run live",
 		Kind: CLIOnly | Protocol, Idempotent: true, Since: 1,
-		Params: []Param{pos(p("run", "string", "run id"))}},
+		Params: []Param{pos(p("run", "string", "run id")),
+			// after_seq projects the host subscription's resumable cursor: a
+			// client that kept its last delivered sequence reattaches from it
+			// and loses nothing. Absent means from the beginning, matching the
+			// CLI, which replays the whole log.
+			p("after-seq", "number", "resume after this confirmed sequence")}},
 	{Path: []string{"run", "pause"}, Desc: "pause a run",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAsk, Mutates: true, Since: 1,
 		Params: []Param{pos(p("run", "string", "run id"))}},

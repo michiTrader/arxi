@@ -408,18 +408,30 @@ func TestTheHelloPrecedesEverythingAndDescribesTheProtocol(t *testing.T) {
 			t.Errorf("hello lists %q as implemented but it is not even a protocol type", ty)
 		}
 		if _, static := protoHandlers[ty]; !static {
-			handler, lifecycle := lifecycleHandlers[ty]
-			if !lifecycle || !containsCapability(h.Capabilities, handler.capability) {
-				t.Errorf("hello claims %q is implemented and there is no effective handler.\n"+
+			if handler, lifecycle := lifecycleHandlers[ty]; lifecycle {
+				if !containsCapability(h.Capabilities, handler.capability) {
+					t.Errorf("hello claims %q is implemented and there is no effective handler.\n"+
+						"  consequence: the client sends it, gets not_implemented, and can "+
+						"no longer trust the one field that exists to spare it that", ty)
+				}
+			} else if handler, streaming := streamingHandlers[ty]; streaming {
+				// A streaming type is like a lifecycle one: its capability must
+				// be installed for the client to use it.
+				if !containsCapability(h.Capabilities, handler.capability) {
+					t.Errorf("hello claims streaming type %q is implemented with no effective capability.\n"+
+						"  consequence: the client attaches and gets not_implemented", ty)
+				}
+			} else {
+				t.Errorf("hello claims %q is implemented and there is no handler of any kind.\n"+
 					"  consequence: the client sends it, gets not_implemented, and can "+
 					"no longer trust the one field that exists to spare it that", ty)
 			}
 		}
 	}
-	if len(h.Implemented) != len(protoHandlers)+len(lifecycleHandlerDescriptors) {
-		t.Errorf("hello lists %d implemented types, but this session has %d static and %d effective lifecycle handlers.\n"+
+	if want := len(protoHandlers) + len(lifecycleHandlerDescriptors) + len(streamingHandlers); len(h.Implemented) != want {
+		t.Errorf("hello lists %d implemented types, but this session has %d handlers (static + lifecycle + streaming).\n"+
 			"  consequence: a working capability is undiscoverable or an entry is duplicated",
-			len(h.Implemented), len(protoHandlers), len(lifecycleHandlerDescriptors))
+			len(h.Implemented), want)
 	}
 }
 
@@ -447,6 +459,11 @@ type recordingLifecycleHost struct {
 	rejectCtx      context.Context
 	answer         hostv1.AnswerRequest
 	answerCtx      context.Context
+
+	subscribe    hostv1.SubscribeRequest
+	subscribeCtx context.Context
+	subscription hostv1.Subscription
+	subscribeErr error
 }
 
 func (h *recordingLifecycleHost) Inspect(ctx context.Context, req hostv1.InspectRequest) (hostv1.Job, error) {
@@ -502,6 +519,28 @@ func (h *recordingLifecycleHost) Answer(ctx context.Context, req hostv1.AnswerRe
 	h.answer = req
 	return h.response, h.err
 }
+
+func (h *recordingLifecycleHost) Subscribe(ctx context.Context, req hostv1.SubscribeRequest) (hostv1.Subscription, error) {
+	h.subscribeCtx = ctx
+	h.subscribe = req
+	if h.subscribeErr != nil {
+		return nil, h.subscribeErr
+	}
+	if h.subscription != nil {
+		return h.subscription, nil
+	}
+	return &closedSubscription{}, nil
+}
+
+// closedSubscription is the zero-value fake: a subscription that ends
+// immediately, so a test that only cares that an attach succeeded does not
+// have to build one.
+type closedSubscription struct{}
+
+func (*closedSubscription) Next(context.Context) (hostv1.EventBatch, error) {
+	return hostv1.EventBatch{}, context.Canceled
+}
+func (*closedSubscription) Close() error { return nil }
 
 func TestConnectionPrincipalPropagatesToLifecycleDispatch(t *testing.T) {
 	host := &recordingLifecycleHost{response: hostv1.Job{ID: "r1"}}
@@ -591,18 +630,15 @@ func TestHelloAdvertisesOnlyEffectiveRepresentableCapabilities(t *testing.T) {
 	// descriptor (its stream cannot preserve one-request/one-response framing),
 	// so it must stay absent even though the host could do it.
 	want := []hostv1.Capability{hostv1.CapabilityAnswer, hostv1.CapabilityApprove, hostv1.CapabilityReject,
-		hostv1.CapabilityCancel, hostv1.CapabilityInspect, hostv1.CapabilitySubmit, hostv1.CapabilityWait}
+		hostv1.CapabilitySubscribe, hostv1.CapabilityCancel, hostv1.CapabilityInspect,
+		hostv1.CapabilitySubmit, hostv1.CapabilityWait}
 	if !reflect.DeepEqual(hello.Capabilities, want) {
-		t.Fatalf("hello capabilities = %#v, want %#v; a capability is advertised exactly when a descriptor and an installed host handler both exist", hello.Capabilities, want)
+		t.Fatalf("hello capabilities = %#v, want %#v; a capability is advertised exactly when a handler and an installed host capability both exist", hello.Capabilities, want)
 	}
-	for _, ty := range []string{"run.show", "run.cancel", "run.start", "run.result", "inbox.approve", "inbox.reject", "inbox.reply"} {
+	for _, ty := range []string{"run.show", "run.cancel", "run.start", "run.result", "run.attach",
+		"inbox.approve", "inbox.reject", "inbox.reply"} {
 		if !containsString(hello.Implemented, ty) {
-			t.Errorf("wired lifecycle type %q is absent from implemented: %#v", ty, hello.Implemented)
-		}
-	}
-	for _, ty := range []string{"run.attach"} {
-		if containsString(hello.Implemented, ty) {
-			t.Errorf("%q is advertised as implemented without a safe request/response adapter", ty)
+			t.Errorf("wired type %q is absent from implemented: %#v", ty, hello.Implemented)
 		}
 	}
 }
