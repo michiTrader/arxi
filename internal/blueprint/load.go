@@ -382,9 +382,12 @@ func (v *validator) watchers(raw any, members []kernel.MemberConfig) []kernel.Wa
 		v.known(where, m, "agent", "pattern", "action", "tool", "include_self")
 
 		w := kernel.Watcher{
-			Agent:       v.str(where, m, "agent"),
-			Pattern:     v.str(where, m, "pattern"),
-			Action:      v.str(where, m, "action"),
+			Agent:   v.str(where, m, "agent"),
+			Pattern: v.str(where, m, "pattern"),
+			// enum, not str: the reducer resolves any unrecognized action to
+			// activate, so a misspelled "notfiy" would silently become the
+			// noisiest action a watcher can take.
+			Action:      v.enum(where, m, "action", "activate", "notify", "run_tool"),
 			Tool:        v.str(where, m, "tool"),
 			IncludeSelf: v.bool(where, m, "include_self"),
 		}
@@ -400,6 +403,25 @@ func (v *validator) watchers(raw any, members []kernel.MemberConfig) []kernel.Wa
 			v.errf("%s: a watcher with no pattern matches nothing", where)
 		} else {
 			v.pattern(where, w.Pattern)
+		}
+		// The member tool check applies here for the same reason it applies to
+		// members: the tool set is compiled in, so this is the last point at
+		// which refusing is free. A watcher's typo otherwise survives
+		// validation, gets frozen into the effective config, and surfaces as
+		// ErrUnknownTool mid-run after the triggering turn was already billed.
+		if w.Action == "run_tool" {
+			if w.Tool == "" {
+				v.errf("%s: action run_tool with no tool would wake %s to dispatch nothing", where, w.Agent)
+			} else if !kernel.ToolIsKnown(w.Tool) {
+				if near := nearest(w.Tool, kernel.KnownTools); near != "" {
+					v.errf("%s: tool = %q, did you mean %q?", where, w.Tool, near)
+				} else {
+					v.errf("%s: tool = %q is not a tool; granted tools are %s",
+						where, w.Tool, strings.Join(kernel.KnownTools, ", "))
+				}
+			}
+		} else if w.Tool != "" {
+			v.errf("%s: tool %q on action %q is dead config; only run_tool dispatches one", where, w.Tool, w.Action)
 		}
 		if w.IncludeSelf {
 			// Not an error, but it is the one setting in the file that can bill
