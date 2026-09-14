@@ -24,6 +24,7 @@ has to decide which — not ignore the contradiction.
 | [0012](0012-honest-platform-workspaces.md) | Workspace names describe provisioned, platform-verified guarantees | accepted |
 | [0013](0013-confirmed-transcript-prepared-context.md) | Confirmed history is projected once and prepared context is immutable before model dispatch | accepted |
 | [0014](0014-measured-context-compaction.md) | Context pressure is measured against explicit budgets and compaction is a verified lossy artifact beside an intact transcript | accepted |
+| [0015](0015-one-host-lifecycle-projected-across-surfaces.md) | One capability has one implementation and every surface projects it | accepted |
 
 ## Format
 

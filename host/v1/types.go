@@ -77,6 +77,11 @@ type SubmitRequest struct {
 	MaxTurns       int       `json:"max_turns,omitempty"`
 	Simulated      bool      `json:"simulated,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	// Model names the model a text-only job runs on. Empty keeps the host
+	// default; the CLI's --model and the protocol's model parameter arrive
+	// here, so a submitted job bills the model its client chose and not one
+	// the host invented.
+	Model string `json:"model,omitempty"`
 }
 
 // SubmitResult confirms durable acceptance. AcceptedSeq is the confirmed
