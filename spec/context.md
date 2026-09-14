@@ -31,15 +31,23 @@ Every digest is lowercase hexadecimal SHA-256. Composed identities use the named
 domain followed by fixed-order fields encoded as an eight-byte big-endian length
 and exact bytes. The domains are:
 
-- `arxi.transcript-id/v1`;
 - `arxi.transcript-content/v1`;
-- `arxi.context-id/v1`;
 - `arxi.context-content/v1`;
 - `arxi.context-presentation/v1`;
-- `arxi.compaction-content/v1`.
+- `arxi.transcript-item/v1`;
+- `arxi.context-memory/v1`;
+- `arxi.compaction-content/v1`;
+- `arxi.compaction-omission/v1`.
 
 Exact bytes remain the evidence. A digest is an integrity binding and index, not
 a replacement for content.
+
+A preparation identity is not one of these digests. It is derived from the run
+and parent work identity, which already bind the source event, effect index and
+effect bytes, and it is the key recovery looks a committed preparation up by.
+Artifact digests and identities therefore change independently: a reserved
+domain name that identifies nothing is worse than no name, because it reads as
+a guarantee the code never made.
 
 ## Transcript artifact
 
@@ -238,8 +246,10 @@ transcript and prepared-context JSON, their artifact/content/presentation digest
 model and policy versions, measurement and receipt digests. The event commits only
 a fully verifiable artifact.
 
-`context.prepare_failed` repeats the immutable identity and records a stable
-failure class and message. It is terminal for that preparation request and is not
+`context.prepare_failed` repeats every binding that was already known when the
+attempt failed and records a stable failure class and message. A projection
+failure knows no source boundary or projector version, and those fields stay
+absent rather than describing inputs the attempt never had. It is terminal for that preparation request and is not
 evidence that a model call occurred.
 
 All three event types are operational, reducer-inert and watcher-inert. They do

@@ -104,6 +104,10 @@ type ContextPreparation struct {
 	Effect             kernel.SpawnTurn
 	History            ContextTranscript
 	Route              ContextRoute
+	// OutputLimit is the response cap the frozen request already carries. The
+	// measurement records it beside the input pressure so an audit can see the
+	// whole budget the call ran under, not half of it.
+	OutputLimit int
 }
 
 // PreparedContext is the frozen presentation and every binding the barrier
@@ -378,13 +382,13 @@ func (r *Runner) prepareDurableTurn(ctx context.Context, w Work, e kernel.SpawnT
 	history, err := r.Pipeline.Project(ContextProjection{RunID: r.RunID, Subject: e.Agent,
 		EffectiveConfigSHA: r.Context.EffectiveConfigSHA, Events: events, Through: w.SourceSeq})
 	if err != nil {
-		return turn.Request{}, r.failContextPreparation(contextID, w, e, err)
+		return turn.Request{}, r.failContextPreparation(contextID, w, e, ContextTranscript{}, err)
 	}
 	artifact, err := r.Pipeline.Prepare(ContextPreparation{ContextID: contextID, RunID: r.RunID,
 		ParentWorkID: w.ID, EffectiveConfigSHA: r.Context.EffectiveConfigSHA, Effect: e, History: history,
-		Route: r.contextRoute(base)})
+		Route: r.contextRoute(base), OutputLimit: base.MaxTokens})
 	if err != nil {
-		return turn.Request{}, r.failContextPreparation(contextID, w, e, err)
+		return turn.Request{}, r.failContextPreparation(contextID, w, e, history, err)
 	}
 	if err := r.commitContextPreparation(contextID, w, e, history, artifact); err != nil {
 		return turn.Request{}, err
@@ -576,12 +580,22 @@ func (r *Runner) commitContextPreparation(contextID string, w Work, e kernel.Spa
 // The failure class comes from the error itself when it carries one (the
 // overflow path reports "compaction"), so the runner never imports the
 // artifact packages to learn it.
-func (r *Runner) failContextPreparation(contextID string, w Work, e kernel.SpawnTurn, cause error) error {
-	event := r.progressEvent(kernel.ContextPrepareFailed, map[string]any{
+func (r *Runner) failContextPreparation(contextID string, w Work, e kernel.SpawnTurn, history ContextTranscript, cause error) error {
+	payload := map[string]any{
 		"schema": contextRequestSchema, "context_id": contextID, "parent_work_id": w.ID,
 		"agent": e.Agent, "source_through_seq": w.SourceSeq, "effective_config_sha": r.Context.EffectiveConfigSHA,
 		"failure_class": preparationClass(cause), "error": cause.Error(),
-	}, w.Source)
+	}
+	// A failure is the only record of an attempt that never committed a
+	// request, so it carries every binding that was already known. Projection
+	// failures know none of them, and inventing them would describe inputs the
+	// attempt never had.
+	if history.SourceThroughEventID != "" {
+		payload["source_from_seq"] = history.SourceFromSeq
+		payload["source_through_event_id"] = history.SourceThroughEventID
+		payload["projector_version"] = history.ProjectorVersion
+	}
+	event := r.progressEvent(kernel.ContextPrepareFailed, payload, w.Source)
 	if _, err := r.Log.Append(r.stamp([]kernel.Event{event})); err != nil {
 		return fmt.Errorf("persist context preparation failure %s: %w", contextID, err)
 	}

@@ -103,6 +103,7 @@ type Request struct {
 	Effect             kernel.SpawnTurn
 	History            transcript.Artifact
 	Route              Route
+	OutputLimit        int
 	Generator          compaction.Generator
 }
 
@@ -143,6 +144,7 @@ func Prepare(req Request) (Artifact, error) {
 		// compaction runs, and the limit fields stay absent rather than invented.
 		artifact.Messages = full
 		artifact.Measurement = measurement(static, nil, prior, trailing, limit)
+		artifact.Measurement.OutputLimit = req.OutputLimit
 	default:
 		presented, selected, m, err := compact(contextID, runID, effect, history, limit, static, prior, trailing, req.Generator)
 		if err != nil {
@@ -152,6 +154,7 @@ func Prepare(req Request) (Artifact, error) {
 		artifact.Compaction = &selected
 		artifact.Overflow = OverflowDecision{Exceeded: true, Mode: effect.Context.OnOverflow,
 			Compacted: true, CompactionDigest: selected.ContentDigest}
+		m.OutputLimit = req.OutputLimit
 		artifact.Measurement = m
 	}
 	if memory := strings.TrimSpace(effect.Context.Memory); memory != "" {

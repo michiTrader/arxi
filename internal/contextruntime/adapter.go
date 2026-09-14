@@ -61,7 +61,7 @@ func (Adapter) Prepare(req exec.ContextPreparation) (exec.PreparedContext, error
 		Route: contextprep.Route{Provider: req.Route.Provider, Protocol: req.Route.Protocol,
 			Model: req.Route.Model, BaseURL: req.Route.BaseURL,
 			ToolSchemaVersion: req.Route.ToolSchemaVersion, ContextPolicyVersion: req.Route.ContextPolicyVersion},
-		Generator: compaction.Extractive{}})
+		OutputLimit: req.OutputLimit, Generator: compaction.Extractive{}})
 	if err != nil {
 		return exec.PreparedContext{}, err
 	}
