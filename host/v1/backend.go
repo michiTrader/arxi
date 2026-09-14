@@ -140,8 +140,12 @@ func (b *storageBackend) Submit(ctx context.Context, req SubmitRequest) (SubmitR
 	if req.Simulated {
 		mode = "sim"
 	}
-	effective := runconfig.New(string(id), mode, bp.SHA, req.Prompt, "host-text", bp.Config, []runconfig.Route{{
-		Ref: "host-text", Provider: "host", Model: "host-text",
+	defaultModel := req.Model
+	if strings.TrimSpace(defaultModel) == "" {
+		defaultModel = "host-text"
+	}
+	effective := runconfig.New(string(id), mode, bp.SHA, req.Prompt, defaultModel, bp.Config, []runconfig.Route{{
+		Ref: "host-text", Provider: "host", Model: defaultModel,
 	}}, nil)
 	requirements, err := hostWorkspaceRequirements(bp.Config)
 	if err != nil {

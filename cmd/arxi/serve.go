@@ -171,11 +171,22 @@ var lifecycleHandlerDescriptors = []lifecycleHandler{
 		protocolType: "run.start",
 		capability:   hostv1.CapabilitySubmit,
 		dispatch: func(ctx context.Context, host lifecycleHost, principal hostv1.Principal, params map[string]any) (any, error) {
+			// The wire contract takes an actor (stored agent name or blueprint
+			// path), not inline blueprint text: the same resolution `run start`
+			// performs, through the same store, so a protocol client cannot
+			// submit a blueprint the operator never reviewed. The model
+			// parameter rides through as the member's model choice, exactly as
+			// `--model` does on the CLI.
+			actor := stringParam(params, "actor")
+			bp, err := resolveActor(actor)
+			if err != nil {
+				return nil, err
+			}
 			return host.Submit(ctx, hostv1.SubmitRequest{
-				Principal: principal, Actor: stringParam(params, "actor"),
-				Blueprint: stringParam(params, "blueprint"), Prompt: stringParam(params, "prompt"),
+				Principal: principal, Actor: actor, Blueprint: string(bp.Raw),
+				Prompt:    stringParam(params, "prompt"),
 				BudgetUSD: numParam(params, "budget"), MaxTurns: intParam(params, "max_turns"),
-				Simulated: boolParam(params, "sim"), IdempotencyKey: stringParam(params, "idempotency_key"),
+				Simulated: boolParam(params, "sim"), Model: stringParam(params, "model"),
 			})
 		},
 	},
@@ -211,9 +222,12 @@ var lifecycleHandlerDescriptors = []lifecycleHandler{
 		protocolType: "inbox.approve",
 		capability:   hostv1.CapabilityApprove,
 		dispatch: func(ctx context.Context, host lifecycleHost, principal hostv1.Principal, params map[string]any) (any, error) {
+			if err := decisionIdentity(params); err != nil {
+				return nil, err
+			}
 			return host.Approve(ctx, hostv1.ApproveRequest{
 				Principal: principal, JobID: hostv1.JobID(stringParam(params, "run")),
-				ItemID: hostv1.ItemID(stringParam(params, "item")),
+				ItemID: hostv1.ItemID(itemParam(params)),
 			})
 		},
 	},
@@ -221,9 +235,12 @@ var lifecycleHandlerDescriptors = []lifecycleHandler{
 		protocolType: "inbox.reject",
 		capability:   hostv1.CapabilityReject,
 		dispatch: func(ctx context.Context, host lifecycleHost, principal hostv1.Principal, params map[string]any) (any, error) {
+			if err := decisionIdentity(params); err != nil {
+				return nil, err
+			}
 			return host.Reject(ctx, hostv1.RejectRequest{
 				Principal: principal, JobID: hostv1.JobID(stringParam(params, "run")),
-				ItemID: hostv1.ItemID(stringParam(params, "item")),
+				ItemID: hostv1.ItemID(itemParam(params)),
 				Reason: stringParam(params, "reason"),
 			})
 		},
@@ -232,9 +249,12 @@ var lifecycleHandlerDescriptors = []lifecycleHandler{
 		protocolType: "inbox.reply",
 		capability:   hostv1.CapabilityAnswer,
 		dispatch: func(ctx context.Context, host lifecycleHost, principal hostv1.Principal, params map[string]any) (any, error) {
+			if err := decisionIdentity(params); err != nil {
+				return nil, err
+			}
 			return host.Answer(ctx, hostv1.AnswerRequest{
 				Principal: principal, JobID: hostv1.JobID(stringParam(params, "run")),
-				ItemID: hostv1.ItemID(stringParam(params, "item")),
+				ItemID: hostv1.ItemID(itemParam(params)),
 				Text:   stringParam(params, "text"),
 			})
 		},
@@ -490,6 +510,31 @@ func intParam(params map[string]any, name string) int {
 func boolParam(params map[string]any, name string) bool {
 	value, _ := params[name].(bool)
 	return value
+}
+
+// itemParam reads the pending-item identity. The protocol spelling is `item`;
+// `id` is the CLI spelling that was already on the wire, and both name the
+// same thing. Refusing `id` would break every existing client for a rename;
+// refusing `item` would publish a parameter the host's own request type uses.
+func itemParam(params map[string]any) string {
+	if item := stringParam(params, "item"); item != "" {
+		return item
+	}
+	return stringParam(params, "id")
+}
+
+// decisionIdentity enforces what the registry cannot express: a decision
+// needs its run and one item spelling. The registry marks run and text as
+// required and item/id as optional individually, because "exactly one of
+// these two" is not a shape it has; this check is the authority for it.
+func decisionIdentity(params map[string]any) error {
+	if stringParam(params, "run") == "" {
+		return errors.New("a decision requires the run it belongs to: host authorization is job-scoped and will not guess")
+	}
+	if itemParam(params) == "" {
+		return errors.New("a decision requires its item identity (item or id)")
+	}
+	return nil
 }
 
 func hostErrorResponse(id string, err error) protoResponse {

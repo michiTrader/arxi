@@ -129,9 +129,16 @@ func (c Cmd) InVersion(version int) bool {
 // surface version. It deliberately does not negotiate future versions.
 func HasVersion(version int) bool { return version > 0 && version <= SurfaceVersion }
 
-func p(name, typ, desc string) Param   { return Param{Name: name, Type: typ, Desc: desc} }
-func req(pp Param) Param               { pp.Required = true; return pp }
-func pos(pp Param) Param               { pp.Positional = true; pp.Required = true; return pp }
+func p(name, typ, desc string) Param { return Param{Name: name, Type: typ, Desc: desc} }
+func req(pp Param) Param             { pp.Required = true; return pp }
+func pos(pp Param) Param             { pp.Positional = true; pp.Required = true; return pp }
+
+// positional marks a CLI positional without making it required on the wire.
+// The inbox decision verbs use it for `id`: the CLI invocation
+// `arxi inbox approve <id>` is positional and the id itself is genuinely
+// mandatory, but the wire takes it from either `id` or `item`, and Required
+// would let the validator demand both shapes at once.
+func positional(pp Param) Param        { pp.Positional = true; return pp }
 func def(pp Param, d string) Param     { pp.Default = d; return pp }
 func enum(pp Param, v ...string) Param { pp.Enum = v; return pp }
 
@@ -546,16 +553,37 @@ var Registry = []Cmd{
 	// ---- inbox: the human in the loop --------------------------------------
 	{Path: []string{"inbox"}, Desc: "view pending questions",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
+	// The decision operations take run and item: host authorization is
+	// job-scoped, so the wire shape must carry both identities rather than
+	// let an adapter guess the job an item belongs to. `id` stays as the
+	// legacy CLI spelling of the item and is accepted alongside `item`.
+	// The decision operations take run and item: host authorization is
+	// job-scoped, so the wire shape must carry both identities rather than
+	// let an adapter guess the job an item belongs to. The item itself is
+	// named by either `item` (the host's spelling) or `id` (the legacy wire
+	// spelling); one of the two is required, which the handler enforces —
+	// the registry cannot express "exactly one of these two".
+	// The decision operations accept run for protocol clients: host
+	// authorization is job-scoped, so the wire must carry the job identity
+	// rather than let an adapter guess it. The CLI keeps its legacy single-id
+	// invocation and resolves the run by search, refusing ambiguity -- the
+	// search already existed and its refusal names both candidates.
 	{Path: []string{"inbox", "approve"}, Desc: "approve a request",
 		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
-		Params: []Param{pos(p("id", "string", "item id"))}},
+		Params: []Param{p("run", "string", "run the item belongs to (required on the wire)"),
+			p("item", "string", "item id (protocol spelling)"),
+			positional(p("id", "string", "item id"))}},
 	{Path: []string{"inbox", "reject"}, Desc: "reject a request",
 		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
-		Params: []Param{pos(p("id", "string", "item id")),
+		Params: []Param{p("run", "string", "run the item belongs to (required on the wire)"),
+			p("item", "string", "item id (protocol spelling)"),
+			positional(p("id", "string", "item id")),
 			p("reason", "string", "reason")}},
 	{Path: []string{"inbox", "reply"}, Desc: "reply to a question",
 		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
-		Params: []Param{pos(p("id", "string", "item id")),
+		Params: []Param{p("run", "string", "run the item belongs to (required on the wire)"),
+			p("item", "string", "item id (protocol spelling)"),
+			positional(p("id", "string", "item id")),
 			pos(p("text", "string", "the answer"))}},
 
 	// ---- evaluation --------------------------------------------------------
