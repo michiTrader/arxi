@@ -99,6 +99,14 @@ func TestOpenAINativeTurnRunsToolAndReinjectsProviderCallID(t *testing.T) {
 	if events[3].Payload["tokens_in"] != 24 || events[3].Payload["tokens_out"] != 3 {
 		t.Fatalf("usage = %#v", events[3].Payload)
 	}
+	// The canonical transcript preserves argument digests, and it can only
+	// preserve what the domain event carries. Without this the digest column of
+	// every projected tool call is silently empty and nothing downstream can
+	// prove which exact arguments ran.
+	if digest := events[1].Payload["argument_digest"]; digest != call.ArgumentDigest || digest == "" {
+		t.Fatalf("tool.call argument digest = %v, want %q: a projected call without its digest cannot prove which arguments ran",
+			digest, call.ArgumentDigest)
+	}
 }
 
 func TestAnthropicNativeTurnRunsThroughDurableRunner(t *testing.T) {

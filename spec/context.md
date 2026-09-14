@@ -31,15 +31,23 @@ Every digest is lowercase hexadecimal SHA-256. Composed identities use the named
 domain followed by fixed-order fields encoded as an eight-byte big-endian length
 and exact bytes. The domains are:
 
-- `arxi.transcript-id/v1`;
 - `arxi.transcript-content/v1`;
-- `arxi.context-id/v1`;
 - `arxi.context-content/v1`;
 - `arxi.context-presentation/v1`;
-- `arxi.compaction-content/v1`.
+- `arxi.transcript-item/v1`;
+- `arxi.context-memory/v1`;
+- `arxi.compaction-content/v1`;
+- `arxi.compaction-omission/v1`.
 
 Exact bytes remain the evidence. A digest is an integrity binding and index, not
 a replacement for content.
+
+A preparation identity is not one of these digests. It is derived from the run
+and parent work identity, which already bind the source event, effect index and
+effect bytes, and it is the key recovery looks a committed preparation up by.
+Artifact digests and identities therefore change independently: a reserved
+domain name that identifies nothing is worse than no name, because it reads as
+a guarantee the code never made.
 
 ## Transcript artifact
 
@@ -83,12 +91,17 @@ intermediate native rounds. A historical text-only `llm.response` becomes an
 explicit legacy item.
 
 Tool calls preserve provider-issued call IDs, canonical argument bytes and
-argument digests. Results preserve the exact committed text and call order. A
+argument digests. Producers of `tool.call` must record the digest the canonical
+call already carries; a projector cannot preserve an identity the event never
+wrote. Results preserve the exact committed text and call order. A
 projector never manufactures a call ID for a legacy direct-tool event.
 
 Human decisions preserve the authenticated principal, pending-item or action
-identity and decision. Asked, granted, consumed and externally completed are
-distinct facts. Artifact references preserve immutable version or content digest,
+identity, the decision verb and the exact answer text when one was given. The
+verb alone is not the decision: an answer's substance is its text, and the
+activation cause the reducer computes is an event ID, so dropping the text
+would resume the member that asked without the answer it waited for. Asked,
+granted, consumed and externally completed are distinct facts. Artifact references preserve immutable version or content digest,
 media metadata and provenance. A live path alone is not an artifact reference and
 is never dereferenced during replay.
 
@@ -124,6 +137,15 @@ The presentation digest binds exact canonical message bytes, including order and
 framing. The existing model-child request digest binds the complete
 `arxi.turn/v1` request including route, tools and generation options. These three
 digests are not interchangeable.
+
+The route records the non-secret destination: provider, protocol, model, base
+URL, tool-schema version and context-policy version. It joins the content
+digest, because the same messages sent to a different model under a different
+tool schema are a different presentation. Before a committed presentation is
+reused, its recorded provider, protocol and model must equal the route the turn
+now resolves to; every other digest still verifies when only the destination
+changed, so this comparison is the only thing standing between a frozen
+presentation and a model it was never commissioned for.
 
 The overflow decision records whether measured pressure exceeded a known input
 limit, the mode that governed the outcome, and — when compaction ran — the
@@ -224,8 +246,10 @@ transcript and prepared-context JSON, their artifact/content/presentation digest
 model and policy versions, measurement and receipt digests. The event commits only
 a fully verifiable artifact.
 
-`context.prepare_failed` repeats the immutable identity and records a stable
-failure class and message. It is terminal for that preparation request and is not
+`context.prepare_failed` repeats every binding that was already known when the
+attempt failed and records a stable failure class and message. A projection
+failure knows no source boundary or projector version, and those fields stay
+absent rather than describing inputs the attempt never had. It is terminal for that preparation request and is not
 evidence that a model call occurred.
 
 All three event types are operational, reducer-inert and watcher-inert. They do

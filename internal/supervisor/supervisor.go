@@ -618,7 +618,8 @@ func contextConfig(events []kernel.Event, effective runconfig.Artifact) exec.Con
 	}
 	for _, event := range events {
 		if event.Type == kernel.RunStarted {
-			return exec.ContextConfig{EffectiveConfigSHA: event.Str("effective_config_sha")}
+			return exec.ContextConfig{EffectiveConfigSHA: event.Str("effective_config_sha"),
+				PolicyVersion: effective.ContextPrepVersion}
 		}
 	}
 	return exec.ContextConfig{}

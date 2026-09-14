@@ -57,6 +57,20 @@ type MemoryReceipt struct {
 	ContentDigest      string `json:"content_digest"`
 }
 
+// Route binds the presentation to the destination it was prepared for. The
+// spec requires the artifact to prove not just what was presented but to which
+// model under which tool schema: without it, a recovered presentation could be
+// replayed against a different model and the artifact would still look valid.
+// Credentials never appear here — only the non-secret route identity.
+type Route struct {
+	Provider             string `json:"provider,omitempty"`
+	Protocol             string `json:"protocol,omitempty"`
+	Model                string `json:"model,omitempty"`
+	BaseURL              string `json:"base_url,omitempty"`
+	ToolSchemaVersion    string `json:"tool_schema_version,omitempty"`
+	ContextPolicyVersion string `json:"context_policy_version,omitempty"`
+}
+
 type Artifact struct {
 	Schema             string               `json:"schema"`
 	ContextID          string               `json:"context_id"`
@@ -67,6 +81,7 @@ type Artifact struct {
 	EffectiveConfigSHA string               `json:"effective_config_sha,omitempty"`
 	Transcript         transcript.Artifact  `json:"transcript"`
 	PreparerVersion    string               `json:"preparer_version"`
+	Route              Route                `json:"route"`
 	Messages           []turn.Message       `json:"messages"`
 	Measurement        Measurement          `json:"token_measurement"`
 	Overflow           OverflowDecision     `json:"overflow_decision"`
@@ -74,6 +89,22 @@ type Artifact struct {
 	MemoryReceipts     []MemoryReceipt      `json:"memory_use_receipts"`
 	ContentDigest      string               `json:"content_digest"`
 	PresentationDigest string               `json:"presentation_digest"`
+}
+
+// Request names one preparation commission. It is a struct rather than a
+// positional list because every field is an identity that must be recorded
+// exactly, and a transposed pair of strings would be invisible at the call
+// site and wrong in the artifact.
+type Request struct {
+	ContextID          string
+	RunID              string
+	ParentWorkID       string
+	EffectiveConfigSHA string
+	Effect             kernel.SpawnTurn
+	History            transcript.Artifact
+	Route              Route
+	OutputLimit        int
+	Generator          compaction.Generator
 }
 
 // OverflowError marks every failure on the overflow path — an unusable mode, a
@@ -88,19 +119,17 @@ func (e *OverflowError) Unwrap() error { return e.Err }
 func (e *OverflowError) PreparationClass() string { return "compaction" }
 
 // Prepare freezes one presentation from a projected transcript. It is a pure
-// function of its inputs and the given generator: the same confirmed history
-// and effect always yield the same bytes, which is what lets the durable
-// barrier reproduce the artifact it committed.
-func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.SpawnTurn, history transcript.Artifact, generator compaction.Generator) (Artifact, error) {
-	artifact := Artifact{Schema: Schema, ContextID: contextID, RunID: runID, ParentWorkID: parentWorkID,
-		Subject: effect.Agent, SourceThroughSeq: history.SourceThroughSeq, EffectiveConfigSHA: effectiveSHA,
-		Transcript: history, PreparerVersion: PreparerVersion, MemoryReceipts: []MemoryReceipt{}}
+// function of its request: the same confirmed history, route and effect always
+// yield the same bytes, which is what lets the durable barrier reproduce the
+// artifact it committed.
+func Prepare(req Request) (Artifact, error) {
+	contextID, runID, history, effect := req.ContextID, req.RunID, req.History, req.Effect
+	artifact := Artifact{Schema: Schema, ContextID: contextID, RunID: runID, ParentWorkID: req.ParentWorkID,
+		Subject: effect.Agent, SourceThroughSeq: history.SourceThroughSeq, EffectiveConfigSHA: req.EffectiveConfigSHA,
+		Transcript: history, PreparerVersion: PreparerVersion, Route: req.Route, MemoryReceipts: []MemoryReceipt{}}
 	static := staticMessages(effect.Context)
 	prior := transcriptMessages(history.Items)
-	var trailing []turn.Message
-	if len(prior) == 0 || prior[len(prior)-1].Role != turn.RoleUser {
-		trailing = []turn.Message{textMessage(turn.RoleUser, "Proceed.")}
-	}
+	trailing := inputMessages(effect.Context, prior)
 	full := joinMessages(static, prior, trailing)
 	// Encoding is validated once here: every layer measurement marshals a
 	// subset of these exact message elements, so no layer measure can fail
@@ -115,8 +144,9 @@ func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.
 		// compaction runs, and the limit fields stay absent rather than invented.
 		artifact.Messages = full
 		artifact.Measurement = measurement(static, nil, prior, trailing, limit)
+		artifact.Measurement.OutputLimit = req.OutputLimit
 	default:
-		presented, selected, m, err := compact(contextID, runID, effect, history, limit, static, prior, trailing, generator)
+		presented, selected, m, err := compact(contextID, runID, effect, history, limit, static, prior, trailing, req.Generator)
 		if err != nil {
 			return Artifact{}, err
 		}
@@ -124,23 +154,28 @@ func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.
 		artifact.Compaction = &selected
 		artifact.Overflow = OverflowDecision{Exceeded: true, Mode: effect.Context.OnOverflow,
 			Compacted: true, CompactionDigest: selected.ContentDigest}
+		m.OutputLimit = req.OutputLimit
 		artifact.Measurement = m
 	}
 	if memory := strings.TrimSpace(effect.Context.Memory); memory != "" {
 		artifact.MemoryReceipts = append(artifact.MemoryReceipts, MemoryReceipt{Kind: "frozen_context_memory",
-			EffectiveConfigSHA: effectiveSHA, ContentDigest: digest("arxi.context-memory/v1", []byte(memory))})
+			EffectiveConfigSHA: req.EffectiveConfigSHA, ContentDigest: digest("arxi.context-memory/v1", []byte(memory))})
 	}
 	presentation, err := json.Marshal(artifact.Messages)
 	if err != nil {
 		return Artifact{}, fmt.Errorf("encode prepared presentation: %w", err)
 	}
 	artifact.PresentationDigest = digest("arxi.context-presentation/v1", presentation)
+	// The route joins the content digest because "what was presented" is not
+	// complete without "to whom": the same messages sent to a different model
+	// under a different tool schema are a different presentation.
 	content, err := json.Marshal(struct {
 		TranscriptDigest string          `json:"transcript_digest"`
+		Route            Route           `json:"route"`
 		Messages         []turn.Message  `json:"messages"`
 		Memory           []MemoryReceipt `json:"memory"`
 		CompactionDigest string          `json:"compaction_digest,omitempty"`
-	}{history.ContentDigest, artifact.Messages, artifact.MemoryReceipts, artifact.Overflow.CompactionDigest})
+	}{history.ContentDigest, artifact.Route, artifact.Messages, artifact.MemoryReceipts, artifact.Overflow.CompactionDigest})
 	if err != nil {
 		return Artifact{}, fmt.Errorf("encode prepared content: %w", err)
 	}
@@ -247,6 +282,25 @@ func summaryMessage(selected compaction.Artifact) []turn.Message {
 		body.WriteString("\n")
 	}
 	return []turn.Message{textMessage(turn.RoleUser, strings.TrimRight(body.String(), "\n"))}
+}
+
+// inputMessages closes the presentation with what this turn adds: the
+// activation causes the reducer computed. They are not history — they state
+// what changed since the member last ran, which is the difference between a
+// member that knows it was steered and one that re-reads the conversation and
+// guesses. A turn with no causes still needs a user message, because many
+// providers reject a system-only conversation with a 400 that would surface as
+// a domain error on a turn that was merely empty.
+func inputMessages(context kernel.ContextSpec, prior []turn.Message) []turn.Message {
+	var user strings.Builder
+	writeSection(&user, "Why you were activated", context.Cause)
+	if text := strings.TrimSpace(user.String()); text != "" {
+		return []turn.Message{textMessage(turn.RoleUser, text)}
+	}
+	if len(prior) > 0 && prior[len(prior)-1].Role == turn.RoleUser {
+		return nil
+	}
+	return []turn.Message{textMessage(turn.RoleUser, "Proceed.")}
 }
 
 func staticMessages(context kernel.ContextSpec) []turn.Message {

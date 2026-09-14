@@ -87,6 +87,34 @@ func TestProjectUsesExactNativeResultsWithoutDuplicatingDerivedText(t *testing.T
 	}
 }
 
+// TestProjectPreservesHumanAnswersAndTheirProvenance protects the substance of
+// a human decision. The reducer's activation cause is an event ID and the
+// decision field is only the verb, so if the projection drops the reply text
+// and the principal, a member that asked a question is resumed knowing neither
+// what was answered nor who answered it.
+func TestProjectPreservesHumanAnswersAndTheirProvenance(t *testing.T) {
+	events := []kernel.Event{
+		{Seq: 1, ID: "start", Type: kernel.RunStarted, Payload: map[string]any{"prompt": "pick a database"}},
+		{Seq: 2, ID: "reply", Type: kernel.InboxReplied, Source: kernel.SourceHuman,
+			Payload: map[string]any{"inbox_id": "q1", "decision": "answer", "text": "use postgres, not mysql", "principal": "operator:local"}},
+	}
+	artifact, err := Project("run-1", "backend", "cfg", events, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := artifact.Items[len(artifact.Items)-1]
+	if decision.Kind != HumanDecision {
+		t.Fatalf("last item kind = %q, want %q", decision.Kind, HumanDecision)
+	}
+	if len(decision.Content) == 0 || decision.Content[0].Text != "use postgres, not mysql" {
+		t.Fatalf("decision content = %#v: the answer a human actually gave is the substance of the decision and must survive projection", decision.Content)
+	}
+	if decision.Principal != "operator:local" || decision.DecisionRef != "q1" {
+		t.Fatalf("decision provenance = principal %q ref %q: a decision nobody can attribute cannot be audited",
+			decision.Principal, decision.DecisionRef)
+	}
+}
+
 // childResult builds the exact canonical response body a committed model child
 // record carries, so projection tests bind items to real record shapes.
 func childResult(t *testing.T, id, text string) []byte {

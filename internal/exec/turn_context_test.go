@@ -38,8 +38,13 @@ func (domainPipeline) Prepare(req ContextPreparation) (PreparedContext, error) {
 	if err := json.Unmarshal([]byte(req.History.JSON), &history); err != nil {
 		return PreparedContext{}, err
 	}
-	artifact, err := contextprep.Prepare(req.ContextID, req.RunID, req.ParentWorkID, req.EffectiveConfigSHA,
-		req.Effect, history, compaction.Extractive{})
+	artifact, err := contextprep.Prepare(contextprep.Request{
+		ContextID: req.ContextID, RunID: req.RunID, ParentWorkID: req.ParentWorkID,
+		EffectiveConfigSHA: req.EffectiveConfigSHA, Effect: req.Effect, History: history,
+		Route: contextprep.Route{Provider: req.Route.Provider, Protocol: req.Route.Protocol,
+			Model: req.Route.Model, BaseURL: req.Route.BaseURL,
+			ToolSchemaVersion: req.Route.ToolSchemaVersion, ContextPolicyVersion: req.Route.ContextPolicyVersion},
+		OutputLimit: req.OutputLimit, Generator: compaction.Extractive{}})
 	if err != nil {
 		return PreparedContext{}, err
 	}
@@ -353,6 +358,66 @@ func secondTurnWork(t *testing.T, r *Runner) (Work, kernel.SpawnTurn) {
 		t.Fatal(err)
 	}
 	return works[0], effect
+}
+
+// reroutedTurnExecutor answers with a different model than the one the
+// presentation was prepared for, which is what a changed route resolution
+// looks like to the runner on a later attempt.
+type reroutedTurnExecutor struct{ contextTurnExecutor }
+
+func (x *reroutedTurnExecutor) PrepareTurnContext(ctx context.Context, e kernel.SpawnTurn, messages []turn.Message) (turn.Request, error) {
+	req, err := x.contextTurnExecutor.PrepareTurnContext(ctx, e, messages)
+	if err != nil {
+		return req, err
+	}
+	req.Model = "another-model"
+	return req, nil
+}
+
+// TestDurableTurnRecordsRouteAndRefusesADifferentDestination protects the
+// binding between a frozen presentation and the model it was prepared for.
+// Every other digest still verifies when only the destination changes, so
+// without this check a committed presentation could be delivered to a model
+// the run never commissioned it for.
+func TestDurableTurnRecordsRouteAndRefusesADifferentDestination(t *testing.T) {
+	log := newMemLog()
+	x := &contextTurnExecutor{}
+	r := contextTestRunner(log, x)
+	r.Context.PolicyVersion = "arxi.context-prep/v1"
+	effect := kernel.SpawnTurn{Agent: "backend"}
+	work := contextTestWork(t, r, effect)
+	if _, err := r.runDurableTurn(context.Background(), work, effect, x); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Route struct {
+			Provider             string `json:"provider"`
+			Protocol             string `json:"protocol"`
+			Model                string `json:"model"`
+			ToolSchemaVersion    string `json:"tool_schema_version"`
+			ContextPolicyVersion string `json:"context_policy_version"`
+		} `json:"route"`
+	}
+	for _, event := range log.events {
+		if event.Type == kernel.ContextPrepared {
+			if err := json.Unmarshal([]byte(event.Str("prepared_context_json")), &record); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if record.Route.Provider != "fake" || record.Route.Model != "fake-model" || record.Route.Protocol != "fake-turn/v1" {
+		t.Fatalf("recorded route = %+v: the artifact must prove which model saw this presentation", record.Route)
+	}
+	if record.Route.ToolSchemaVersion != "arxi.tools/v1" || record.Route.ContextPolicyVersion != "arxi.context-prep/v1" {
+		t.Fatalf("recorded versions = %+v: the artifact must prove which tool schema and preparation rules applied", record.Route)
+	}
+
+	rerouted := &reroutedTurnExecutor{}
+	r2 := contextTestRunner(log, rerouted)
+	_, err := r2.runDurableTurn(context.Background(), work, effect, rerouted)
+	if err == nil || !strings.Contains(err.Error(), "was prepared for") {
+		t.Fatalf("rerouted dispatch error = %v: a presentation frozen for one model must never be delivered to another", err)
+	}
 }
 
 // TestDurableTurnCommitsOverflowDecisionAndReusesIt is Phase 6's barrier

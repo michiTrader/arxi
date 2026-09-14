@@ -461,7 +461,8 @@ func (x *Executor) FinishTurn(e kernel.SpawnTurn, trace []exec.TurnEntry) ([]ker
 		if entry.Tool != nil {
 			call, outcome := entry.Tool.Call, entry.Tool.Outcome
 			tools = append(tools, kernel.Event{ID: x.id(e.Agent, "tool-call"), Type: kernel.ToolCall,
-				Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments)}})
+				Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments),
+					"argument_digest": call.ArgumentDigest}})
 			if outcome.Policy == string(surface.PolicyAllow) {
 				tools = append(tools, kernel.Event{ID: x.id(e.Agent, "tool"), Type: kernel.ToolCallCompleted,
 					Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"tool": call.Name, "call_id": call.ID, "result": toolResultText(outcome.Result)}})
