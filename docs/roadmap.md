@@ -159,6 +159,21 @@ artifact instead of rebuilding a potentially different prompt.
 
 ## Phase 6 — Measured context compaction
 
+**Status:** implemented. Preparation measures per-layer pressure against the
+versioned budget policy `arxi.context-budget/v1`, derived deterministically
+from a known input limit. Measured overflow under `on_overflow: summarize`
+produces a verified extractive compaction artifact (`arxi.compaction/v1`) —
+lossy summary plus recent verbatim window — committed inside the same
+`context.prepared` batch; every claim must be contained in the transcript items
+it cites, anchors are never silently dropped, and the omission ledger records
+everything the presentation dropped by identity and content digest. Unknown
+limits mean unknown pressure; other overflow modes and uncompactable contexts
+fail visibly as terminal `context.prepare_failed` records of class
+`compaction`. The canonical transcript is never modified. A model-backed
+generator remains future work behind the same containment gate.
+
+The original phase text follows.
+
 Implement context-pressure measurement, explicit layer budgets and a versioned
 compaction artifact containing a lossy summary plus a recent verbatim window.
 Preserve the canonical transcript and record source ranges, retained critical

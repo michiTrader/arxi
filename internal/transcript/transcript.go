@@ -38,7 +38,14 @@ type Item struct {
 	Call        *turn.ToolCall      `json:"call,omitempty"`
 	Result      *turn.ToolResult    `json:"result,omitempty"`
 	Decision    string              `json:"decision,omitempty"`
-	Legacy      bool                `json:"legacy,omitempty"`
+	// WorkID and ResponseID bind a native model_output item to the child work
+	// record and provider response it was projected from. Compaction ranges and
+	// omission ledgers cite items by ID, so without this binding a summary
+	// could not be audited against the durable execution that produced its
+	// sources. Legacy items have neither.
+	WorkID     string `json:"work_id,omitempty"`
+	ResponseID string `json:"response_id,omitempty"`
+	Legacy     bool   `json:"legacy,omitempty"`
 }
 
 type Artifact struct {
@@ -52,6 +59,38 @@ type Artifact struct {
 	EffectiveConfigSHA   string `json:"effective_config_sha,omitempty"`
 	Items                []Item `json:"items"`
 	ContentDigest        string `json:"content_digest"`
+}
+
+// Message renders the item as the provider-neutral presentation message the
+// preparer shows for it. The second result is false for items with nothing to
+// present; compaction then always accounts them as omissions. Renderer and
+// cost model share this one identity, so a window that fits its budget in
+// cost also fits in the measured presentation.
+func (item Item) Message() (turn.Message, bool) {
+	switch item.Kind {
+	case UserInput:
+		return turn.Message{Role: turn.RoleUser, Content: item.Content}, true
+	case ModelOutput:
+		return turn.Message{Role: turn.RoleAssistant, Content: item.Content}, true
+	case ToolCall:
+		if item.Call != nil && item.Call.ID != "" {
+			call := *item.Call
+			return turn.Message{Role: turn.RoleAssistant,
+				Content: []turn.ContentBlock{{Type: turn.BlockToolCall, ToolCall: &call}}}, true
+		}
+	case ToolResult:
+		if item.Result != nil && item.Result.CallID != "" {
+			result := *item.Result
+			return turn.Message{Role: turn.RoleTool,
+				Content: []turn.ContentBlock{{Type: turn.BlockToolResult, ToolResult: &result}}}, true
+		}
+	case HumanDecision:
+		if item.Decision != "" {
+			return turn.Message{Role: turn.RoleUser,
+				Content: []turn.ContentBlock{{Type: turn.BlockText, Text: "Human decision: " + item.Decision}}}, true
+		}
+	}
+	return turn.Message{}, false
 }
 
 // Project consumes only the caller-supplied confirmed prefix. It never reads a
@@ -150,7 +189,8 @@ func projectEvent(artifact *Artifact, event kernel.Event, subject string, native
 			}
 			if len(response.Content) > 0 {
 				artifact.Items = append(artifact.Items, Item{Kind: ModelOutput, Actor: subject,
-					SourceSeq: event.Seq, SourceID: event.ID, Content: response.Content})
+					SourceSeq: event.Seq, SourceID: event.ID, Content: response.Content,
+					WorkID: event.Str("work_id"), ResponseID: response.ID})
 			}
 		}
 	case kernel.ToolCall:

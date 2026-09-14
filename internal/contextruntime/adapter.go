@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/michiTrader/arxi/internal/compaction"
 	"github.com/michiTrader/arxi/internal/contextprep"
 	"github.com/michiTrader/arxi/internal/exec"
 	"github.com/michiTrader/arxi/internal/transcript"
@@ -43,7 +44,8 @@ func (Adapter) Project(req exec.ContextProjection) (exec.ContextTranscript, erro
 	}, nil
 }
 
-// Prepare freezes one presentation from a projected transcript.
+// Prepare freezes one presentation from a projected transcript, compacting
+// against the declared limit through the default verified generator.
 func (Adapter) Prepare(req exec.ContextPreparation) (exec.PreparedContext, error) {
 	var history transcript.Artifact
 	if err := json.Unmarshal([]byte(req.History.JSON), &history); err != nil {
@@ -53,13 +55,18 @@ func (Adapter) Prepare(req exec.ContextPreparation) (exec.PreparedContext, error
 		return exec.PreparedContext{}, fmt.Errorf("projected transcript digest %q disagrees with the pipeline binding %q",
 			history.ContentDigest, req.History.ContentDigest)
 	}
-	artifact, err := contextprep.Prepare(req.ContextID, req.RunID, req.ParentWorkID, req.EffectiveConfigSHA, req.Effect, history)
+	artifact, err := contextprep.Prepare(req.ContextID, req.RunID, req.ParentWorkID, req.EffectiveConfigSHA,
+		req.Effect, history, compaction.Extractive{})
 	if err != nil {
 		return exec.PreparedContext{}, err
 	}
 	body, err := json.Marshal(artifact)
 	if err != nil {
 		return exec.PreparedContext{}, fmt.Errorf("encode prepared-context artifact: %w", err)
+	}
+	measurement, err := json.Marshal(artifact.Measurement)
+	if err != nil {
+		return exec.PreparedContext{}, fmt.Errorf("encode token measurement: %w", err)
 	}
 	return exec.PreparedContext{
 		JSON:                    string(body),
@@ -74,6 +81,11 @@ func (Adapter) Prepare(req exec.ContextPreparation) (exec.PreparedContext, error
 		PresentationDigest:      artifact.PresentationDigest,
 		TranscriptContentDigest: artifact.Transcript.ContentDigest,
 		Messages:                artifact.Messages,
+		MeasurementJSON:         string(measurement),
+		OverflowExceeded:        artifact.Overflow.Exceeded,
+		OverflowMode:            artifact.Overflow.Mode,
+		Compacted:               artifact.Overflow.Compacted,
+		CompactionDigest:        artifact.Overflow.CompactionDigest,
 	}, nil
 }
 

@@ -102,6 +102,14 @@ type PreparedContext struct {
 	PresentationDigest      string
 	TranscriptContentDigest string
 	Messages                []turn.Message
+	// MeasurementJSON is the canonical per-layer token measurement the event
+	// commits beside the artifact bytes, so the pressure record is durable
+	// evidence rather than a recomputation.
+	MeasurementJSON  string
+	OverflowExceeded bool
+	OverflowMode     string
+	Compacted        bool
+	CompactionDigest string
 }
 
 // ContextPreparedTurnExecutor lets the runner prepare a turn from the durable
@@ -419,7 +427,17 @@ type preparedContextRecord struct {
 	Transcript         struct {
 		ContentDigest string `json:"content_digest"`
 	} `json:"transcript"`
-	Messages []turn.Message `json:"messages"`
+	Messages    []turn.Message  `json:"messages"`
+	Measurement json.RawMessage `json:"token_measurement"`
+	Overflow    struct {
+		Exceeded         bool   `json:"exceeded"`
+		Mode             string `json:"mode,omitempty"`
+		Compacted        bool   `json:"compacted"`
+		CompactionDigest string `json:"compaction_digest,omitempty"`
+	} `json:"overflow_decision"`
+	Compaction *struct {
+		ContentDigest string `json:"content_digest"`
+	} `json:"compaction,omitempty"`
 }
 
 // verifyPreparedContext proves the exact recorded bytes before anything built
@@ -462,7 +480,32 @@ func verifyPreparedContext(event kernel.Event, contextID string, w Work, e kerne
 	if history.ContentDigest != artifact.Transcript.ContentDigest {
 		return artifact, NotDispatched(fmt.Errorf("context %s transcript digest disagrees with the prepared artifact", contextID))
 	}
+	if artifact.Overflow.Exceeded != eventBool(event, "overflow_exceeded") || artifact.Overflow.Mode != event.Str("overflow_mode") ||
+		artifact.Overflow.Compacted != eventBool(event, "compacted") {
+		return artifact, NotDispatched(fmt.Errorf("context %s overflow decision disagrees with the committed record", contextID))
+	}
+	if string(artifact.Measurement) != event.Str("token_measurement") {
+		return artifact, NotDispatched(fmt.Errorf("context %s token measurement disagrees with the committed record", contextID))
+	}
+	if artifact.Overflow.Compacted {
+		switch {
+		case artifact.Overflow.CompactionDigest == "" || artifact.Overflow.CompactionDigest != event.Str("compaction_digest"):
+			return artifact, NotDispatched(fmt.Errorf("context %s compaction binding disagrees with the committed record", contextID))
+		case artifact.Compaction == nil || artifact.Compaction.ContentDigest != artifact.Overflow.CompactionDigest:
+			return artifact, NotDispatched(fmt.Errorf("context %s embedded compaction digest disagrees with the overflow decision", contextID))
+		}
+	} else if artifact.Overflow.CompactionDigest != "" {
+		return artifact, NotDispatched(fmt.Errorf("context %s names a compaction it never committed", contextID))
+	}
 	return artifact, nil
+}
+
+// eventBool reads a boolean payload field. The barrier commits these fields
+// itself, so a missing or mistyped value is simply false — and the agreement
+// check above refuses any artifact that claims otherwise.
+func eventBool(event kernel.Event, key string) bool {
+	value, _ := event.Payload[key].(bool)
+	return value
 }
 
 // commitContextPreparation appends the request and the exact artifacts in one
@@ -484,6 +527,8 @@ func (r *Runner) commitContextPreparation(contextID string, w Work, e kernel.Spa
 		"transcript_schema": history.Schema, "transcript_json": history.JSON, "transcript_digest": history.Digest,
 		"prepared_context_schema": artifact.Schema, "prepared_context_json": artifact.JSON, "prepared_context_digest": artifact.Digest,
 		"content_digest": artifact.ContentDigest, "presentation_digest": artifact.PresentationDigest,
+		"token_measurement": artifact.MeasurementJSON, "overflow_exceeded": artifact.OverflowExceeded,
+		"overflow_mode": artifact.OverflowMode, "compacted": artifact.Compacted, "compaction_digest": artifact.CompactionDigest,
 	}, w.Source)
 	if _, err := r.Log.Append(r.stamp([]kernel.Event{requested, prepared})); err != nil {
 		return fmt.Errorf("persist context preparation %s: %w", contextID, err)
@@ -494,16 +539,35 @@ func (r *Runner) commitContextPreparation(contextID string, w Work, e kernel.Spa
 // failContextPreparation records a terminal, deterministic preparation failure.
 // It is written only for failures that would repeat identically on retry, so
 // recovery can refuse the request instead of half-preparing a different call.
+// The failure class comes from the error itself when it carries one (the
+// overflow path reports "compaction"), so the runner never imports the
+// artifact packages to learn it.
 func (r *Runner) failContextPreparation(contextID string, w Work, e kernel.SpawnTurn, cause error) error {
 	event := r.progressEvent(kernel.ContextPrepareFailed, map[string]any{
 		"schema": contextRequestSchema, "context_id": contextID, "parent_work_id": w.ID,
 		"agent": e.Agent, "source_through_seq": w.SourceSeq, "effective_config_sha": r.Context.EffectiveConfigSHA,
-		"failure_class": "preparation", "error": cause.Error(),
+		"failure_class": preparationClass(cause), "error": cause.Error(),
 	}, w.Source)
 	if _, err := r.Log.Append(r.stamp([]kernel.Event{event})); err != nil {
 		return fmt.Errorf("persist context preparation failure %s: %w", contextID, err)
 	}
 	return NotDispatched(fmt.Errorf("prepare context %s for %s: %w", contextID, e.Agent, cause))
+}
+
+// classifiedPreparationError is satisfied by pipeline errors that name their
+// own durable failure class. Satisfaction is implicit: exec declares the
+// method, the domain package's error carries it, and no import direction
+// bends.
+type classifiedPreparationError interface {
+	PreparationClass() string
+}
+
+func preparationClass(err error) string {
+	var classified classifiedPreparationError
+	if errors.As(err, &classified) {
+		return classified.PreparationClass()
+	}
+	return "preparation"
 }
 
 // contextIdentity derives one stable identity per parent work. The parent work

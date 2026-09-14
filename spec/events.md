@@ -181,9 +181,9 @@ recovery rules are defined by [`context.md`](context.md).
 
 | type | payload | notes |
 |---|---|---|
-| `context.prepare_requested` | `schema`, `context_id`, `parent_work_id`, `agent`, `source_from_seq`, `source_through_seq`, `source_through_event_id`, `effective_config_schema`, `effective_config_sha`, `projector_version`, `preparer_version`, `policy_version` | Freezes the confirmed prefix and versions from which one presentation may be prepared. |
-| `context.prepared` | All request bindings plus `transcript_schema`, `transcript_json`, `transcript_digest`, `prepared_context_schema`, `prepared_context_json`, `prepared_context_digest`, `content_digest`, `presentation_digest`, `model_version`, `token_measurement`, `memory_receipt_digests` | Exact bytes and digests commit before any model child may start. |
-| `context.prepare_failed` | Request bindings plus `failure_class`, `error` | Terminal preparation failure; no model call is implied. |
+| `context.prepare_requested` | `schema`, `context_id`, `parent_work_id`, `agent`, `source_from_seq`, `source_through_seq`, `source_through_event_id`, `effective_config_sha`, `projector_version`, `preparer_version` | Freezes the confirmed prefix and versions from which one presentation may be prepared. The effective-config digest binds the accepted configuration; the projector and preparer versions are the policy versions in force. |
+| `context.prepared` | All request bindings plus `transcript_schema`, `transcript_json`, `transcript_digest`, `prepared_context_schema`, `prepared_context_json`, `prepared_context_digest`, `content_digest`, `presentation_digest`, `token_measurement`, `overflow_exceeded`, `overflow_mode`, `compacted`, `compaction_digest?` | Exact bytes and digests commit before any model child may start. `token_measurement` is the canonical JSON of the per-layer measurement. The overflow fields record measured pressure against a known limit and the governing mode. `compaction_digest` is present exactly when `compacted` is true and binds the compaction artifact embedded in the prepared-context JSON. |
+| `context.prepare_failed` | Request bindings plus `failure_class`, `error` | Terminal preparation failure; no model call is implied. `failure_class` is `preparation` or `compaction`. |
 
 These records are reducer- and watcher-inert execution metadata. A valid
 `context.prepared` is reused by recovery and replay; it is never rebuilt from

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/michiTrader/arxi/internal/compaction"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/transcript"
 	"github.com/michiTrader/arxi/internal/turn"
@@ -17,16 +18,37 @@ import (
 const (
 	Schema          = "arxi.prepared-context/v1"
 	RequestSchema   = "arxi.context-prepare/v1"
-	PreparerVersion = "arxi.context-preparer/v1"
+	PreparerVersion = "arxi.context-preparer/v2"
 )
 
+// Measurement records how much context the presentation uses, per layer, and
+// against which limits. Every figure counts runes of the canonical JSON
+// encoding; that is an upper-bound estimate, never an exact tokenizer count,
+// and unknown limits stay absent instead of being invented. The total is the
+// arithmetic sum of the layers: each layer's JSON framing makes the sum a
+// conservative bound on the whole presentation, which is the honest direction
+// for a pressure figure.
 type Measurement struct {
 	Implementation string `json:"implementation"`
 	Version        string `json:"version"`
 	Mode           string `json:"mode"`
+	StaticTokens   int    `json:"static_tokens"`
+	SummaryTokens  int    `json:"summary_tokens,omitempty"`
+	VerbatimTokens int    `json:"verbatim_tokens,omitempty"`
 	InputTokens    int    `json:"input_tokens"`
+	TotalTokens    int    `json:"total_tokens"`
 	InputLimit     int    `json:"input_limit,omitempty"`
 	OutputLimit    int    `json:"output_limit,omitempty"`
+}
+
+// OverflowDecision records the outcome of pressure: whether a known limit was
+// exceeded, which declared mode governed, and — when compaction ran — which
+// verified artifact the presentation shed material into.
+type OverflowDecision struct {
+	Exceeded         bool   `json:"exceeded"`
+	Mode             string `json:"mode,omitempty"`
+	Compacted        bool   `json:"compacted"`
+	CompactionDigest string `json:"compaction_digest,omitempty"`
 }
 
 type MemoryReceipt struct {
@@ -36,30 +58,73 @@ type MemoryReceipt struct {
 }
 
 type Artifact struct {
-	Schema             string              `json:"schema"`
-	ContextID          string              `json:"context_id"`
-	RunID              string              `json:"run_id"`
-	ParentWorkID       string              `json:"parent_work_id"`
-	Subject            string              `json:"subject_agent"`
-	SourceThroughSeq   int64               `json:"source_through_seq"`
-	EffectiveConfigSHA string              `json:"effective_config_sha,omitempty"`
-	Transcript         transcript.Artifact `json:"transcript"`
-	PreparerVersion    string              `json:"preparer_version"`
-	Messages           []turn.Message      `json:"messages"`
-	Measurement        Measurement         `json:"token_measurement"`
-	MemoryReceipts     []MemoryReceipt     `json:"memory_use_receipts"`
-	ContentDigest      string              `json:"content_digest"`
-	PresentationDigest string              `json:"presentation_digest"`
+	Schema             string               `json:"schema"`
+	ContextID          string               `json:"context_id"`
+	RunID              string               `json:"run_id"`
+	ParentWorkID       string               `json:"parent_work_id"`
+	Subject            string               `json:"subject_agent"`
+	SourceThroughSeq   int64                `json:"source_through_seq"`
+	EffectiveConfigSHA string               `json:"effective_config_sha,omitempty"`
+	Transcript         transcript.Artifact  `json:"transcript"`
+	PreparerVersion    string               `json:"preparer_version"`
+	Messages           []turn.Message       `json:"messages"`
+	Measurement        Measurement          `json:"token_measurement"`
+	Overflow           OverflowDecision     `json:"overflow_decision"`
+	Compaction         *compaction.Artifact `json:"compaction,omitempty"`
+	MemoryReceipts     []MemoryReceipt      `json:"memory_use_receipts"`
+	ContentDigest      string               `json:"content_digest"`
+	PresentationDigest string               `json:"presentation_digest"`
 }
 
-func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.SpawnTurn, history transcript.Artifact) (Artifact, error) {
+// OverflowError marks every failure on the overflow path — an unusable mode, a
+// generator error, a budget that cannot be satisfied — so the durable barrier
+// can record the failure class without importing this package.
+type OverflowError struct{ Err error }
+
+func (e *OverflowError) Error() string { return e.Err.Error() }
+
+func (e *OverflowError) Unwrap() error { return e.Err }
+
+func (e *OverflowError) PreparationClass() string { return "compaction" }
+
+// Prepare freezes one presentation from a projected transcript. It is a pure
+// function of its inputs and the given generator: the same confirmed history
+// and effect always yield the same bytes, which is what lets the durable
+// barrier reproduce the artifact it committed.
+func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.SpawnTurn, history transcript.Artifact, generator compaction.Generator) (Artifact, error) {
 	artifact := Artifact{Schema: Schema, ContextID: contextID, RunID: runID, ParentWorkID: parentWorkID,
 		Subject: effect.Agent, SourceThroughSeq: history.SourceThroughSeq, EffectiveConfigSHA: effectiveSHA,
 		Transcript: history, PreparerVersion: PreparerVersion, MemoryReceipts: []MemoryReceipt{}}
-	artifact.Messages = staticMessages(effect.Context)
-	artifact.Messages = append(artifact.Messages, transcriptMessages(history.Items)...)
-	if len(artifact.Messages) == 0 || artifact.Messages[len(artifact.Messages)-1].Role != turn.RoleUser {
-		artifact.Messages = append(artifact.Messages, textMessage(turn.RoleUser, "Proceed."))
+	static := staticMessages(effect.Context)
+	prior := transcriptMessages(history.Items)
+	var trailing []turn.Message
+	if len(prior) == 0 || prior[len(prior)-1].Role != turn.RoleUser {
+		trailing = []turn.Message{textMessage(turn.RoleUser, "Proceed.")}
+	}
+	full := joinMessages(static, prior, trailing)
+	// Encoding is validated once here: every layer measurement marshals a
+	// subset of these exact message elements, so no layer measure can fail
+	// after the whole presentation was proven encodable.
+	if _, err := json.Marshal(full); err != nil {
+		return Artifact{}, fmt.Errorf("encode prepared presentation: %w", err)
+	}
+	limit := effect.Context.MaxTokens
+	switch {
+	case limit <= 0 || pressure(static, nil, prior, trailing) <= limit:
+		// An unknown limit means unknown pressure: no budget is derived, no
+		// compaction runs, and the limit fields stay absent rather than invented.
+		artifact.Messages = full
+		artifact.Measurement = measurement(static, nil, prior, trailing, limit)
+	default:
+		presented, selected, m, err := compact(contextID, runID, effect, history, limit, static, prior, trailing, generator)
+		if err != nil {
+			return Artifact{}, err
+		}
+		artifact.Messages = presented
+		artifact.Compaction = &selected
+		artifact.Overflow = OverflowDecision{Exceeded: true, Mode: effect.Context.OnOverflow,
+			Compacted: true, CompactionDigest: selected.ContentDigest}
+		artifact.Measurement = m
 	}
 	if memory := strings.TrimSpace(effect.Context.Memory); memory != "" {
 		artifact.MemoryReceipts = append(artifact.MemoryReceipts, MemoryReceipt{Kind: "frozen_context_memory",
@@ -70,18 +135,118 @@ func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.
 		return Artifact{}, fmt.Errorf("encode prepared presentation: %w", err)
 	}
 	artifact.PresentationDigest = digest("arxi.context-presentation/v1", presentation)
-	artifact.Measurement = Measurement{Implementation: "unicode-rune-upper-bound", Version: "v1", Mode: "estimate",
-		InputTokens: utf8.RuneCount(presentation), InputLimit: effect.Context.MaxTokens}
 	content, err := json.Marshal(struct {
 		TranscriptDigest string          `json:"transcript_digest"`
 		Messages         []turn.Message  `json:"messages"`
 		Memory           []MemoryReceipt `json:"memory"`
-	}{history.ContentDigest, artifact.Messages, artifact.MemoryReceipts})
+		CompactionDigest string          `json:"compaction_digest,omitempty"`
+	}{history.ContentDigest, artifact.Messages, artifact.MemoryReceipts, artifact.Overflow.CompactionDigest})
 	if err != nil {
 		return Artifact{}, fmt.Errorf("encode prepared content: %w", err)
 	}
 	artifact.ContentDigest = digest("arxi.context-content/v1", content)
 	return artifact, nil
+}
+
+// compact runs the overflow path: select, present, re-measure and verify.
+// Selection is iterated against the measured presentation because the summary
+// framing and JSON encoding add weight the item-level cost model cannot see
+// in advance: each round shrinks the verbatim budget by the measured
+// overshoot, deterministically, until the presentation fits or the window is
+// already minimal and the limit cannot be met. Any failure here is an
+// OverflowError — compaction that quietly degraded into truncation, or a mode
+// the runtime does not implement, must surface as a terminal preparation
+// failure, never as a shorter silent prompt.
+func compact(contextID, runID string, effect kernel.SpawnTurn, history transcript.Artifact, limit int,
+	static, prior, trailing []turn.Message, generator compaction.Generator) ([]turn.Message, compaction.Artifact, Measurement, error) {
+	if effect.Context.OnOverflow != "summarize" {
+		return nil, compaction.Artifact{}, Measurement{}, &OverflowError{fmt.Errorf(
+			"context pressure %d exceeds input limit %d and on_overflow %q is not summarize: unknown modes fail closed instead of guessing a policy",
+			pressure(static, nil, prior, trailing), limit, effect.Context.OnOverflow)}
+	}
+	budgets := compaction.DeriveBudgets(limit)
+	request := compaction.Request{ContextID: contextID, RunID: runID, Subject: effect.Agent,
+		SourceThroughSeq: history.SourceThroughSeq, Budgets: budgets, Items: history.Items}
+	for {
+		selected, err := generator.Compact(request)
+		if err != nil {
+			return nil, compaction.Artifact{}, Measurement{}, &OverflowError{fmt.Errorf("compact context %s: %w", contextID, err)}
+		}
+		summary := summaryMessage(selected)
+		window := messagesForItems(history.Items, selected.Window)
+		retained := messagesForItems(history.Items, selected.Retained)
+		presented := joinMessages(static, summary, retained, window, trailing)
+		afterTotal := pressure(static, summary, joinMessages(retained, window), trailing)
+		if afterTotal <= limit {
+			selected.BeforeTokens = pressure(static, nil, prior, trailing)
+			selected.AfterTokens = afterTotal
+			if err := compaction.Finalize(&selected); err != nil {
+				return nil, compaction.Artifact{}, Measurement{}, &OverflowError{fmt.Errorf("finalize compaction for context %s: %w", contextID, err)}
+			}
+			if err := compaction.Verify(selected, history.Items); err != nil {
+				return nil, compaction.Artifact{}, Measurement{}, &OverflowError{fmt.Errorf("verify compaction for context %s: %w", contextID, err)}
+			}
+			m := measurement(static, summary, joinMessages(retained, window), trailing, limit)
+			return presented, selected, m, nil
+		}
+		if request.Budgets.Verbatim <= 0 {
+			return nil, compaction.Artifact{}, Measurement{}, &OverflowError{fmt.Errorf(
+				"compaction cannot bring context %s within limit %d: the presentation floor (static %d, summary %d, minimal window %d, input %d) already exceeds the limit, so no selection can relieve the pressure",
+				contextID, limit, measurementOf(static), measurementOf(summary), measurementOf(window), measurementOf(trailing))}
+		}
+		request.Budgets.Verbatim -= afterTotal - limit
+		if request.Budgets.Verbatim < 0 {
+			request.Budgets.Verbatim = 0
+		}
+	}
+}
+
+// pressure sums the layer measures under one identity: runes of the canonical
+// JSON encoding of each message slice. The sum is a conservative bound on the
+// joined presentation, so pressure is never understated.
+func pressure(static, summary, verbatim, trailing []turn.Message) int {
+	return measurementOf(static) + measurementOf(summary) + measurementOf(verbatim) + measurementOf(trailing)
+}
+
+func measurement(static, summary, verbatim, trailing []turn.Message, limit int) Measurement {
+	return Measurement{Implementation: "unicode-rune-upper-bound", Version: "v1", Mode: "estimate",
+		StaticTokens: measurementOf(static), SummaryTokens: measurementOf(summary),
+		VerbatimTokens: measurementOf(verbatim), InputTokens: measurementOf(trailing),
+		TotalTokens: pressure(static, summary, verbatim, trailing), InputLimit: limit}
+}
+
+// measurementOf counts runes of the canonical JSON encoding, the same identity
+// the layer pressures use. Callers must have proven the presentation encodable
+// before measuring, which makes the panic below unreachable.
+func measurementOf(messages []turn.Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
+	body, err := json.Marshal(messages)
+	if err != nil {
+		panic(fmt.Sprintf("contextprep: encode messages for measurement: %v", err))
+	}
+	return utf8.RuneCount(body)
+}
+
+// summaryMessage renders the extractive claims as one user message. The
+// artifact carries the citations; the presentation stays lean and states the
+// claims, which are proven excerpts of their sources either way.
+func summaryMessage(selected compaction.Artifact) []turn.Message {
+	if len(selected.Claims) == 0 {
+		return nil
+	}
+	var body strings.Builder
+	body.WriteString("[Earlier conversation compacted: extractive summary of the turns before the recent history. The compaction artifact records every citation and omission.]\n")
+	for _, claim := range selected.Claims {
+		body.WriteString("- ")
+		body.WriteString(claim.Text)
+		if claim.Incomplete {
+			body.WriteString(" [incomplete]")
+		}
+		body.WriteString("\n")
+	}
+	return []turn.Message{textMessage(turn.RoleUser, strings.TrimRight(body.String(), "\n"))}
 }
 
 func staticMessages(context kernel.ContextSpec) []turn.Message {
@@ -111,27 +276,28 @@ func staticMessages(context kernel.ContextSpec) []turn.Message {
 func transcriptMessages(items []transcript.Item) []turn.Message {
 	messages := make([]turn.Message, 0, len(items))
 	for _, item := range items {
-		switch item.Kind {
-		case transcript.UserInput:
-			messages = append(messages, turn.Message{Role: turn.RoleUser, Content: item.Content})
-		case transcript.ModelOutput:
-			messages = append(messages, turn.Message{Role: turn.RoleAssistant, Content: item.Content})
-		case transcript.ToolCall:
-			if item.Call != nil && item.Call.ID != "" {
-				call := *item.Call
-				messages = append(messages, turn.Message{Role: turn.RoleAssistant,
-					Content: []turn.ContentBlock{{Type: turn.BlockToolCall, ToolCall: &call}}})
-			}
-		case transcript.ToolResult:
-			if item.Result != nil && item.Result.CallID != "" {
-				result := *item.Result
-				messages = append(messages, turn.Message{Role: turn.RoleTool,
-					Content: []turn.ContentBlock{{Type: turn.BlockToolResult, ToolResult: &result}}})
-			}
-		case transcript.HumanDecision:
-			if item.Decision != "" {
-				messages = append(messages, textMessage(turn.RoleUser, "Human decision: "+item.Decision))
-			}
+		if message, ok := item.Message(); ok {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+// messagesForItems renders exactly the named items, in transcript order, so
+// the verbatim window and retained slots present the same bytes the full
+// history would have presented for those items.
+func messagesForItems(items []transcript.Item, ids []string) []turn.Message {
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		selected[id] = true
+	}
+	messages := make([]turn.Message, 0, len(ids))
+	for _, item := range items {
+		if !selected[item.ID] {
+			continue
+		}
+		if message, ok := item.Message(); ok {
+			messages = append(messages, message)
 		}
 	}
 	return messages
@@ -139,6 +305,14 @@ func transcriptMessages(items []transcript.Item) []turn.Message {
 
 func textMessage(role turn.Role, text string) turn.Message {
 	return turn.Message{Role: role, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}}}
+}
+
+func joinMessages(groups ...[]turn.Message) []turn.Message {
+	var joined []turn.Message
+	for _, group := range groups {
+		joined = append(joined, group...)
+	}
+	return joined
 }
 
 func writeSection(builder *strings.Builder, title string, values []string) {
