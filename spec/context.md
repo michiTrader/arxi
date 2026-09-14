@@ -202,8 +202,9 @@ a tool result message never appears without its preceding call.
 Compaction never modifies the transcript. The prepared context continues to
 embed the full canonical transcript and its digest; only the presentation loses
 material, and the omission ledger accounts for everything lost by identity.
-Recovery that cannot reproduce the ledger's accounting treats the artifact as
-corrupt.
+The verifier is deterministic and needs only the committed artifact and the
+transcript items, so audit and replay tooling can re-run it at any time;
+between verifications the digest chain protects the bytes.
 
 ## Compaction failure
 
