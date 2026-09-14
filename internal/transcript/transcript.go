@@ -38,6 +38,12 @@ type Item struct {
 	Call        *turn.ToolCall      `json:"call,omitempty"`
 	Result      *turn.ToolResult    `json:"result,omitempty"`
 	Decision    string              `json:"decision,omitempty"`
+	// Principal and DecisionRef attribute a human decision to the
+	// authenticated identity that made it and to the exact pending item or
+	// action it resolved. The activation cause the reducer computes is an
+	// event ID, so without these an audit cannot say who decided what.
+	Principal   string `json:"principal,omitempty"`
+	DecisionRef string `json:"decision_ref,omitempty"`
 	// WorkID and ResponseID bind a native model_output item to the child work
 	// record and provider response it was projected from. Compaction ranges and
 	// omission ledgers cite items by ID, so without this binding a summary
@@ -86,8 +92,17 @@ func (item Item) Message() (turn.Message, bool) {
 		}
 	case HumanDecision:
 		if item.Decision != "" {
+			text := "Human decision: " + item.Decision
+			if item.Principal != "" {
+				text = "Human decision by " + item.Principal + ": " + item.Decision
+			}
+			for _, block := range item.Content {
+				if block.Type == turn.BlockText && block.Text != "" {
+					text += "\n" + block.Text
+				}
+			}
 			return turn.Message{Role: turn.RoleUser,
-				Content: []turn.ContentBlock{{Type: turn.BlockText, Text: "Human decision: " + item.Decision}}}, true
+				Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}}}, true
 		}
 	}
 	return turn.Message{}, false
@@ -214,8 +229,15 @@ func projectEvent(artifact *Artifact, event kernel.Event, subject string, native
 		if decision == "" {
 			decision = string(event.Type)
 		}
-		artifact.Items = append(artifact.Items, Item{Kind: HumanDecision, Actor: event.Actor, SourceSeq: event.Seq,
-			SourceID: event.ID, Decision: decision})
+		// The decision field is only the verb. An answer's substance lives in
+		// the reply text, and dropping it resumes the member that asked the
+		// question without the answer it was waiting for.
+		item := Item{Kind: HumanDecision, Actor: event.Actor, SourceSeq: event.Seq, SourceID: event.ID,
+			Decision: decision, Principal: event.Str("principal"), DecisionRef: decisionRef(event)}
+		if text := event.Str("text"); text != "" {
+			item.Content = []turn.ContentBlock{{Type: turn.BlockText, Text: text}}
+		}
+		artifact.Items = append(artifact.Items, item)
 	}
 	for i := range artifact.Items {
 		item := &artifact.Items[i]
@@ -226,6 +248,16 @@ func projectEvent(artifact *Artifact, event kernel.Event, subject string, native
 		item.ID = digest("arxi.transcript-item/v1", []byte(fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%s", artifact.RunID, item.SourceSeq, item.SourceID, item.SourceIndex, item.Kind)))
 	}
 	return nil
+}
+
+// decisionRef names the exact thing a decision resolved. The authorization ID
+// wins when both are present: an approval carries a companion inbox item, and
+// the grant is the identity the consumption is bound to.
+func decisionRef(event kernel.Event) string {
+	if id := event.Str("authorization_id"); id != "" {
+		return id
+	}
+	return event.Str("inbox_id")
 }
 
 func sourceIndex(items []Item, at int) int {

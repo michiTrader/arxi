@@ -83,12 +83,17 @@ intermediate native rounds. A historical text-only `llm.response` becomes an
 explicit legacy item.
 
 Tool calls preserve provider-issued call IDs, canonical argument bytes and
-argument digests. Results preserve the exact committed text and call order. A
+argument digests. Producers of `tool.call` must record the digest the canonical
+call already carries; a projector cannot preserve an identity the event never
+wrote. Results preserve the exact committed text and call order. A
 projector never manufactures a call ID for a legacy direct-tool event.
 
 Human decisions preserve the authenticated principal, pending-item or action
-identity and decision. Asked, granted, consumed and externally completed are
-distinct facts. Artifact references preserve immutable version or content digest,
+identity, the decision verb and the exact answer text when one was given. The
+verb alone is not the decision: an answer's substance is its text, and the
+activation cause the reducer computes is an event ID, so dropping the text
+would resume the member that asked without the answer it waited for. Asked,
+granted, consumed and externally completed are distinct facts. Artifact references preserve immutable version or content digest,
 media metadata and provenance. A live path alone is not an artifact reference and
 is never dereferenced during replay.
 

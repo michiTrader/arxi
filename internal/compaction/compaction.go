@@ -353,6 +353,11 @@ func itemText(item transcript.Item) string {
 		}
 	case transcript.HumanDecision:
 		parts = append(parts, item.Decision)
+		for _, block := range item.Content {
+			if block.Type == turn.BlockText {
+				parts = append(parts, block.Text)
+			}
+		}
 	}
 	return strings.Join(parts, "\n")
 }

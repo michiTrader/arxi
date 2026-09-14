@@ -318,7 +318,8 @@ func (f *Fake) FinishTurn(e kernel.SpawnTurn, trace []TurnEntry) ([]kernel.Event
 		}
 		call, outcome := entry.Tool.Call, entry.Tool.Outcome
 		tools = append(tools, kernel.Event{ID: f.id(e.Agent, "tool-call"), Type: kernel.ToolCall,
-			Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"agent": e.Agent, "tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments), "simulated": true}})
+			Source: kernel.SourceAgent, Actor: e.Agent, Payload: map[string]any{"agent": e.Agent, "tool": call.Name, "call_id": call.ID, "args": json.RawMessage(call.Arguments),
+				"argument_digest": call.ArgumentDigest, "simulated": true}})
 		kind := kernel.ToolCallCompleted
 		payload := map[string]any{"agent": e.Agent, "tool": call.Name, "call_id": call.ID, "result": toolResultText(outcome.Result), "simulated": true}
 		if outcome.Policy != "allow" {
