@@ -191,8 +191,8 @@ func compact(contextID, runID string, effect kernel.SpawnTurn, history transcrip
 		}
 		if request.Budgets.Verbatim <= 0 {
 			return nil, compaction.Artifact{}, Measurement{}, &OverflowError{fmt.Errorf(
-				"compaction cannot bring context %s within limit %d: the static layer alone measures %d and the verbatim window is already minimal, so no selection can relieve the pressure",
-				contextID, limit, measurementOf(static))}
+				"compaction cannot bring context %s within limit %d: the presentation floor (static %d, summary %d, minimal window %d, input %d) already exceeds the limit, so no selection can relieve the pressure",
+				contextID, limit, measurementOf(static), measurementOf(summary), measurementOf(window), measurementOf(trailing))}
 		}
 		request.Budgets.Verbatim -= afterTotal - limit
 		if request.Budgets.Verbatim < 0 {

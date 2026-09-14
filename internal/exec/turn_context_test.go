@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/michiTrader/arxi/internal/compaction"
 	"github.com/michiTrader/arxi/internal/contextprep"
 	"github.com/michiTrader/arxi/internal/kernel"
 	"github.com/michiTrader/arxi/internal/transcript"
@@ -37,11 +38,16 @@ func (domainPipeline) Prepare(req ContextPreparation) (PreparedContext, error) {
 	if err := json.Unmarshal([]byte(req.History.JSON), &history); err != nil {
 		return PreparedContext{}, err
 	}
-	artifact, err := contextprep.Prepare(req.ContextID, req.RunID, req.ParentWorkID, req.EffectiveConfigSHA, req.Effect, history)
+	artifact, err := contextprep.Prepare(req.ContextID, req.RunID, req.ParentWorkID, req.EffectiveConfigSHA,
+		req.Effect, history, compaction.Extractive{})
 	if err != nil {
 		return PreparedContext{}, err
 	}
 	body, err := json.Marshal(artifact)
+	if err != nil {
+		return PreparedContext{}, err
+	}
+	measurement, err := json.Marshal(artifact.Measurement)
 	if err != nil {
 		return PreparedContext{}, err
 	}
@@ -50,7 +56,9 @@ func (domainPipeline) Prepare(req ContextPreparation) (PreparedContext, error) {
 		ParentWorkID: artifact.ParentWorkID, Subject: artifact.Subject,
 		SourceThroughSeq: artifact.SourceThroughSeq, ContentDigest: artifact.ContentDigest,
 		PresentationDigest: artifact.PresentationDigest, TranscriptContentDigest: artifact.Transcript.ContentDigest,
-		Messages: artifact.Messages}, nil
+		Messages: artifact.Messages, MeasurementJSON: string(measurement),
+		OverflowExceeded: artifact.Overflow.Exceeded, OverflowMode: artifact.Overflow.Mode,
+		Compacted: artifact.Overflow.Compacted, CompactionDigest: artifact.Overflow.CompactionDigest}, nil
 }
 
 // contextTurnExecutor counts route preparation so a test can tell a recovered
@@ -305,6 +313,164 @@ func TestDurableTurnLegacyPathRecordsNoContextEvents(t *testing.T) {
 	body, err := json.Marshal(x.requests[0])
 	if err != nil || len(body) == 0 {
 		t.Fatalf("marshal prepared request: %v", err)
+	}
+}
+
+// compactedHistoryFixture commits a first turn's evidence — opening prompt,
+// tool call/result pair and model output — so the second turn has inherited
+// history a compaction can actually shed. It returns the log with the first
+// turn's domain events appended.
+func compactedHistoryFixture(t *testing.T) (*memLog, *Runner) {
+	t.Helper()
+	log := newMemLog()
+	x := &contextTurnExecutor{}
+	r := contextTestRunner(log, x)
+	log.events[0].Payload["prompt"] = strings.Repeat("keep the billing migration reversible ", 20)
+	first := kernel.SpawnTurn{Agent: "backend"}
+	work := contextTestWork(t, r, first)
+	final, err := r.runDurableTurn(context.Background(), work, first, x)
+	if err != nil {
+		t.Fatalf("first turn failed: %v", err)
+	}
+	if _, err := log.Append(r.stamp(final)); err != nil {
+		t.Fatal(err)
+	}
+	return log, r
+}
+
+// secondTurnWork opens the second cause the way the runner would after the
+// follow-up input is confirmed.
+func secondTurnWork(t *testing.T, r *Runner) (Work, kernel.SpawnTurn) {
+	t.Helper()
+	if _, err := r.Log.Append(r.stamp([]kernel.Event{{ID: "follow-up", Type: kernel.RunPrompt,
+		Source: kernel.SourceHuman, Payload: map[string]any{"text": "continue"}}})); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := r.Log.Read(1, 0)
+	effect := kernel.SpawnTurn{Agent: "backend", Context: kernel.ContextSpec{MaxTokens: 600, OnOverflow: "summarize"}}
+	works, err := manifest(r.RunID, events[len(events)-1], []kernel.Effect{effect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return works[0], effect
+}
+
+// TestDurableTurnCommitsOverflowDecisionAndReusesIt is Phase 6's barrier
+// evidence: a turn over a known limit commits the overflow decision, the
+// measurement and the compaction digest in the same batch, and recovery
+// reuses that record without re-running the generator.
+func TestDurableTurnCommitsOverflowDecisionAndReusesIt(t *testing.T) {
+	log, r := compactedHistoryFixture(t)
+	x := &contextTurnExecutor{}
+	work, effect := secondTurnWork(t, r)
+	if _, err := r.runDurableTurn(context.Background(), work, effect, x); err != nil {
+		t.Fatalf("compacted durable turn failed: %v", err)
+	}
+	var prepared kernel.Event
+	for _, event := range log.events {
+		if event.Type == kernel.ContextPrepared && event.Str("context_id") == contextIdentity(r.RunID, work.ID) {
+			prepared = event
+		}
+	}
+	if prepared.Str("context_id") == "" {
+		t.Fatal("no committed context.prepared: the turn never reached the barrier")
+	}
+	if eventBool(prepared, "overflow_exceeded") != true || eventBool(prepared, "compacted") != true || prepared.Str("overflow_mode") != "summarize" {
+		t.Fatalf("overflow payload = %#v: measured pressure must be recorded with the mode that governed it", prepared.Payload)
+	}
+	if prepared.Str("compaction_digest") == "" || prepared.Str("token_measurement") == "" {
+		t.Fatalf("compaction digest %q, measurement %q: the committed record must carry the exact accounting beside the artifact bytes",
+			prepared.Str("compaction_digest"), prepared.Str("token_measurement"))
+	}
+	var artifact struct {
+		Compaction *struct {
+			ContentDigest string `json:"content_digest"`
+		} `json:"compaction"`
+	}
+	if err := json.Unmarshal([]byte(prepared.Str("prepared_context_json")), &artifact); err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Compaction == nil || artifact.Compaction.ContentDigest != prepared.Str("compaction_digest") {
+		t.Fatalf("embedded compaction = %#v: the overflow decision must bind the exact embedded artifact", artifact.Compaction)
+	}
+
+	// Recovery reuses the whole record — compaction included — without new
+	// context events and without dispatching anything again.
+	x2 := &contextTurnExecutor{}
+	r2 := contextTestRunner(log, x2)
+	if _, err := r2.runDurableTurn(context.Background(), work, effect, x2); err != nil {
+		t.Fatalf("recovery refused the compacted record: %v", err)
+	}
+	requested, preparedCount := countContextEvents(log.events)
+	if requested != 2 || preparedCount != 2 {
+		t.Fatalf("context events after recovery = %d/%d: re-compacting could observe newer events and silently change an already commissioned call", requested, preparedCount)
+	}
+	if len(x2.requests) != 0 {
+		t.Fatalf("recovery dispatched %d model calls: committed child outcomes must be reused byte-for-byte", len(x2.requests))
+	}
+}
+
+func TestDurableTurnRefusesTamperedCompactionBinding(t *testing.T) {
+	log, r := compactedHistoryFixture(t)
+	x := &contextTurnExecutor{}
+	work, effect := secondTurnWork(t, r)
+	if _, err := r.runDurableTurn(context.Background(), work, effect, x); err != nil {
+		t.Fatal(err)
+	}
+	tampered := false
+	for _, event := range log.events {
+		if event.Type == kernel.ContextPrepared && event.Str("context_id") == contextIdentity(r.RunID, work.ID) {
+			event.Payload["compaction_digest"] = "deadbeef"
+			tampered = true
+		}
+	}
+	if !tampered {
+		t.Fatal("no committed context.prepared to tamper with")
+	}
+	x2 := &contextTurnExecutor{}
+	r2 := contextTestRunner(log, x2)
+	_, err := r2.runDurableTurn(context.Background(), work, effect, x2)
+	if err == nil || !strings.Contains(err.Error(), "compaction binding") {
+		t.Fatalf("tampered compaction error = %v: recovery must fail closed before model dispatch when the compaction binding disagrees", err)
+	}
+}
+
+// classifiedPrepareError mimics the overflow-path errors the domain packages
+// return: the class travels on the error, not through an import.
+type classifiedPrepareError struct{}
+
+func (classifiedPrepareError) Error() string { return "the static layer alone exceeds the limit" }
+
+func (classifiedPrepareError) PreparationClass() string { return "compaction" }
+
+type failingPipeline struct{ domainPipeline }
+
+func (failingPipeline) Prepare(ContextPreparation) (PreparedContext, error) {
+	return PreparedContext{}, classifiedPrepareError{}
+}
+
+func TestDurableTurnPreparationFailureClassifiesCompaction(t *testing.T) {
+	log := newMemLog()
+	x := &contextTurnExecutor{}
+	r := contextTestRunner(log, x)
+	r.Pipeline = failingPipeline{}
+	effect := kernel.SpawnTurn{Agent: "backend"}
+	work := contextTestWork(t, r, effect)
+	_, err := r.runDurableTurn(context.Background(), work, effect, x)
+	if err == nil {
+		t.Fatal("failing pipeline prepared anyway")
+	}
+	var failed *kernel.Event
+	for i, event := range log.events {
+		if event.Type == kernel.ContextPrepareFailed {
+			failed = &log.events[i]
+		}
+	}
+	if failed == nil {
+		t.Fatal("no context.prepare_failed record: a failed preparation must be terminal and visible")
+	}
+	if failed.Str("failure_class") != "compaction" {
+		t.Fatalf("failure class = %q: the overflow path must be distinguishable from projection failures without importing the artifact packages", failed.Str("failure_class"))
 	}
 }
 
