@@ -246,6 +246,53 @@ func TestWatcherOnUndeclaredAgentIsRejected(t *testing.T) {
 	}
 }
 
+// TestWatcherActionTyposAreRejected: the reducer resolves an unrecognized
+// action to activate, the noisiest behavior a watcher has. A misspelled
+// "notfiy" validated as a string would silently become "wake the agent and
+// spend a turn" instead of "deliver a notice", and the only evidence would be
+// the bill.
+func TestWatcherActionTyposAreRejected(t *testing.T) {
+	_, err := Load([]byte("name: t\nmembers:\n  - {name: a}\nwatchers:\n  - {agent: a, pattern: stage.*, action: notfiy}\n"))
+	if err == nil {
+		t.Fatal("a misspelled watcher action was accepted; the reducer would resolve it to activate and bill turns nobody asked for")
+	}
+	if !strings.Contains(err.Error(), "did you mean") {
+		t.Fatalf("error was %q; an enum typo must name the value that was meant", err)
+	}
+}
+
+// TestWatcherRunToolValidatesTheTool: the member tool grant is checked at load
+// because the tool set is compiled in and refusing is free there. A watcher
+// bypassing the same check is the same defect one section later in the file:
+// the typo survives validation, gets frozen into the effective config, and
+// surfaces as ErrUnknownTool mid-run after the triggering turn was billed.
+func TestWatcherRunToolValidatesTheTool(t *testing.T) {
+	_, err := Load([]byte("name: t\nmembers:\n  - {name: a}\nwatchers:\n  - {agent: a, pattern: stage.*, action: run_tool, tool: bahs}\n"))
+	if err == nil {
+		t.Fatal("a watcher dispatching an unknown tool was accepted; it would fail mid-run after the triggering turn was billed")
+	}
+	if !strings.Contains(err.Error(), "did you mean") {
+		t.Fatalf("error was %q; a tool typo must suggest the tool that was meant", err)
+	}
+	_, err = Load([]byte("name: t\nmembers:\n  - {name: a}\nwatchers:\n  - {agent: a, pattern: stage.*, action: run_tool}\n"))
+	if err == nil {
+		t.Fatal("run_tool without a tool was accepted; it would wake the agent to dispatch nothing")
+	}
+}
+
+// TestWatcherToolOnNonDispatchActionIsDeadConfig: a tool beside notify or
+// activate never runs, and dead config is how someone later "fixes" behavior
+// that was never wired. Refusing at load is cheaper than a runtime surprise.
+func TestWatcherToolOnNonDispatchActionIsDeadConfig(t *testing.T) {
+	_, err := Load([]byte("name: t\nmembers:\n  - {name: a}\nwatchers:\n  - {agent: a, pattern: stage.*, action: notify, tool: read}\n"))
+	if err == nil {
+		t.Fatal("tool on a non-dispatch watcher action was accepted; it is dead config that misleads the next reader")
+	}
+	if !strings.Contains(err.Error(), "dead config") {
+		t.Fatalf("error was %q; it must say the tool never runs under this action", err)
+	}
+}
+
 // TestIncludeSelfIsRejected protects the one setting in the file that can bill
 // an unbounded amount. A watcher on `agent.*` woken by its own events is an
 // infinite loop with a credit card, and self-exclusion is one of the two cheap
