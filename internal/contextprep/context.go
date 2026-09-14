@@ -97,10 +97,7 @@ func Prepare(contextID, runID, parentWorkID, effectiveSHA string, effect kernel.
 		Transcript: history, PreparerVersion: PreparerVersion, MemoryReceipts: []MemoryReceipt{}}
 	static := staticMessages(effect.Context)
 	prior := transcriptMessages(history.Items)
-	var trailing []turn.Message
-	if len(prior) == 0 || prior[len(prior)-1].Role != turn.RoleUser {
-		trailing = []turn.Message{textMessage(turn.RoleUser, "Proceed.")}
-	}
+	trailing := inputMessages(effect.Context, prior)
 	full := joinMessages(static, prior, trailing)
 	// Encoding is validated once here: every layer measurement marshals a
 	// subset of these exact message elements, so no layer measure can fail
@@ -247,6 +244,25 @@ func summaryMessage(selected compaction.Artifact) []turn.Message {
 		body.WriteString("\n")
 	}
 	return []turn.Message{textMessage(turn.RoleUser, strings.TrimRight(body.String(), "\n"))}
+}
+
+// inputMessages closes the presentation with what this turn adds: the
+// activation causes the reducer computed. They are not history — they state
+// what changed since the member last ran, which is the difference between a
+// member that knows it was steered and one that re-reads the conversation and
+// guesses. A turn with no causes still needs a user message, because many
+// providers reject a system-only conversation with a 400 that would surface as
+// a domain error on a turn that was merely empty.
+func inputMessages(context kernel.ContextSpec, prior []turn.Message) []turn.Message {
+	var user strings.Builder
+	writeSection(&user, "Why you were activated", context.Cause)
+	if text := strings.TrimSpace(user.String()); text != "" {
+		return []turn.Message{textMessage(turn.RoleUser, text)}
+	}
+	if len(prior) > 0 && prior[len(prior)-1].Role == turn.RoleUser {
+		return nil
+	}
+	return []turn.Message{textMessage(turn.RoleUser, "Proceed.")}
 }
 
 func staticMessages(context kernel.ContextSpec) []turn.Message {

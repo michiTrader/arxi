@@ -60,6 +60,40 @@ func TestPrepareOrdersStaticContextBeforeCanonicalHistory(t *testing.T) {
 	}
 }
 
+// TestPrepareTellsTheMemberWhyItWasActivated protects the activation causes.
+// The reducer computes them for every turn, and they are the only statement of
+// what changed since the member last ran. A presentation that shows history and
+// then says "Proceed." leaves the member to guess whether it was steered,
+// answered, unblocked or merely re-run.
+func TestPrepareTellsTheMemberWhyItWasActivated(t *testing.T) {
+	history := projectedHistory(t, "run-1", []kernel.Event{
+		{Seq: 1, ID: "start", Type: kernel.RunStarted, Payload: map[string]any{"prompt": "build it"}},
+		{Seq: 2, ID: "answer", Type: kernel.LLMResponse, Actor: "backend", Payload: map[string]any{"text": "first pass done"}},
+	})
+	effect := kernel.SpawnTurn{Agent: "backend", Context: kernel.ContextSpec{Identity: "backend",
+		Cause: []string{"reviewer replied to your question", "stage timer fired"}}}
+	artifact, err := Prepare("context-1", "run-1", "work-1", "cfg", effect, history, compaction.Extractive{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := artifact.Messages[len(artifact.Messages)-1]
+	if last.Role != turn.RoleUser {
+		t.Fatalf("last role = %q: the activation causes are this turn's input and must close the presentation", last.Role)
+	}
+	text := last.Content[0].Text
+	for _, cause := range effect.Context.Cause {
+		if !strings.Contains(text, cause) {
+			t.Fatalf("final message %q omits cause %q: a member that is not told why it was activated cannot act on what changed", text, cause)
+		}
+	}
+	if strings.Contains(text, "Proceed.") {
+		t.Fatalf("final message %q: a generic instruction must not replace the causes the reducer computed", text)
+	}
+	if artifact.Measurement.InputTokens == 0 {
+		t.Fatalf("input layer measured 0 tokens while causes were presented: the input layer must measure what this turn actually adds")
+	}
+}
+
 func TestPrepareMeasuresUnknownLimitAsAbsent(t *testing.T) {
 	history := projectedHistory(t, "run-1", []kernel.Event{
 		{Seq: 1, ID: "start", Type: kernel.RunStarted, Payload: map[string]any{"prompt": "anything"}},
