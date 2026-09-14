@@ -435,6 +435,18 @@ type recordingLifecycleHost struct {
 	blockInspect   bool
 	response       hostv1.Job
 	err            error
+
+	submit         hostv1.SubmitRequest
+	submitResponse hostv1.SubmitResult
+	submitCtx      context.Context
+	wait           hostv1.WaitRequest
+	waitCtx        context.Context
+	approve        hostv1.ApproveRequest
+	approveCtx     context.Context
+	reject         hostv1.RejectRequest
+	rejectCtx      context.Context
+	answer         hostv1.AnswerRequest
+	answerCtx      context.Context
 }
 
 func (h *recordingLifecycleHost) Inspect(ctx context.Context, req hostv1.InspectRequest) (hostv1.Job, error) {
@@ -459,6 +471,36 @@ func (h *recordingLifecycleHost) Cancel(ctx context.Context, req hostv1.CancelRe
 func (h *recordingLifecycleHost) Capabilities(_ context.Context, req hostv1.CapabilitiesRequest) (hostv1.CapabilitySet, error) {
 	h.capabilityReq = req
 	return h.capabilities, h.capabilityErr
+}
+
+func (h *recordingLifecycleHost) Submit(ctx context.Context, req hostv1.SubmitRequest) (hostv1.SubmitResult, error) {
+	h.submitCtx = ctx
+	h.submit = req
+	return h.submitResponse, h.err
+}
+
+func (h *recordingLifecycleHost) Wait(ctx context.Context, req hostv1.WaitRequest) (hostv1.Job, error) {
+	h.waitCtx = ctx
+	h.wait = req
+	return h.response, h.err
+}
+
+func (h *recordingLifecycleHost) Approve(ctx context.Context, req hostv1.ApproveRequest) (hostv1.Job, error) {
+	h.approveCtx = ctx
+	h.approve = req
+	return h.response, h.err
+}
+
+func (h *recordingLifecycleHost) Reject(ctx context.Context, req hostv1.RejectRequest) (hostv1.Job, error) {
+	h.rejectCtx = ctx
+	h.reject = req
+	return h.response, h.err
+}
+
+func (h *recordingLifecycleHost) Answer(ctx context.Context, req hostv1.AnswerRequest) (hostv1.Job, error) {
+	h.answerCtx = ctx
+	h.answer = req
+	return h.response, h.err
 }
 
 func TestConnectionPrincipalPropagatesToLifecycleDispatch(t *testing.T) {
@@ -536,6 +578,7 @@ func TestConnectionCancellationEndsAnActiveHostCall(t *testing.T) {
 func TestHelloAdvertisesOnlyEffectiveRepresentableCapabilities(t *testing.T) {
 	host := &recordingLifecycleHost{capabilities: hostv1.CapabilitySet{Capabilities: []hostv1.Capability{
 		hostv1.CapabilitySubmit, hostv1.CapabilityInspect, hostv1.CapabilityApprove,
+		hostv1.CapabilityReject, hostv1.CapabilityAnswer,
 		hostv1.CapabilitySubscribe, hostv1.CapabilityCancel, hostv1.CapabilityWait,
 	}}}
 	hello := helloSession(t, newProtoSession(hostv1.Principal{ID: "p"}, host))
@@ -543,16 +586,21 @@ func TestHelloAdvertisesOnlyEffectiveRepresentableCapabilities(t *testing.T) {
 		t.Fatalf("capability snapshot principal = %#v, want connection principal", host.capabilityReq.Principal)
 	}
 
-	want := []hostv1.Capability{hostv1.CapabilityCancel, hostv1.CapabilityInspect}
+	// Every capability with both a wired descriptor and an installed handler is
+	// advertised, and only those: subscribe is in the host set but has no
+	// descriptor (its stream cannot preserve one-request/one-response framing),
+	// so it must stay absent even though the host could do it.
+	want := []hostv1.Capability{hostv1.CapabilityAnswer, hostv1.CapabilityApprove, hostv1.CapabilityReject,
+		hostv1.CapabilityCancel, hostv1.CapabilityInspect, hostv1.CapabilitySubmit, hostv1.CapabilityWait}
 	if !reflect.DeepEqual(hello.Capabilities, want) {
-		t.Fatalf("hello capabilities = %#v, want %#v; unrepresentable or uninstalled operations must not be advertised", hello.Capabilities, want)
+		t.Fatalf("hello capabilities = %#v, want %#v; a capability is advertised exactly when a descriptor and an installed host handler both exist", hello.Capabilities, want)
 	}
-	for _, ty := range []string{"run.show", "run.cancel"} {
+	for _, ty := range []string{"run.show", "run.cancel", "run.start", "run.result", "inbox.approve", "inbox.reject", "inbox.reply"} {
 		if !containsString(hello.Implemented, ty) {
-			t.Errorf("effective capability %q is absent from implemented: %#v", ty, hello.Implemented)
+			t.Errorf("wired lifecycle type %q is absent from implemented: %#v", ty, hello.Implemented)
 		}
 	}
-	for _, ty := range []string{"run.start", "run.attach", "inbox.approve"} {
+	for _, ty := range []string{"run.attach"} {
 		if containsString(hello.Implemented, ty) {
 			t.Errorf("%q is advertised as implemented without a safe request/response adapter", ty)
 		}
