@@ -143,6 +143,10 @@ func (c *connStreams) releasePending() {
 	c.live = append(c.live, pending...)
 	c.mu.Unlock()
 	for _, p := range pending {
+		// Closing the latch is what releases the pump: it has been waiting
+		// since registration, and only the loop reaches this point, after the
+		// ack is written. Without the close the pump would block forever.
+		close(p.release)
 		c.wg.Add(1)
 		go func(p *subscriptionPump) {
 			defer c.wg.Done()
