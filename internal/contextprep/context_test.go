@@ -164,7 +164,7 @@ func TestPrepareFailsVisiblyWhenCompactionCannotFit(t *testing.T) {
 	if !errors.As(err, &overflow) {
 		t.Fatalf("error = %v: a static layer that alone exceeds the limit must fail visibly instead of trimming silently", err)
 	}
-	if !strings.Contains(overflow.Error(), "static layer") {
+	if !strings.Contains(overflow.Error(), "presentation floor") || !strings.Contains(overflow.Error(), "static") {
 		t.Fatalf("error = %q: the failure must name the constraint that no selection can relieve", overflow.Error())
 	}
 }
