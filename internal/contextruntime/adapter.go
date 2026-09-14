@@ -55,8 +55,13 @@ func (Adapter) Prepare(req exec.ContextPreparation) (exec.PreparedContext, error
 		return exec.PreparedContext{}, fmt.Errorf("projected transcript digest %q disagrees with the pipeline binding %q",
 			history.ContentDigest, req.History.ContentDigest)
 	}
-	artifact, err := contextprep.Prepare(req.ContextID, req.RunID, req.ParentWorkID, req.EffectiveConfigSHA,
-		req.Effect, history, compaction.Extractive{})
+	artifact, err := contextprep.Prepare(contextprep.Request{
+		ContextID: req.ContextID, RunID: req.RunID, ParentWorkID: req.ParentWorkID,
+		EffectiveConfigSHA: req.EffectiveConfigSHA, Effect: req.Effect, History: history,
+		Route: contextprep.Route{Provider: req.Route.Provider, Protocol: req.Route.Protocol,
+			Model: req.Route.Model, BaseURL: req.Route.BaseURL,
+			ToolSchemaVersion: req.Route.ToolSchemaVersion, ContextPolicyVersion: req.Route.ContextPolicyVersion},
+		Generator: compaction.Extractive{}})
 	if err != nil {
 		return exec.PreparedContext{}, err
 	}

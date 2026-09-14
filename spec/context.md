@@ -125,6 +125,15 @@ framing. The existing model-child request digest binds the complete
 `arxi.turn/v1` request including route, tools and generation options. These three
 digests are not interchangeable.
 
+The route records the non-secret destination: provider, protocol, model, base
+URL, tool-schema version and context-policy version. It joins the content
+digest, because the same messages sent to a different model under a different
+tool schema are a different presentation. Before a committed presentation is
+reused, its recorded provider, protocol and model must equal the route the turn
+now resolves to; every other digest still verifies when only the destination
+changed, so this comparison is the only thing standing between a frozen
+presentation and a model it was never commissioned for.
+
 The overflow decision records whether measured pressure exceeded a known input
 limit, the mode that governed the outcome, and — when compaction ran — the
 compaction artifact's identity and content digest. A prepared context over a

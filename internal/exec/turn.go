@@ -40,6 +40,10 @@ type AuthorizationConfig struct {
 // they were accepted with.
 type ContextConfig struct {
 	EffectiveConfigSHA string
+	// PolicyVersion names the accepted context-preparation contract. It is
+	// recorded in the artifact so an audit can tell which preparation rules
+	// produced a presentation, rather than assuming today's rules applied.
+	PolicyVersion string
 }
 
 // ContextPipeline is the seam for durable context preparation. Projection and
@@ -77,6 +81,20 @@ type ContextTranscript struct {
 	ContentDigest        string
 }
 
+// ContextRoute is the non-secret destination a presentation is prepared for.
+// The barrier records it and re-proves it before reuse: a committed
+// presentation that gets dispatched to a different model is a different call
+// than the one the run commissioned, and nothing else in the record would
+// catch that.
+type ContextRoute struct {
+	Provider             string
+	Protocol             string
+	Model                string
+	BaseURL              string
+	ToolSchemaVersion    string
+	ContextPolicyVersion string
+}
+
 // ContextPreparation freezes one presentation request for one parent work.
 type ContextPreparation struct {
 	ContextID          string
@@ -85,6 +103,7 @@ type ContextPreparation struct {
 	EffectiveConfigSHA string
 	Effect             kernel.SpawnTurn
 	History            ContextTranscript
+	Route              ContextRoute
 }
 
 // PreparedContext is the frozen presentation and every binding the barrier
@@ -362,7 +381,8 @@ func (r *Runner) prepareDurableTurn(ctx context.Context, w Work, e kernel.SpawnT
 		return turn.Request{}, r.failContextPreparation(contextID, w, e, err)
 	}
 	artifact, err := r.Pipeline.Prepare(ContextPreparation{ContextID: contextID, RunID: r.RunID,
-		ParentWorkID: w.ID, EffectiveConfigSHA: r.Context.EffectiveConfigSHA, Effect: e, History: history})
+		ParentWorkID: w.ID, EffectiveConfigSHA: r.Context.EffectiveConfigSHA, Effect: e, History: history,
+		Route: r.contextRoute(base)})
 	if err != nil {
 		return turn.Request{}, r.failContextPreparation(contextID, w, e, err)
 	}
@@ -398,7 +418,7 @@ func (r *Runner) loadPreparedContext(contextID string, w Work, e kernel.SpawnTur
 			if found {
 				return turn.Request{}, false, NotDispatched(fmt.Errorf("context %s has conflicting prepared records: one context identity is one exact value", contextID))
 			}
-			artifact, verifyErr := verifyPreparedContext(event, contextID, w, e)
+			artifact, verifyErr := verifyPreparedContext(event, contextID, w, e, base)
 			if verifyErr != nil {
 				return turn.Request{}, false, verifyErr
 			}
@@ -427,6 +447,11 @@ type preparedContextRecord struct {
 	Transcript         struct {
 		ContentDigest string `json:"content_digest"`
 	} `json:"transcript"`
+	Route struct {
+		Provider string `json:"provider,omitempty"`
+		Protocol string `json:"protocol,omitempty"`
+		Model    string `json:"model,omitempty"`
+	} `json:"route"`
 	Messages    []turn.Message  `json:"messages"`
 	Measurement json.RawMessage `json:"token_measurement"`
 	Overflow    struct {
@@ -444,7 +469,7 @@ type preparedContextRecord struct {
 // from them may dispatch. The byte digests are the integrity binding; the
 // field checks reject a prepared record whose identity was reused for another
 // boundary, subject or parent work.
-func verifyPreparedContext(event kernel.Event, contextID string, w Work, e kernel.SpawnTurn) (preparedContextRecord, error) {
+func verifyPreparedContext(event kernel.Event, contextID string, w Work, e kernel.SpawnTurn, base turn.Request) (preparedContextRecord, error) {
 	var artifact preparedContextRecord
 	transcriptJSON, transcriptDigest := event.Str("transcript_json"), event.Str("transcript_digest")
 	preparedJSON, preparedDigest := event.Str("prepared_context_json"), event.Str("prepared_context_digest")
@@ -479,6 +504,15 @@ func verifyPreparedContext(event kernel.Event, contextID string, w Work, e kerne
 	}
 	if history.ContentDigest != artifact.Transcript.ContentDigest {
 		return artifact, NotDispatched(fmt.Errorf("context %s transcript digest disagrees with the prepared artifact", contextID))
+	}
+	// A presentation is prepared for one destination. Reusing it against a
+	// route that now resolves elsewhere would send commissioned input to a
+	// model that was never authorized to see it, and every other digest in the
+	// record would still verify.
+	if artifact.Route.Provider != base.Provider || artifact.Route.Protocol != base.Protocol || artifact.Route.Model != base.Model {
+		return artifact, NotDispatched(fmt.Errorf("context %s was prepared for %s/%s/%s but this turn resolves to %s/%s/%s",
+			contextID, artifact.Route.Provider, artifact.Route.Protocol, artifact.Route.Model,
+			base.Provider, base.Protocol, base.Model))
 	}
 	if artifact.Overflow.Exceeded != eventBool(event, "overflow_exceeded") || artifact.Overflow.Mode != event.Str("overflow_mode") ||
 		artifact.Overflow.Compacted != eventBool(event, "compacted") {
@@ -568,6 +602,15 @@ func preparationClass(err error) string {
 		return classified.PreparationClass()
 	}
 	return "preparation"
+}
+
+// contextRoute reads the destination from the route the executor already
+// froze for this turn. Resolving it a second time here would let the artifact
+// record a route the request never used.
+func (r *Runner) contextRoute(base turn.Request) ContextRoute {
+	return ContextRoute{Provider: base.Provider, Protocol: base.Protocol, Model: base.Model,
+		BaseURL: base.BaseURL, ToolSchemaVersion: r.Authorization.ToolSchemaVersion,
+		ContextPolicyVersion: r.Context.PolicyVersion}
 }
 
 // contextIdentity derives one stable identity per parent work. The parent work
