@@ -61,6 +61,38 @@ type Artifact struct {
 	ContentDigest        string `json:"content_digest"`
 }
 
+// Message renders the item as the provider-neutral presentation message the
+// preparer shows for it. The second result is false for items with nothing to
+// present; compaction then always accounts them as omissions. Renderer and
+// cost model share this one identity, so a window that fits its budget in
+// cost also fits in the measured presentation.
+func (item Item) Message() (turn.Message, bool) {
+	switch item.Kind {
+	case UserInput:
+		return turn.Message{Role: turn.RoleUser, Content: item.Content}, true
+	case ModelOutput:
+		return turn.Message{Role: turn.RoleAssistant, Content: item.Content}, true
+	case ToolCall:
+		if item.Call != nil && item.Call.ID != "" {
+			call := *item.Call
+			return turn.Message{Role: turn.RoleAssistant,
+				Content: []turn.ContentBlock{{Type: turn.BlockToolCall, ToolCall: &call}}}, true
+		}
+	case ToolResult:
+		if item.Result != nil && item.Result.CallID != "" {
+			result := *item.Result
+			return turn.Message{Role: turn.RoleTool,
+				Content: []turn.ContentBlock{{Type: turn.BlockToolResult, ToolResult: &result}}}, true
+		}
+	case HumanDecision:
+		if item.Decision != "" {
+			return turn.Message{Role: turn.RoleUser,
+				Content: []turn.ContentBlock{{Type: turn.BlockText, Text: "Human decision: " + item.Decision}}}, true
+		}
+	}
+	return turn.Message{}, false
+}
+
 // Project consumes only the caller-supplied confirmed prefix. It never reads a
 // log or current configuration, so the same bytes always project identically.
 func Project(runID, subject, effectiveSHA string, events []kernel.Event, through int64) (Artifact, error) {

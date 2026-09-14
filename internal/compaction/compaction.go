@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/michiTrader/arxi/internal/transcript"
 	"github.com/michiTrader/arxi/internal/turn"
@@ -148,11 +149,19 @@ func (Extractive) Compact(req Request) (Artifact, error) {
 	anchorAt := anchors(req.Items)
 	cut := verbatimWindow(req.Items, req.Budgets.Verbatim)
 	artifact.Window = itemIDs(req.Items[cut:])
-	if count := len(anchorAt); count > req.Budgets.Summary {
+	// Only anchors outside the window need citations; the ones inside it are
+	// already presented verbatim and cost the verbatim budget, not this one.
+	anchorCount := 0
+	for i := 0; i < cut; i++ {
+		if anchorAt[i] {
+			anchorCount++
+		}
+	}
+	if anchorCount > req.Budgets.Summary {
 		return Artifact{}, fmt.Errorf("%d continuity anchors exceed the summary budget of %d: anchors cannot be cited and cannot be dropped, so this limit cannot be compacted",
-			count, req.Budgets.Summary)
-	} else if count > 0 {
-		share := req.Budgets.Summary / count
+			anchorCount, req.Budgets.Summary)
+	} else if anchorCount > 0 {
+		share := req.Budgets.Summary / anchorCount
 		for i := 0; i < cut; i++ {
 			if !anchorAt[i] {
 				continue
@@ -209,6 +218,23 @@ func anchors(items []transcript.Item) map[int]bool {
 	return result
 }
 
+// presentationCost measures one item's rendered message under the same
+// identity the preparer uses: runes of the canonical JSON encoding. The cost
+// model and the measurement must be one identity, or a window that fit its
+// budget would still ship over the limit. Unpresentable items cost nothing
+// and are always accounted as omissions.
+func presentationCost(item transcript.Item) int {
+	message, ok := item.Message()
+	if !ok {
+		return 0
+	}
+	body, err := json.Marshal([]turn.Message{message})
+	if err != nil {
+		return 0
+	}
+	return utf8.RuneCount(body)
+}
+
 // verbatimWindow returns the cut index of the longest item suffix that fits
 // the verbatim budget, extended left whenever the cut would separate a tool
 // result from its call: a presented result without its preceding call would be
@@ -217,7 +243,7 @@ func verbatimWindow(items []transcript.Item, budget int) int {
 	cut := len(items)
 	spent := 0
 	for cut > 0 {
-		cost := len([]rune(itemText(items[cut-1])))
+		cost := presentationCost(items[cut-1])
 		if spent > 0 && spent+cost > budget {
 			break
 		}
