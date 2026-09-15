@@ -127,8 +127,18 @@ func CurrentCapabilities(platform string) Capabilities {
 		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1"},
 	}
 	if platform == "linux" {
-		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesProfileID,
-			FileAccess: FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
+		// ADR-0017: Linux advertises shared paired exclusively with the
+		// read-only profile. The write-capable direct-files profile stays off
+		// this advertisement so no accepted combination can write: a write
+		// requirement resolves to worktree, which is unadvertised, and a write
+		// requirement over shared finds no advertised profile that provides
+		// write. Widening this branch back to the write-capable profile would
+		// reopen shared+write and return read-only-ness to grant-accident
+		// status; that combination needs its own platform decision.
+		capabilities.Modes = append(capabilities.Modes, ModeShared)
+		capabilities.Provisioners[ModeShared] = GitLayoutProvisionerV1
+		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesReadProfileID,
+			FileAccess: FileAccessRead, HandleRelative: true, FinalLinkRaceFree: true,
 			Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}})
 	}
 	if platform == "simulation" {
@@ -137,7 +147,14 @@ func CurrentCapabilities(platform string) Capabilities {
 			ModeNone: "arxi.workspace.none/v1", ModeShared: "arxi.workspace.simulated/v1",
 			ModeCopy: "arxi.workspace.simulated/v1", ModeWorktree: "arxi.workspace.simulated/v1",
 		}
+		// Resolution is platform-neutral, so readers resolve to the read-only
+		// profile everywhere; simulation must therefore carry it too, or every
+		// simulated read/grep member would fail a preflight that production
+		// Linux passes.
 		capabilities.Profiles = append(capabilities.Profiles,
+			Profile{Schema: ProfileSchemaV1, ID: DirectFilesReadProfileID, FileAccess: FileAccessRead,
+				HandleRelative: true, FinalLinkRaceFree: true,
+				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
 			Profile{Schema: ProfileSchemaV1, ID: DirectFilesProfileID, FileAccess: FileAccessWrite,
 				HandleRelative: true, FinalLinkRaceFree: true,
 				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},

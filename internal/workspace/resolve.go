@@ -9,7 +9,16 @@ import (
 const (
 	NoToolsProfileID          = "arxi.workspace/no-tools-v1"
 	DirectFilesProfileID      = "arxi.workspace/direct-files-v1"
+	DirectFilesReadProfileID  = "arxi.workspace/direct-files-read-v1"
 	ContainedProcessProfileID = "arxi.workspace/contained-process-v1"
+
+	// GitLayoutProvisionerV1 names the provisioner behind the verified frozen
+	// tree. It is exported because the capability advertisement and the probing
+	// package must agree on one literal: two private copies of the same version
+	// string would drift apart exactly when one of them learns a new layout,
+	// and a provisioner version that names nothing real is how a mode gets
+	// advertised with no machinery behind it.
+	GitLayoutProvisionerV1 = "arxi.workspace.git-layout/v1"
 )
 
 func Resolve(input ResolutionInput) ([]Requirement, error) {
@@ -77,6 +86,13 @@ func Resolve(input ResolutionInput) ([]Requirement, error) {
 			profileID = NoToolsProfileID
 		} else if bash {
 			profileID = ContainedProcessProfileID
+		} else if access == FileAccessRead {
+			// Readers get their own profile because the profile IS the read-only
+			// promise (ADR-0017). Resolving readers to the write-capable profile
+			// would make read-only-ness depend on no write tool having been
+			// granted — an accident of configuration, not a mechanism, and exactly
+			// the drift preflight and the session enforcement exist to catch.
+			profileID = DirectFilesReadProfileID
 		}
 		requirement := Requirement{Schema: SchemaV1, Member: member.Name, Mode: selected,
 			FileAccess: access, RequiresSource: selected != ModeNone || access != FileAccessNone || bash,
