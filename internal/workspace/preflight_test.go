@@ -89,13 +89,13 @@ func TestLinuxPreflightAcceptsReadersAndRefusesEveryWriteCombination(t *testing.
 	}{
 		{name: "write requirement over the read-only profile",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeShared, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesReadProfileID},
-			fragment: "provides read"},
+			fragment:    "provides read"},
 		{name: "shared writer resolves to the unadvertised write-capable profile",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeShared, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
-			fragment: "does not provide"},
+			fragment:    "does not provide"},
 		{name: "worktree writer mode is unadvertised",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeWorktree, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
-			fragment: "does not provide"},
+			fragment:    "does not provide"},
 	} {
 		_, err := Preflight([]Requirement{tc.requirement}, caps)
 		if err == nil || !strings.Contains(err.Error(), tc.fragment) {
