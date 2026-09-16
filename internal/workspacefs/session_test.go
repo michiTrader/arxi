@@ -71,7 +71,7 @@ func request(probe ProbeResult, mode workspace.Mode, member string) Request {
 		panic(err)
 	}
 	return Request{JobID: "job-1", Member: member, Mode: mode, FileAccess: workspace.FileAccessWrite,
-		ProfileID: workspace.DirectFilesProfileID,
+		ProfileID:       workspace.DirectFilesProfileID,
 		ProfileIdentity: identity, ProvisionerVersion: probe.Capabilities.Provisioners[mode], Source: probe.Source}
 }
 

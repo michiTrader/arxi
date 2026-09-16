@@ -149,6 +149,12 @@ func declaredWorkspaceCapabilities() *host.WorkspaceCapabilitiesV1 {
 			{Schema: host.WorkspaceProfileSchemaV1, ID: "arxi.workspace/direct-files-v1", FileAccess: "write",
 				HandleRelative: true, FinalLinkRaceFree: true,
 				Process: host.WorkspaceProcessProfileV1{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
+			// Resolution is platform-neutral, so a read/grep member resolves
+			// to the read-only profile even on an external host. A declaration
+			// omitting it refuses exactly the reader production Linux accepts.
+			{Schema: host.WorkspaceProfileSchemaV1, ID: "arxi.workspace/direct-files-read-v1", FileAccess: "read",
+				HandleRelative: true, FinalLinkRaceFree: true,
+				Process: host.WorkspaceProcessProfileV1{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
 		},
 		Provisioners: map[string]string{"none": "example.none/v1", "shared": "example.opaque/v1", "copy": "example.opaque/v1", "worktree": "example.opaque/v1"},
 	}

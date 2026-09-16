@@ -20,9 +20,9 @@ const metadataDirName = ".arxi-workspace-metadata"
 
 // Request is the stable, frozen identity of one member workspace.
 type Request struct {
-	JobID              string
-	Member             string
-	Mode               workspace.Mode
+	JobID  string
+	Member string
+	Mode   workspace.Mode
 	// FileAccess rides the request even though the profile identity already
 	// implies it, because the session — and through it the tool runner — must
 	// enforce the frozen access at the point of use without a profile table it
@@ -56,10 +56,10 @@ type Provisioner interface {
 }
 
 type session struct {
-	id, root string
-	hasRoot  bool
-	command  *workspace.CommandProfile
-	access   workspace.FileAccess
+	id, root      string
+	hasRoot       bool
+	command       *workspace.CommandProfile
+	access        workspace.FileAccess
 	hasFileAccess bool
 }
 
