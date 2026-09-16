@@ -41,7 +41,7 @@ func (p *preparationProvisioner) Release(_ context.Context, req Request, got Ses
 }
 
 func preparationRequest(member string) Request {
-	return Request{JobID: "job", Member: member, Mode: workspace.ModeNone,
+	return Request{JobID: "job", Member: member, Mode: workspace.ModeNone, FileAccess: workspace.FileAccessNone,
 		ProfileID: workspace.NoToolsProfileID, ProfileIdentity: "profile", ProvisionerVersion: "none-v1",
 		Source: workspace.SourceIdentity{Schema: workspace.SchemaV1, Kind: "none"}}
 }

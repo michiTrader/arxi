@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	capabilityVersion  = "arxi.workspace-capabilities/git-v1"
-	provisionerVersion = "arxi.workspace.git-layout/v1"
+	capabilityVersion = "arxi.workspace-capabilities/git-v1"
 )
 
 // ProbeResult is the observed source identity and the guarantees available for it.
@@ -68,15 +67,16 @@ func Probe(ctx context.Context, source string) (ProbeResult, error) {
 	}
 	caps := workspace.CurrentCapabilities(runtime.GOOS)
 	caps.CapabilityVersion = capabilityVersion
-	// The provisioner versions below are evidence for internal provisioning and
-	// its tests, not availability: preflight accepts a mode only when it is in
-	// caps.Modes, and CurrentCapabilities deliberately advertises only `none`.
-	// Widening Modes here would let production runs accept source-backed layouts
-	// before the platform decision can promise their full contract.
+	// Modes comes from CurrentCapabilities, which is the single place the
+	// platform decision lives (ADR-0017: Linux advertises shared read-only;
+	// every platform still advertises none). The provisioner versions below
+	// record what the internal provisioning machinery IS for the modes it can
+	// materialize; preflight only accepts a mode when it is also in caps.Modes,
+	// so recording copy and worktree here is evidence, not availability.
 	caps.SourceKinds = []string{"git"}
 	caps.Provisioners = map[workspace.Mode]string{
-		workspace.ModeNone: "arxi.workspace.none/v1", workspace.ModeShared: provisionerVersion,
-		workspace.ModeCopy: provisionerVersion, workspace.ModeWorktree: provisionerVersion,
+		workspace.ModeNone: "arxi.workspace.none/v1", workspace.ModeShared: workspace.GitLayoutProvisionerV1,
+		workspace.ModeCopy: workspace.GitLayoutProvisionerV1, workspace.ModeWorktree: workspace.GitLayoutProvisionerV1,
 	}
 	return ProbeResult{Source: identity, Capabilities: caps}, nil
 }
