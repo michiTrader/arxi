@@ -27,6 +27,7 @@ has to decide which — not ignore the contradiction.
 | [0015](0015-one-host-lifecycle-projected-across-surfaces.md) | One capability has one implementation and every surface projects it | accepted |
 | [0016](0016-protocol-event-streaming.md) | Protocol event streaming carries notifications beside responses | accepted |
 | [0017](0017-shared-readonly-linux.md) | Shared on Linux is read-only because a mechanism refuses writes, not because none were granted | accepted |
+| [0018](0018-repository-control-plane-is-not-workspace-content.md) | The repository control plane is not workspace content | accepted |
 
 ## Format
 
