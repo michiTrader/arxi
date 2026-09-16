@@ -111,10 +111,14 @@ platform decisions, source identity and pre-accept prepared/started/finished
 lifecycle fail closed and survive recovery.
 
 Native availability remains deliberately narrower than the internal adapters and
-tests. Windows advertises only `none` with `no-tools`. Linux advertises that pair
-plus `direct-files`, but no native source-backed mode, so the profile cannot yet
-form an accepted file-using combination. Native `shared`, `copy`, `worktree` and
-`contained-process` are not advertised on either platform. Their internal
+tests. Windows advertises only `none` with `no-tools`. Since ADR-0017 Linux
+advertises that pair plus `shared` paired exclusively with the read-only
+`direct-files-read` profile: a read/grep member forms the one accepted
+file-using combination, the write-capable `direct-files` profile left the Linux
+advertisement, writers resolve to `worktree`, and no accepted combination on
+Linux can write. Native `copy`, `worktree` and `contained-process`, and every
+native writable source-backed combination, are not advertised on either
+platform. Their internal
 implementations and negative tests are evidence toward the contract, not a claim
 that production provisioners are generally available. They remain preflight
 unavailable until the production capability decision can guarantee source,

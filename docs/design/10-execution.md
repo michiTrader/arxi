@@ -163,7 +163,7 @@ to raise the ceiling or stop.
 
 | default | why |
 |---|---|
-| workspace source and tool profile | Resolution selects `worktree` for writers, `shared` for readers and `none` for text-only members, but preflight accepts only advertised native guarantees. Windows currently advertises `none`/`no-tools`; Linux advertises that plus `direct-files`, while no native source-backed mode is advertised. Therefore file-using and `bash` runs fail before `run.started`; an internal provisioner or process runner is not availability until the production capability decision guarantees its full contract. |
+| workspace source and tool profile | Resolution selects `worktree` for writers, `shared` for readers and `none` for text-only members, but preflight accepts only advertised native guarantees. Windows currently advertises `none`/`no-tools`, and since ADR-0017 Linux advertises that plus `shared` with the read-only `direct-files-read` profile. Therefore read/grep runs are accepted on Linux against a frozen tracked tree, while writable file-using and `bash` runs fail before `run.started`; an internal provisioner or process runner is not availability until the production capability decision guarantees its full contract. |
 | `on_timeout: escalate` | A timeout almost never means "impossible", it means "something got stuck, go look". Failing by default trains the user to set absurdly long timeouts, which is worse than having none. |
 | `activation: coalesce` | The alternative multiplies the invoice in exchange for nothing. |
 | `include_self: false` | See §10.6. |
@@ -400,8 +400,10 @@ ownership-checked cleanup and leaves no accepted run; a crash can re-enter the
 provisioner, but path existence alone is never adoption evidence.
 
 The production decision is intentionally narrower than internal implementation.
-Windows currently advertises only `none`/`no-tools`. Linux additionally
-advertises `direct-files`, but no native source-backed mode, so no file-using
-combination passes preflight. Native `shared`, `copy`, `worktree`, and
-`contained-process` remain unavailable until one production capability decision
-can guarantee the full source, lifecycle, file and process contract.
+Windows currently advertises only `none`/`no-tools`. Since ADR-0017 Linux
+additionally advertises `shared` paired exclusively with the read-only
+`direct-files-read` profile: a read/grep combination passes preflight and the
+session refuses mutating tools, while no writable file-using combination passes.
+Native `copy`, `worktree`, and `contained-process` remain unavailable until one
+production capability decision can guarantee the full source, lifecycle, file
+and process contract.
