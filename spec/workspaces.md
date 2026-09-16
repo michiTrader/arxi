@@ -24,6 +24,9 @@ Workspace modes describe source layout:
 Execution profiles separately describe authority:
 
 - `arxi.workspace/no-tools-v1` provides neither file nor process tools;
+- `arxi.workspace/direct-files-read-v1` permits built-in relative file reads
+  only: mutating tools are refused at the session boundary, not by the absence
+  of a grant (ADR-0017);
 - `arxi.workspace/direct-files-v1` permits only built-in relative file access;
 - `arxi.workspace/contained-process-v1` additionally requires declared process
   containment.
@@ -53,13 +56,18 @@ complete native path can enforce:
 | platform | modes | profiles | accepted source-backed combination |
 |---|---|---|---|
 | Windows | `none` | `no-tools` | none |
-| Linux | `none` | `no-tools`, `direct-files` | none |
+| Linux | `none`, `shared` | `no-tools`, `direct-files-read` | `shared` + `direct-files-read` (read-only) |
 
 Linux direct-file operations can provide handle-relative, final-link-race-free
-access, but no native source-backed mode is advertised with which that profile
-can form an accepted combination. Neither platform advertises
-`contained-process`. Simulation may exercise every mode and profile, but that is
-simulation behavior and not a production isolation claim.
+access. Since ADR-0017 Linux advertises `shared` paired exclusively with the
+read-only `direct-files-read` profile: a read/grep requirement forms the one
+accepted source-backed combination, write requirements resolve to
+`worktree` — which stays unadvertised — and no accepted combination on Linux
+can write. The write-capable `direct-files` profile stays off the Linux
+advertisement; it remains available to writers and simulation. Neither
+platform advertises `contained-process`. Simulation may exercise every mode
+and profile, but that is simulation behavior and not a production isolation
+claim.
 
 Internal `shared`, `copy` and `worktree` provisioners remain evidence toward the
 contract. A production probe must not add them until one platform decision can
@@ -71,8 +79,10 @@ containment together.
 `none` has no root. File and process tools are unavailable, and the runtime must
 not silently create an empty directory and call it isolation.
 
-If advertised, `shared` is one verified frozen source tree. Writes are visible
-between members and it makes no cross-member isolation claim.
+If advertised, `shared` is one verified frozen source tree. Where a platform
+advertises it read-only (Linux, ADR-0017), the session refuses mutating tools
+and writes never land; where a platform advertises a writable shared view, the
+specification makes no cross-member isolation claim beyond one shared view.
 
 If advertised, `copy` is one deterministic tracked-tree snapshot per writing
 member. Dirty, untracked and ignored content is excluded. Submodules and special

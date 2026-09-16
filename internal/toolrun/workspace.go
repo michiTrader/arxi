@@ -55,6 +55,17 @@ type Workspace struct {
 
 	rootHandle *os.File
 	command    *workspace.CommandProfile
+	fileAccess workspace.FileAccess
+}
+
+// WithFileAccess freezes the file access the workspace's tools may exercise.
+//
+// It is optional only for tests that predate ADR-0017; production callers get
+// it from the provisioned session, whose access was validated at the request
+// boundary. The zero value means FileAccessNone, so a caller that forgets to
+// plumb it fails closed: mutating tools refuse rather than silently running.
+func WithFileAccess(access workspace.FileAccess) func(*Workspace) {
+	return func(w *Workspace) { w.fileAccess = access }
 }
 
 // Close releases the root capability. Idempotence lets terminal cleanup and
@@ -79,7 +90,7 @@ func (w *Workspace) Close() error {
 // The same call is what makes the check sound in the other direction: comparing
 // a resolved child against an unresolved root is comparing two different
 // namespaces, and a mismatch there is exactly the gap an attacker needs.
-func OpenWorkspace(dir, member string) (*Workspace, error) {
+func OpenWorkspace(dir, member string, options ...func(*Workspace)) (*Workspace, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("toolrun: no workspace directory given for %q", member)
 	}
@@ -109,7 +120,11 @@ func OpenWorkspace(dir, member string) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("toolrun: open workspace root %s: %w", real, err)
 	}
-	return &Workspace{Root: real, Member: member, rootHandle: rootHandle}, nil
+	w := &Workspace{Root: real, Member: member, rootHandle: rootHandle}
+	for _, option := range options {
+		option(w)
+	}
+	return w, nil
 }
 
 // Resolve turns a tool-supplied path into an absolute one inside the workspace,

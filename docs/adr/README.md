@@ -26,6 +26,7 @@ has to decide which — not ignore the contradiction.
 | [0014](0014-measured-context-compaction.md) | Context pressure is measured against explicit budgets and compaction is a verified lossy artifact beside an intact transcript | accepted |
 | [0015](0015-one-host-lifecycle-projected-across-surfaces.md) | One capability has one implementation and every surface projects it | accepted |
 | [0016](0016-protocol-event-streaming.md) | Protocol event streaming carries notifications beside responses | accepted |
+| [0017](0017-shared-readonly-linux.md) | Shared on Linux is read-only because a mechanism refuses writes, not because none were granted | accepted |
 
 ## Format
 

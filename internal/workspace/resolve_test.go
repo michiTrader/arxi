@@ -29,12 +29,12 @@ func TestResolveUsesVerifiedSourceForReadersAndSeparationForWriters(t *testing.T
 		t.Fatal(err)
 	}
 	want := []Requirement{
-		{Schema: SchemaV1, Member: "reader", Mode: ModeShared, FileAccess: FileAccessRead, RequiresSource: true, ProfileID: DirectFilesProfileID},
+		{Schema: SchemaV1, Member: "reader", Mode: ModeShared, FileAccess: FileAccessRead, RequiresSource: true, ProfileID: DirectFilesReadProfileID},
 		{Schema: SchemaV1, Member: "text", Mode: ModeNone, FileAccess: FileAccessNone, ProfileID: NoToolsProfileID},
 		{Schema: SchemaV1, Member: "writer", Mode: ModeWorktree, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("resolved workspace requirements = %#v, want %#v: text-only work must stay filesystem-free, readers need a verified source view, and writers need the strongest default separation", got, want)
+		t.Fatalf("resolved workspace requirements = %#v, want %#v: text-only work must stay filesystem-free, readers must resolve to the read-only profile so read-only-ness is carried by the workspace contract and not by the absence of a write grant, and writers need the strongest default separation", got, want)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestResolveRejectsAmbiguousCopyAndWorktreeStages(t *testing.T) {
 
 func TestValidateRequirementRejectsNoneForFilesystemOrProcessWork(t *testing.T) {
 	for _, requirement := range []Requirement{
-		{Schema: SchemaV1, Member: "reader", Mode: ModeNone, FileAccess: FileAccessRead, RequiresSource: true, ProfileID: DirectFilesProfileID},
+		{Schema: SchemaV1, Member: "reader", Mode: ModeNone, FileAccess: FileAccessRead, RequiresSource: true, ProfileID: DirectFilesReadProfileID},
 		{Schema: SchemaV1, Member: "shell", Mode: ModeNone, FileAccess: FileAccessWrite, RequiresSource: true, RequiresBash: true, ProfileID: ContainedProcessProfileID},
 	} {
 		if err := ValidateRequirement(requirement); err == nil {

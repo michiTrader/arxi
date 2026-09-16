@@ -24,7 +24,7 @@ func TestWindowsDoesNotAdvertiseDirectFiles(t *testing.T) {
 
 func TestWindowsRefusesDirectFilesBeforeAnyToolExecutes(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
-	session, err := workspacefs.OpenLocalSession(root, "windows-direct-file-refusal")
+	session, err := workspacefs.OpenLocalSession(root, "windows-direct-file-refusal", workspace.FileAccessNone)
 	if err != nil {
 		t.Fatalf("creating the refusal fixture failed: %v\n  the test cannot prove no-execution without a real candidate root", err)
 	}

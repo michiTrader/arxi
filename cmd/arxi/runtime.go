@@ -248,7 +248,7 @@ func workspaceRequests(a runconfig.Artifact) ([]workspacefs.Request, error) {
 	for i, requirement := range a.WorkspaceContract.Requirements {
 		decision := a.WorkspaceContract.Decisions[i]
 		requests[i] = workspacefs.Request{JobID: a.RunID, Member: requirement.Member,
-			Mode: requirement.Mode, ProfileID: decision.ProfileID, ProfileIdentity: decision.ProfileIdentity,
+			Mode: requirement.Mode, FileAccess: requirement.FileAccess, ProfileID: decision.ProfileID, ProfileIdentity: decision.ProfileIdentity,
 			ProvisionerVersion: decision.ProvisionerVersion, Command: decision.Command,
 			Source: a.WorkspaceContract.Source}
 	}

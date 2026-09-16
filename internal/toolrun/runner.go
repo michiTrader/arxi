@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/michiTrader/arxi/internal/workspace"
 	"github.com/michiTrader/arxi/internal/workspacefs"
 )
 
@@ -65,7 +66,7 @@ func (r *Runner) workspaceFor(member string) (*Workspace, error) {
 	if !available {
 		return nil, fmt.Errorf("toolrun: member %q uses workspace mode none; file and process tools have no filesystem root", member)
 	}
-	w, err := OpenWorkspace(root, member)
+	w, err := OpenWorkspace(root, member, accessOption(session))
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +83,16 @@ func (r *Runner) workspaceFor(member string) (*Workspace, error) {
 	r.spaces[member] = w
 	r.sessions[member] = session
 	return w, nil
+}
+
+// accessOption freezes the session's file access onto the workspace, refusing
+// writes when the session never stated one. A session without an access value
+// is not a session with implicit write (ADR-0017).
+func accessOption(session workspacefs.Session) func(*Workspace) {
+	if access, ok := session.FileAccess(); ok {
+		return WithFileAccess(access)
+	}
+	return WithFileAccess(workspace.FileAccessNone)
 }
 
 // RunTool performs name for member and returns what the next turn should read.

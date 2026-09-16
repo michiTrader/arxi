@@ -20,9 +20,15 @@ const metadataDirName = ".arxi-workspace-metadata"
 
 // Request is the stable, frozen identity of one member workspace.
 type Request struct {
-	JobID              string
-	Member             string
-	Mode               workspace.Mode
+	JobID  string
+	Member string
+	Mode   workspace.Mode
+	// FileAccess rides the request even though the profile identity already
+	// implies it, because the session — and through it the tool runner — must
+	// enforce the frozen access at the point of use without a profile table it
+	// does not have. Deriving it again downstream would be a second resolution,
+	// and a second resolution is a second chance to drift (ADR-0017).
+	FileAccess         workspace.FileAccess
 	ProfileID          string
 	ProfileIdentity    string
 	ProvisionerVersion string
@@ -36,6 +42,11 @@ type Session interface {
 	WorkspaceRoot() (string, bool)
 	Identity() string
 	CommandProfile() (*workspace.CommandProfile, bool)
+	// FileAccess reports the frozen file access this session was provisioned
+	// under. The comma-ok mirrors CommandProfile and fails the same way: a
+	// session that cannot state its access is not a session with implicit
+	// write, and the tool runner treats the missing value as read-only.
+	FileAccess() (workspace.FileAccess, bool)
 }
 
 // Provisioner allocates and verifies stable member sessions.
@@ -45,9 +56,11 @@ type Provisioner interface {
 }
 
 type session struct {
-	id, root string
-	hasRoot  bool
-	command  *workspace.CommandProfile
+	id, root      string
+	hasRoot       bool
+	command       *workspace.CommandProfile
+	access        workspace.FileAccess
+	hasFileAccess bool
 }
 
 func (s session) WorkspaceRoot() (string, bool) { return s.root, s.hasRoot }
@@ -55,9 +68,14 @@ func (s session) Identity() string              { return s.id }
 func (s session) CommandProfile() (*workspace.CommandProfile, bool) {
 	return s.command, s.command != nil
 }
+func (s session) FileAccess() (workspace.FileAccess, bool) {
+	return s.access, s.hasFileAccess
+}
 
 // OpenLocalSession is an internal adapter for already-selected verified roots.
-func OpenLocalSession(root, identity string) (Session, error) {
+// The access argument is the frozen file access of the already-made decision;
+// adapters carry it so the session reports the same value the Manager would.
+func OpenLocalSession(root, identity string, access workspace.FileAccess) (Session, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
@@ -65,12 +83,12 @@ func OpenLocalSession(root, identity string) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return session{id: identity, root: canonicalRoot, hasRoot: true}, nil
+	return session{id: identity, root: canonicalRoot, hasRoot: true, access: access, hasFileAccess: true}, nil
 }
 
 // OpenLocalCommandSession is an internal adapter for an already-preflighted profile.
-func OpenLocalCommandSession(root, identity string, command workspace.CommandProfile) (Session, error) {
-	opened, err := OpenLocalSession(root, identity)
+func OpenLocalCommandSession(root, identity string, access workspace.FileAccess, command workspace.CommandProfile) (Session, error) {
+	opened, err := OpenLocalSession(root, identity, access)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +102,7 @@ type marker struct {
 	JobID              string                    `json:"job_id"`
 	Member             string                    `json:"member"`
 	Mode               workspace.Mode            `json:"mode"`
+	FileAccess         workspace.FileAccess      `json:"file_access"`
 	ProfileID          string                    `json:"profile_id"`
 	ProfileIdentity    string                    `json:"profile_identity"`
 	ProvisionerVersion string                    `json:"provisioner_version"`
@@ -113,7 +132,7 @@ func (m *Manager) Provision(ctx context.Context, req Request) (Session, error) {
 	var err error
 	switch req.Mode {
 	case workspace.ModeNone:
-		got = session{id: key, command: req.Command}
+		got = session{id: key, command: req.Command, access: req.FileAccess, hasFileAccess: true}
 	case workspace.ModeShared:
 		got, err = m.provisionShared(ctx, req, key)
 	case workspace.ModeCopy:
@@ -142,7 +161,7 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 		if err := verifySnapshot(ctx, root, req); err != nil {
 			return nil, err
 		}
-		return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+		return rootedSession(key, root, req), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create shared workspace parent: %w", err)
@@ -166,7 +185,7 @@ func (m *Manager) provisionShared(ctx context.Context, req Request, key string) 
 		_ = os.Remove(m.markerPath(req))
 		return nil, fmt.Errorf("publish shared workspace: %w", err)
 	}
-	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+	return rootedSession(key, root, req), nil
 }
 
 func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (Session, error) {
@@ -178,7 +197,7 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 		if err := verifySnapshot(ctx, root, req); err != nil {
 			return nil, err
 		}
-		return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+		return rootedSession(key, root, req), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create workspace parent: %w", err)
@@ -209,14 +228,14 @@ func (m *Manager) provisionCopy(ctx context.Context, req Request, key string) (S
 					return nil, snapshotErr
 				}
 				ok = true
-				return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+				return rootedSession(key, root, req), nil
 			}
 		}
 		_ = os.Remove(m.markerPath(req))
 		return nil, fmt.Errorf("publish copy workspace: %w", err)
 	}
 	ok = true
-	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+	return rootedSession(key, root, req), nil
 }
 
 func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string) (Session, error) {
@@ -228,7 +247,7 @@ func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string
 		if err := verifyWorktree(ctx, root, req); err != nil {
 			return nil, err
 		}
-		return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+		return rootedSession(key, root, req), nil
 	}
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return nil, fmt.Errorf("create worktree parent: %w", err)
@@ -253,7 +272,15 @@ func (m *Manager) provisionWorktree(ctx context.Context, req Request, key string
 	if err := m.writeMarker(req); err != nil {
 		return nil, fmt.Errorf("record worktree ownership: %w", err)
 	}
-	return session{id: key, root: root, hasRoot: true, command: req.Command}, nil
+	return rootedSession(key, root, req), nil
+}
+
+// rootedSession stamps the frozen request, including its file access, onto a
+// verified root. Every provision path funnels through here so no layout can
+// forget the access half of the contract: a session that lost it would refuse
+// all writes silently and one that defaulted it to write would undo ADR-0017.
+func rootedSession(key, root string, req Request) Session {
+	return session{id: key, root: root, hasRoot: true, command: req.Command, access: req.FileAccess, hasFileAccess: true}
 }
 
 func (m *Manager) Release(ctx context.Context, req Request, got Session) error {
@@ -335,6 +362,15 @@ func validateRequest(req Request) error {
 	if req.JobID == "" || req.Member == "" || req.ProfileID == "" || req.ProfileIdentity == "" || req.ProvisionerVersion == "" {
 		return errors.New("workspace request requires job, member, profile, and provisioner identities")
 	}
+	switch req.FileAccess {
+	case workspace.FileAccessNone, workspace.FileAccessRead, workspace.FileAccessWrite:
+	default:
+		// An unstated access is not a small gap: the session carries it onward
+		// as its enforcement answer, and an empty value must be refused at the
+		// boundary rather than silently meaning whichever access the reader
+		// hopes for (ADR-0017).
+		return fmt.Errorf("workspace request for member %q states file access %q, which is not a frozen access value", req.Member, req.FileAccess)
+	}
 	if req.Mode != workspace.ModeNone && (req.Source.Kind != "git" || req.Source.CanonicalRoot == "" || req.Source.Commit == "" || req.Source.Tree == "") {
 		return errors.New("workspace source layout requires a frozen Git root, commit, and tree")
 	}
@@ -374,7 +410,8 @@ func safeComponent(value string) string {
 
 func expectedMarker(req Request) marker {
 	return marker{Schema: "arxi.workspace-owner/v1", JobID: req.JobID, Member: req.Member, Mode: req.Mode,
-		ProfileID: req.ProfileID, ProfileIdentity: req.ProfileIdentity, ProvisionerVersion: req.ProvisionerVersion, Command: req.Command, Source: req.Source}
+		FileAccess: req.FileAccess, ProfileID: req.ProfileID, ProfileIdentity: req.ProfileIdentity,
+		ProvisionerVersion: req.ProvisionerVersion, Command: req.Command, Source: req.Source}
 }
 
 func (m *Manager) writeMarker(req Request) error {
