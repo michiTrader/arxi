@@ -146,11 +146,13 @@ possible remedies:
 **Workspace and tool authority fail closed.** Source layout and execution
 containment are separate contracts, and the native builds advertise only what
 their platform adapters can prove. Windows currently advertises `none` with the
-`no-tools` profile. Linux advertises that same combination plus the
-`direct-files` profile, but no native source-backed mode yet, so file-using runs
-still fail preflight. `shared`, `copy`, `worktree`, and the `contained-process`
-profile are not advertised on native Windows or Linux; `bash` therefore cannot
-run there under the Phase 4 contract. Internal provisioner and containment code
+`no-tools` profile. Since ADR-0017 Linux advertises that same combination plus
+`shared` paired exclusively with the read-only `direct-files-read` profile: a
+read/grep run is accepted against a frozen tracked tree and the session refuses
+mutating tools, while every writable file-using run still fails preflight.
+`copy`, `worktree`, and the `contained-process` profile are not advertised on
+native Windows or Linux; `bash` therefore cannot run there under the Phase 4
+contract. Internal provisioner and containment code
 is test evidence, not production availability: those capabilities stay
 unavailable until the production capability decision can guarantee source
 identity, lifecycle, handle-relative access, descendant control, environment,
@@ -1622,7 +1624,7 @@ unrecoverable:
 |---|---|
 | `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
 | `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
-| `allow` | Runs only when the frozen workspace mode/profile passed native preflight. Linux can advertise the direct-file profile, but no native source-backed mode is currently advertised; Windows advertises no direct-file profile. Native `bash` has no advertised contained-process profile. Unsupported combinations stop before `run.started`; `tool.call_completed` exists only after a genuinely available runner returns. |
+| `allow` | Runs only when the frozen workspace mode/profile passed native preflight. Since ADR-0017 Linux advertises `shared` with the read-only `direct-files-read` profile, so read/grep is accepted there and the session refuses mutating tools; no writable source-backed mode is advertised, and Windows advertises no direct-file profile. Native `bash` has no advertised contained-process profile. Unsupported combinations stop before `run.started`; `tool.call_completed` exists only after a genuinely available runner returns. |
 
 The `allow` row is narrower than it sounds, and the reason is worth stating.
 Because a granted *mutating* tool resolves to `ask`, `bash`, `write` and `edit`

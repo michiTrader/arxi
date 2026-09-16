@@ -119,8 +119,9 @@ for another agent, which is a deadlock the budget pays for by the second.
 
 This scenario describes the exact-authorization lifecycle, but its native
 execution prerequisites are not currently advertised. A text-only run can start
-on Windows or Linux. Linux additionally advertises the `direct-files` profile,
-but no native source-backed mode; Windows does not advertise direct files at all.
+on Windows or Linux. Since ADR-0017 Linux additionally advertises `shared` with
+the read-only `direct-files-read` profile, so a read/grep run is accepted there,
+but Windows does not advertise direct files at all.
 Neither platform advertises `contained-process`, so this `bash` run fails
 preflight before `run.started` rather than reaching the inbox. The request,
 grant, durable consume/start, and resumed-call semantics below are implemented

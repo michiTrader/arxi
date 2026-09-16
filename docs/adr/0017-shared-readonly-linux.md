@@ -119,7 +119,11 @@ the read-only profile is refused, that the Linux advertisement accepts a
 read/grep requirement and refuses every write combination, and that the
 capability matrix is exactly the advertised set. Toolrun tests pin that
 `write`/`edit` against a read-only session refuse before any filesystem
-effect, and that unplumbed access refuses too. The existing confinement suite
+effect, and that unplumbed access refuses too. A documentation pin
+(`internal/workspace/doc_test.go`) derives the advertisement from
+`CurrentCapabilities` and fails when the README, roadmap, design docs or
+spec still assert the pre-ADR fact, so prose and matrix cannot drift apart
+silently the way they did once already. The existing confinement suite
 (escape, symlink swap, TOCTOU, reserved paths, size caps) continues to hold
 for the reads themselves, and the provisioning lifecycle tests continue to
 hold for the shared copy.
