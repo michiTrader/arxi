@@ -269,6 +269,9 @@ func isBinary(data []byte) bool {
 // caller is told how many there are, which is the fact it needs to decide
 // between narrowing the pattern and asking for all of them.
 func (w *Workspace) Edit(path, old, new string, all bool) (int, error) {
+	if err := w.requireWrite(path); err != nil {
+		return 0, err
+	}
 	if old == "" {
 		return 0, fmt.Errorf("toolrun: %s gave an empty string to replace in %s\n"+
 			"  an empty match is at every position in the file, so this would "+

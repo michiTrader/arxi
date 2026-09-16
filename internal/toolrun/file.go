@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 // maxReadBytes caps what a read tool may pull into memory.
@@ -22,7 +24,35 @@ const maxReadBytes = 1 << 20 // 1 MiB
 // caller who has one and forgets the other has written the invisible bug this
 // package was created to prevent. Handing out an io-capable method and never a
 // bare path is what makes forgetting impossible rather than merely discouraged.
+// requireWrite refuses a mutating tool against a session whose frozen file
+// access is not write, before any path is touched.
+//
+// This is deliberately redundant with preflight: preflight refuses the
+// configuration at acceptance time, this refuses the dispatch at execution
+// time. A future code path that grants a mutating tool to a read-only session
+// fails closed at the point of use instead of silently succeeding because
+// nothing checked. The zero value of fileAccess is FileAccessNone, so an
+// unplumbed access refuses writes too: a missing value is not a promise of
+// write, and making it one would return read-only-ness to accident status
+// (ADR-0017).
+func (w *Workspace) requireWrite(path string) error {
+	if w.fileAccess == workspace.FileAccessWrite {
+		return nil
+	}
+	stated := string(w.fileAccess)
+	if stated == "" {
+		stated = "unstated"
+	}
+	return fmt.Errorf("toolrun: %s is read-only (file access %s) and may not write %q\n"+
+		"  this is the session boundary of ADR-0017: preflight refused the configuration at "+
+		"acceptance, the session refuses the dispatch at execution, and a future grant that "+
+		"misses preflight still cannot mutate the frozen tree", w.Member, stated, path)
+}
+
 func (w *Workspace) WriteFile(path string, data []byte) error {
+	if err := w.requireWrite(path); err != nil {
+		return err
+	}
 	f, err := w.openRelative(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err

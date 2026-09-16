@@ -26,9 +26,9 @@ func (p testSessions) Provision(_ context.Context, req workspacefs.Request) (wor
 		root = p.root
 	}
 	if req.Command != nil {
-		return workspacefs.OpenLocalCommandSession(root, req.JobID+"/"+req.Member, *req.Command)
+		return workspacefs.OpenLocalCommandSession(root, req.JobID+"/"+req.Member, req.FileAccess, *req.Command)
 	}
-	return workspacefs.OpenLocalSession(root, req.JobID+"/"+req.Member)
+	return workspacefs.OpenLocalSession(root, req.JobID+"/"+req.Member, req.FileAccess)
 }
 func (testSessions) Release(context.Context, workspacefs.Request, workspacefs.Session) error {
 	return nil
@@ -43,7 +43,8 @@ func runner(t *testing.T) *Runner {
 			Executable: "bash", EnvironmentVersion: workspace.EnvironmentAllowlistV1, Descendants: "process-group",
 			Filesystem: "unrestricted", Network: "unrestricted", OutputLimitBytes: maxOutputBytes}
 		requests[member] = workspacefs.Request{JobID: "test", Member: member, Mode: workspace.ModeCopy,
-			ProfileID: workspace.DirectFilesProfileID, ProfileIdentity: "test-unrestricted", ProvisionerVersion: "test", Command: command}
+			FileAccess: workspace.FileAccessWrite,
+			ProfileID:  workspace.DirectFilesProfileID, ProfileIdentity: "test-unrestricted", ProvisionerVersion: "test", Command: command}
 	}
 	return &Runner{Sessions: testSessions{root: root}, Requests: requests}
 }

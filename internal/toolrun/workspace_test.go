@@ -8,11 +8,29 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 func ws(t *testing.T) *Workspace {
 	t.Helper()
-	w, err := OpenWorkspace(filepath.Join(t.TempDir(), "work"), "backend")
+	// Write access, because these tests exercise the write path and its
+	// confinement refusals. Without it every refusal below would come from the
+	// ADR-0017 access check instead of the confinement it exists to pin, and
+	// would pass for the wrong reason. The access boundary itself has its own
+	// dedicated tests via wsAccess.
+	w, err := OpenWorkspace(filepath.Join(t.TempDir(), "work"), "backend", WithFileAccess(workspace.FileAccessWrite))
+	if err != nil {
+		t.Fatalf("OpenWorkspace: %v", err)
+	}
+	return w
+}
+
+// wsAccess opens a workspace with an explicit frozen file access, for tests
+// that pin the ADR-0017 session boundary itself.
+func wsAccess(t *testing.T, access workspace.FileAccess) *Workspace {
+	t.Helper()
+	w, err := OpenWorkspace(filepath.Join(t.TempDir(), "work"), "backend", WithFileAccess(access))
 	if err != nil {
 		t.Fatalf("OpenWorkspace: %v", err)
 	}

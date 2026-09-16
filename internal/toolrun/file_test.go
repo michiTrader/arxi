@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/michiTrader/arxi/internal/workspace"
 )
 
 func TestAWriteAndReadRoundTripInsideTheWorkspace(t *testing.T) {
@@ -41,6 +43,51 @@ func TestAWriteOutsideTheWorkspaceIsRefusedAndLandsNowhere(t *testing.T) {
 			"  the refusal returned an error but the file was created anyway, which "+
 			"is worse than no check: the caller sees a failure and the damage is done",
 			outside)
+	}
+}
+
+// TestAMutatingToolIsRefusedOnAReadOnlySessionBeforeAnyPathIsTouched pins the
+// ADR-0017 session boundary: write and edit refuse against a session whose
+// frozen file access is read, before any path is resolved or touched, and the
+// refusal names the member and the access so the reader can tell which grant
+// drifted.
+func TestAMutatingToolIsRefusedOnAReadOnlySessionBeforeAnyPathIsTouched(t *testing.T) {
+	w := wsAccess(t, workspace.FileAccessRead)
+	for _, call := range []struct {
+		name string
+		do   func() error
+	}{
+		{"write", func() error { return w.WriteFile("a.txt", []byte("x")) }},
+		{"edit", func() error { _, err := w.Edit("a.txt", "x", "y", false); return err }},
+	} {
+		if err := call.do(); err == nil || !strings.Contains(err.Error(), "is read-only") {
+			t.Errorf("%s on a read-only session = %v\n"+
+				"  the refusal must happen at the session boundary, before any path is "+
+				"resolved, and must say read-only: a write that landed would mutate the "+
+				"frozen tree ADR-0017 promised never to mutate", call.name, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(w.Root, "a.txt")); !os.IsNotExist(err) {
+		t.Errorf("%s exists after a read-only refusal: the dispatch refused but the write landed anyway",
+			filepath.Join(w.Root, "a.txt"))
+	}
+}
+
+// TestAnUnplumbedFileAccessRefusesWritesToo pins the fail-closed half of
+// ADR-0017: a session that never stated an access is not a session with
+// implicit write. The zero value is none, so the write refuses — making the
+// missing value mean write would return read-only-ness to accident status.
+func TestAnUnplumbedFileAccessRefusesWritesToo(t *testing.T) {
+	w, err := OpenWorkspace(filepath.Join(t.TempDir(), "work"), "backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFile("a.txt", []byte("x")); err == nil || !strings.Contains(err.Error(), "file access unstated") {
+		t.Errorf("write without a plumbed access = %v\n"+
+			"  a missing access is not a promise of write: the refusal must name the unstated access so the reader can tell a plumbing gap from a refused grant", err)
+	}
+	if _, err := os.Lstat(filepath.Join(w.Root, "a.txt")); !os.IsNotExist(err) {
+		t.Error("a.txt exists after an unplumbed-access refusal")
 	}
 }
 
