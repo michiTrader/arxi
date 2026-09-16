@@ -3,6 +3,7 @@ package v1_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	host "github.com/michiTrader/arxi/host/v1"
@@ -79,8 +80,31 @@ func TestExternalPackageCanImplementExtensionPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Next: %v", err)
 	}
-	if len(batch.Events) != 1 || batch.Events[0].Type != "run.started" || batch.AfterSeq < result.AcceptedSeq {
-		t.Fatalf("subscription batch = %#v", batch)
+	// The worker runs concurrently with this subscription, and ReadConfirmed
+	// returns up to 256 confirmed records per call. How many run.* events have
+	// been confirmed by the time Next returns is therefore a timing artifact,
+	// not a contract: under load the simulated run can already be finished, and
+	// the first batch legitimately carries run.started and run.result together.
+	// Asserting len == 1 pinned the scheduler instead of the port, and failed
+	// intermittently for a reason that was never a defect.
+	//
+	// What the extension-port contract does promise is asserted here: delivery
+	// starts at the first confirmed event, the filter is honored, and the
+	// cursor advances past the accepted sequence.
+	if len(batch.Events) == 0 {
+		t.Fatalf("subscription batch is empty: an external host that subscribes to a submitted job must receive its confirmed events")
+	}
+	if batch.Events[0].Type != "run.started" || batch.Events[0].Sequence != result.AcceptedSeq {
+		t.Fatalf("first delivered event = %s at seq %d, want run.started at the accepted seq %d: a subscription from zero must begin at the run's first confirmed event",
+			batch.Events[0].Type, batch.Events[0].Sequence, result.AcceptedSeq)
+	}
+	for _, event := range batch.Events {
+		if !strings.HasPrefix(event.Type, "run.") {
+			t.Fatalf("delivered %s through a run. prefix filter: the filter is the only thing keeping an external consumer from seeing events it did not ask for", event.Type)
+		}
+	}
+	if batch.AfterSeq < result.AcceptedSeq {
+		t.Fatalf("batch cursor = %d, want >= the accepted seq %d: a cursor behind delivered events would redeliver them on resume", batch.AfterSeq, result.AcceptedSeq)
 	}
 	if err := sub.Close(); err != nil {
 		t.Fatalf("Close subscription: %v", err)
