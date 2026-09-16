@@ -73,7 +73,9 @@ func (s session) FileAccess() (workspace.FileAccess, bool) {
 }
 
 // OpenLocalSession is an internal adapter for already-selected verified roots.
-func OpenLocalSession(root, identity string) (Session, error) {
+// The access argument is the frozen file access of the already-made decision;
+// adapters carry it so the session reports the same value the Manager would.
+func OpenLocalSession(root, identity string, access workspace.FileAccess) (Session, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
@@ -81,12 +83,12 @@ func OpenLocalSession(root, identity string) (Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return session{id: identity, root: canonicalRoot, hasRoot: true}, nil
+	return session{id: identity, root: canonicalRoot, hasRoot: true, access: access, hasFileAccess: true}, nil
 }
 
 // OpenLocalCommandSession is an internal adapter for an already-preflighted profile.
-func OpenLocalCommandSession(root, identity string, command workspace.CommandProfile) (Session, error) {
-	opened, err := OpenLocalSession(root, identity)
+func OpenLocalCommandSession(root, identity string, access workspace.FileAccess, command workspace.CommandProfile) (Session, error) {
+	opened, err := OpenLocalSession(root, identity, access)
 	if err != nil {
 		return nil, err
 	}
