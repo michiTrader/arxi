@@ -620,6 +620,34 @@ func pendingCommitPath(dir, id string) string {
 	return filepath.Join(runDirOf(dir, id), "pending.commit")
 }
 
+// TestRunAttachInitialJoinExcludesThenPrintsAProvisionalCompleteEventOnce has
+// failed intermittently under parallel package load, and has NOT been explained.
+//
+// Recording what an investigation ruled out, so the next person does not spend
+// the same hours re-refuting it. Roughly 70 executions on Linux (go1.23.4, 2
+// CPUs) failed to reproduce it, under each of:
+//
+//   - -count=25 with six busy-loop processes saturating both CPUs;
+//   - -count=15 under -race (no data race reported);
+//   - the full package, four consecutive runs, which is the shape it was
+//     originally seen in.
+//
+// Three hypotheses were tested and are wrong:
+//
+//  1. eventually's 5s budget being too small under load. Shrinking it to 150ms
+//     and then to 1ms did not fail the test, so the waits are not close to
+//     their deadline -- the handshake resolves almost immediately.
+//  2. the join handshake racing the binary's first read. It does not: attach
+//     reads the log (attach.go readRunLog, which fixes v.consumed) well before
+//     it prints "attached to", so a fixture that waits for the header is
+//     provably behind the read offset the test reasons about.
+//  3. a data race in the follower. -race is clean across 15 iterations.
+//
+// What that leaves un-eliminated: the fixture's interaction with the writer
+// lock and the pending.commit marker under real contention, and anything
+// specific to the machine the original failures were seen on (Windows and WSL).
+// A reproduction should be the next step -- NOT a speculative change to the
+// waits, which this evidence says are not the problem.
 func TestRunAttachInitialJoinExcludesThenPrintsAProvisionalCompleteEventOnce(t *testing.T) {
 	dir := t.TempDir()
 	const id = "rminitial7-1a2b3c4d"
