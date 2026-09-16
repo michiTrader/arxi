@@ -94,6 +94,16 @@ member at the frozen commit. Recovery verifies the common Git directory,
 registration, HEAD and ownership. A worktree separates working trees; it is not
 a process sandbox.
 
+A `worktree` root also contains a `.git` file — a `gitdir:` pointer into the
+common repository — inside the tool-visible tree. It is not on the reserved
+metadata path list, so a member with write access can rewrite it and redirect
+where Git operations from that root resolve. Ownership verification detects the
+redirect and refuses the release, which fails closed but leaves the worktree
+registered in the operator's repository. A platform decision advertising
+`worktree` for writers must state which guarantee it makes here; neither
+`shared` nor `copy` carries a control file in its root, so this constraint is
+specific to the worktree layout.
+
 ## Execution-profile guarantees
 
 Built-in direct-file operations accept relative paths under an opaque opened
