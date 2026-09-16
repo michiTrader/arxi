@@ -17,13 +17,6 @@ import (
 // technically succeeded.
 const maxReadBytes = 1 << 20 // 1 MiB
 
-// WriteFile writes data to a path inside the workspace.
-//
-// This exists so that no caller ever holds a resolved path and opens it itself.
-// Resolve alone is not the confinement — Resolve plus openNoFollow is — and a
-// caller who has one and forgets the other has written the invisible bug this
-// package was created to prevent. Handing out an io-capable method and never a
-// bare path is what makes forgetting impossible rather than merely discouraged.
 // requireWrite refuses a mutating tool against a session whose frozen file
 // access is not write, before any path is touched.
 //
@@ -46,9 +39,16 @@ func (w *Workspace) requireWrite(path string) error {
 	return fmt.Errorf("toolrun: %s is read-only (file access %s) and may not write %q\n"+
 		"  this is the session boundary of ADR-0017: preflight refused the configuration at "+
 		"acceptance, the session refuses the dispatch at execution, and a future grant that "+
-		"misses preflight still cannot mutate the frozen tree", w.Member, stated, path)
+			"misses preflight still cannot mutate the frozen tree", w.Member, stated, path)
 }
 
+// WriteFile writes data to a path inside the workspace.
+//
+// This exists so that no caller ever holds a resolved path and opens it itself.
+// Resolve alone is not the confinement — Resolve plus openNoFollow is — and a
+// caller who has one and forgets the other has written the invisible bug this
+// package was created to prevent. Handing out an io-capable method and never a
+// bare path is what makes forgetting impossible rather than merely discouraged.
 func (w *Workspace) WriteFile(path string, data []byte) error {
 	if err := w.requireWrite(path); err != nil {
 		return err
