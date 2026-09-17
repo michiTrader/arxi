@@ -49,6 +49,15 @@ fails preflight, and writers resolve to `worktree`, which stays unadvertised.
 The only source-backed combination Linux accepts is `shared` + read-only —
 the milestone's shape, exactly.
 
+> **Later note (see ADR-0018 and its follow-up).** File-only writers now
+> resolve to `copy`, not `worktree`. The guarantee above is unchanged and was
+> re-verified: a file-only write requirement is still refused on Linux, now
+> because `copy` is unadvertised rather than `worktree`. The decision does not
+> rest on which layout resolution picks — the load-bearing refusal is the
+> second one, that no advertised Linux profile provides write access, and that
+> holds whatever a writer resolves to. Recorded rather than edited in place,
+> because what this ADR decided is still what the system does.
+
 ### Runtime enforcement
 
 `toolrun.Workspace` carries the session's file access, plumbed from the frozen

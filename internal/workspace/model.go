@@ -129,12 +129,20 @@ func CurrentCapabilities(platform string) Capabilities {
 	if platform == "linux" {
 		// ADR-0017: Linux advertises shared paired exclusively with the
 		// read-only profile. The write-capable direct-files profile stays off
-		// this advertisement so no accepted combination can write: a write
-		// requirement resolves to worktree, which is unadvertised, and a write
-		// requirement over shared finds no advertised profile that provides
-		// write. Widening this branch back to the write-capable profile would
-		// reopen shared+write and return read-only-ness to grant-accident
-		// status; that combination needs its own platform decision.
+		// this advertisement so no accepted combination can write. Two
+		// independent refusals carry that, and both must stay true:
+		//
+		//   - a file-only write requirement resolves to copy, which is not in
+		//     Modes, so preflight refuses the mode (ADR-0018 moved this from
+		//     worktree to copy; either way the mode is unadvertised);
+		//   - a write requirement over shared finds no advertised profile
+		//     providing write, so preflight refuses the access.
+		//
+		// The second is the one that does not depend on resolution's choice of
+		// layout. Widening this branch back to the write-capable profile would
+		// remove it and reopen shared+write, returning read-only-ness to
+		// grant-accident status; that combination needs its own platform
+		// decision.
 		capabilities.Modes = append(capabilities.Modes, ModeShared)
 		capabilities.Provisioners[ModeShared] = GitLayoutProvisionerV1
 		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesReadProfileID,

@@ -96,12 +96,57 @@ func TestLinuxPreflightAcceptsReadersAndRefusesEveryWriteCombination(t *testing.
 		{name: "worktree writer mode is unadvertised",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeWorktree, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
 			fragment:    "does not provide"},
+		{name: "copy writer mode is unadvertised",
+			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeCopy, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
+			fragment:    "does not provide"},
 	} {
 		_, err := Preflight([]Requirement{tc.requirement}, caps)
 		if err == nil || !strings.Contains(err.Error(), tc.fragment) {
 			t.Errorf("%s: preflight error = %v\n"+
 				"  every path to a writable view on Linux must be refused at acceptance; "+
 				"the read-only promise only holds if no accepted combination can write", tc.name, err)
+		}
+	}
+}
+
+// TestNoToolConfigurationResolvesToAnAcceptedWriteOnLinux pins the ADR-0017
+// guarantee end to end, through Resolve rather than around it.
+//
+// The table above hand-builds requirements, which is right for proving that
+// specific mode/profile pairs are refused -- but it means the cases are
+// hypothetical. It asserts that a worktree write requirement is refused; it
+// never asks what a writer ACTUALLY resolves to. When file-only writers moved
+// from worktree to copy, nothing here failed, and a comment in model.go went
+// on describing a refusal path that was no longer the one being taken. The
+// guarantee held by luck of copy also being unadvertised, not by a check.
+//
+// So this drives real tool lists through Resolve and requires that every
+// configuration able to write is refused by Preflight. It cannot be satisfied
+// by a stale assumption about which layout resolution picks: change the
+// mapping however you like, and this still demands that the result be refused
+// until a platform decision advertises it.
+func TestNoToolConfigurationResolvesToAnAcceptedWriteOnLinux(t *testing.T) {
+	caps := CurrentCapabilities("linux")
+	for _, tools := range [][]string{
+		{"write"},
+		{"edit"},
+		{"write", "edit"},
+		{"read", "write"},
+		{"grep", "edit"},
+		{"bash"},
+		{"read", "bash"},
+		{"write", "bash"},
+	} {
+		requirements, err := Resolve(ResolutionInput{Members: []Member{{Name: "w", Tools: tools}}})
+		if err != nil {
+			// Resolution refusing outright is an acceptable refusal too.
+			continue
+		}
+		if _, err := Preflight(requirements, caps); err == nil {
+			t.Errorf("tools %v resolved to mode %q with profile %q and PASSED Linux preflight: "+
+				"ADR-0017 promises that no accepted combination on Linux can write, and this "+
+				"configuration would now run with a writable view that no platform decision has "+
+				"proven", tools, requirements[0].Mode, requirements[0].ProfileID)
 		}
 	}
 }
