@@ -148,6 +148,14 @@ func CurrentCapabilities(platform string) Capabilities {
 		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesReadProfileID,
 			FileAccess: FileAccessRead, HandleRelative: true, FinalLinkRaceFree: true,
 			Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}})
+		// "Paired exclusively" is now a rule rather than an arithmetic
+		// accident. Stated even though the product is currently 1x1 and the
+		// map changes nothing today: the point is that widening either list
+		// can no longer silently widen what is accepted.
+		capabilities.Pairs = map[Mode][]string{
+			ModeNone:   {NoToolsProfileID},
+			ModeShared: {DirectFilesReadProfileID},
+		}
 	}
 	if platform == "simulation" {
 		capabilities.Modes = []Mode{ModeNone, ModeShared, ModeCopy, ModeWorktree}
@@ -193,6 +201,45 @@ type Capabilities struct {
 	SourceKinds       []string        `json:"source_kinds"`
 	Profiles          []Profile       `json:"profiles"`
 	Provisioners      map[Mode]string `json:"provisioners"`
+
+	// Pairs names which profiles are offered with which layout. It exists
+	// because Modes and Profiles are two independent lists, and without a
+	// third statement relating them an advertisement means their CROSS
+	// PRODUCT: every advertised profile usable on every advertised layout.
+	//
+	// That is not what ADR-0017 says. "Linux advertises shared only with the
+	// read-only profile" was true only because Linux advertised one layout
+	// and one profile, so the product was 1x1 and there was no second pairing
+	// to get wrong. The guarantee rested on a count.
+	//
+	// Nil means the cross product, deliberately. Every existing advertisement
+	// -- including the ones hosts declare through the public
+	// arxi.host.workspace-capabilities/v1 type -- keeps the exact behaviour it
+	// had, so this field adds an expressible restriction without silently
+	// changing what anyone already deployed. A non-nil map is a promise that
+	// the listed pairs are the only ones offered.
+	Pairs map[Mode][]string `json:"pairs,omitempty"`
+}
+
+// offers reports whether profileID may be used with mode.
+//
+// The nil case is the compatibility hinge: an advertisement that never
+// mentions pairs behaves exactly as it did before pairs existed. An
+// advertisement that does mention them is taken at its word, including when
+// it omits a mode entirely -- an explicit Pairs map that says nothing about a
+// layout is saying that layout carries no file profile, not that it carries
+// all of them. Treating a missing key as "anything goes" would make the
+// restriction unstatable for the one case most worth stating.
+func (c Capabilities) offers(mode Mode, profileID string) bool {
+	if c.Pairs == nil {
+		return true
+	}
+	for _, offered := range c.Pairs[mode] {
+		if offered == profileID {
+			return true
+		}
+	}
+	return false
 }
 
 type PlatformDecision struct {

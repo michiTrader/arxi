@@ -13,6 +13,20 @@ import "testing"
 // that layout", so an advertisement is a set of layouts and a set of profiles,
 // and preflight accepts their cross product.
 //
+// LATER NOTE. Capabilities.Pairs now exists and the Linux advertisement sets
+// it, so ADR-0017's "shared only with the read-only profile" is a rule rather
+// than an arithmetic accident. The tests below are still correct and still
+// worth keeping: they describe an advertisement that sets NO pairs, and that
+// case is deliberately unchanged, because nil has to keep meaning the cross
+// product for every advertisement written before the field existed --
+// including ones hosts declare through the public type. See
+// pairing_rule_test.go for the behaviour when pairs are stated, and
+// TestAnAdvertisementWithoutPairsIsUnchanged for the compatibility guarantee
+// these tests are the other half of.
+//
+// The original note follows, because it is the reasoning that produced the
+// field.
+//
 // Today that is harmless, because Linux advertises exactly one source-backed
 // layout and exactly one file profile, and a cross product of one by one is
 // one. ADR-0017 reads as though `shared` and `direct-files-read` were bound

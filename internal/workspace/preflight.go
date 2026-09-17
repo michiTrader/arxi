@@ -46,6 +46,21 @@ func ValidateCapabilities(capabilities Capabilities) error {
 		}
 		seenProfiles[profile.ID] = true
 	}
+	// A pairing that names something the advertisement does not carry is a
+	// mistake worth refusing rather than ignoring. Ignoring it would let a
+	// typo in a profile ID silently narrow an advertisement to nothing, and
+	// the symptom -- every run refused at preflight for a reason that reads
+	// like a platform limitation -- points nowhere near the typo.
+	for mode, offered := range capabilities.Pairs {
+		if !seenModes[mode] {
+			return fmt.Errorf("workspace capability pairs name mode %q, which is not advertised", mode)
+		}
+		for _, id := range offered {
+			if !seenProfiles[id] {
+				return fmt.Errorf("workspace capability pairs offer profile %q with mode %q, but that profile is not advertised", id, mode)
+			}
+		}
+	}
 	return nil
 }
 
@@ -72,6 +87,19 @@ func Preflight(requirements []Requirement, capabilities Capabilities) ([]Platfor
 		profile, ok := profiles[requirement.ProfileID]
 		if !ok {
 			return nil, fmt.Errorf("member %q requests workspace profile %q, but platform %s does not provide it", requirement.Member, requirement.ProfileID, capabilities.Platform)
+		}
+		// Checked separately from the two lookups above, because a mode and a
+		// profile both being advertised does not make their combination
+		// advertised. Without this an advertisement means the cross product,
+		// and a platform offering a writable snapshot layout alongside a
+		// read-only shared layout would also be offering writes to the shared
+		// tree -- a combination nobody chose.
+		if !capabilities.offers(requirement.Mode, profile.ID) {
+			return nil, fmt.Errorf("member %q requests workspace profile %q with layout %s, but platform %s does not offer that combination\n"+
+				"  the profile and the layout are each advertised; the pair is not. Advertising a "+
+				"profile does not make it available on every layout, because the guarantees a "+
+				"profile promises depend on the tree it is applied to",
+				requirement.Member, profile.ID, requirement.Mode, capabilities.Platform)
 		}
 		if requirement.FileAccess == FileAccessWrite && profile.FileAccess != FileAccessWrite {
 			return nil, fmt.Errorf("member %q requires write access, but workspace profile %q provides %s", requirement.Member, profile.ID, profile.FileAccess)

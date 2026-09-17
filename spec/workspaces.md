@@ -74,24 +74,23 @@ Neither platform advertises `contained-process`. Simulation may exercise every
 mode and profile, but that is simulation behavior and not a production
 isolation claim.
 
-An advertisement is a set of layouts and a set of profiles, and acceptance
-checks a requirement's layout and its profile independently. It does not check
-the pair: no capability field expresses "this profile is offered with that
-layout". "Paired exclusively" above is therefore true by arithmetic rather
-than by rule — Linux advertises one source-backed layout and one file profile,
-so the only pair available is the intended one. Advertising a second layout or
-a second profile makes every combination of them acceptable, so any widening
-must either accept the full cross product deliberately or introduce pair
-validation first.
+An advertisement carries a set of layouts, a set of profiles, and optionally a
+pairing naming which profiles are offered with which layout. Acceptance checks
+the layout, the profile, and the pair: a mode and a profile both being
+advertised does not make their combination advertised, because the guarantees
+a profile promises depend on the tree it is applied to. Linux states its
+pairing, so "paired exclusively" above is a rule rather than an arithmetic
+consequence of advertising one layout and one profile.
 
-This is not confined to the native advertisement. A host may declare its own
-capabilities through the public `arxi.host.workspace-capabilities/v1` type,
-which carries modes and profiles as two independent lists and likewise cannot
-express a pairing. A host declaring `{shared, copy}` with read and write
-profiles has declared write over `shared` as well, whether or not it meant to.
-An embedder whose `shared` layout is the operator's own checkout must read that
-as the operative rule; expressing a narrower intent requires a change to the
-declaration type, not only to acceptance.
+An advertisement that states no pairing offers every advertised profile on
+every advertised layout. That is what an advertisement without a pairing has
+always meant, so hosts declaring capabilities through the public
+`arxi.host.workspace-capabilities/v1` type keep their existing behaviour
+unchanged. A host declaring `{shared, copy}` with read and write profiles and
+no pairing has declared write over `shared` as well; stating a pairing is how
+it expresses the narrower intent. Within a stated pairing, a mode named by no
+entry is offered with no profile at all, and a pairing naming a mode or
+profile the advertisement does not carry is refused rather than ignored.
 
 Internal `shared`, `copy` and `worktree` provisioners remain evidence toward the
 contract. A production probe must not add them until one platform decision can
