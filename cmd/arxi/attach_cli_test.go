@@ -643,11 +643,24 @@ func pendingCommitPath(dir, id string) string {
 //     provably behind the read offset the test reasons about.
 //  3. a data race in the follower. -race is clean across 15 iterations.
 //
-// What that leaves un-eliminated: the fixture's interaction with the writer
-// lock and the pending.commit marker under real contention, and anything
-// specific to the machine the original failures were seen on (Windows and WSL).
-// A reproduction should be the next step -- NOT a speculative change to the
-// waits, which this evidence says are not the problem.
+// A fourth was tested later and is also wrong:
+//
+//  4. the pending.commit marker rewinding the follower's read offset. This one
+//     was half right, which is why it needed measuring rather than reasoning.
+//     logstore.ReadConfirmed's NextOffset is genuinely NOT monotonic: a marker
+//     naming a rollback point behind what the caller consumed pulls the
+//     reported boundary backwards (20 -> 10, measured). But followRunLog only
+//     assigns consumed = read.NextOffset inside `if len(read.Bytes) > 0`, and
+//     a rewound read serves no bytes, so the assignment is unreachable on
+//     exactly the passes that could move it back. The follower cannot
+//     re-print. See internal/logstore/pending_race_test.go, which pins both
+//     halves -- the rewind is real, and the guard is what makes it harmless.
+//
+// What that leaves un-eliminated: anything specific to the machine the
+// original failures were seen on (Windows and WSL). Every mechanism reachable
+// on Linux that was proposed has now been tested and refuted, so the next step
+// is a reproduction on the platform where it was seen -- NOT a speculative
+// change to the waits, which this evidence says are not the problem.
 func TestRunAttachInitialJoinExcludesThenPrintsAProvisionalCompleteEventOnce(t *testing.T) {
 	dir := t.TempDir()
 	const id = "rminitial7-1a2b3c4d"
