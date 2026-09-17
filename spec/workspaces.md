@@ -84,6 +84,15 @@ a second profile makes every combination of them acceptable, so any widening
 must either accept the full cross product deliberately or introduce pair
 validation first.
 
+This is not confined to the native advertisement. A host may declare its own
+capabilities through the public `arxi.host.workspace-capabilities/v1` type,
+which carries modes and profiles as two independent lists and likewise cannot
+express a pairing. A host declaring `{shared, copy}` with read and write
+profiles has declared write over `shared` as well, whether or not it meant to.
+An embedder whose `shared` layout is the operator's own checkout must read that
+as the operative rule; expressing a narrower intent requires a change to the
+declaration type, not only to acceptance.
+
 Internal `shared`, `copy` and `worktree` provisioners remain evidence toward the
 contract. A production probe must not add them until one platform decision can
 prove source identity, lifecycle, file access and any requested process
