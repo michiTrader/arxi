@@ -121,6 +121,17 @@ A `copy` snapshot carries no control plane. It materializes only tracked blobs,
 and Git refuses to track a path named `.git`, so the redirect constraint is
 specific to the worktree layout.
 
+A writing member's snapshot is scratch. Writes are real for the duration of the
+run — a later tool call reads back what an earlier one wrote, and re-provisioning
+during recovery adopts the snapshot as it stands rather than rebuilding it, so a
+resumed run keeps the work it had already done. They are also confined: nothing a
+member writes or creates appears in the operator's repository. Release then
+removes the snapshot root, and no path publishes it anywhere first. The
+consequence is worth stating plainly because "the member can write" is ordinarily
+read as "the member can change the operator's files": on `copy` it cannot, and on
+a successful run its output is discarded. Delivering work out of a snapshot would
+be an egress path and needs its own decision.
+
 ## Execution-profile guarantees
 
 Built-in direct-file operations accept relative paths under an opaque opened
