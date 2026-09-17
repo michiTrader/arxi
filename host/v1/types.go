@@ -16,6 +16,23 @@ type WorkspaceCapabilitiesV1 struct {
 	SourceKinds       []string             `json:"source_kinds,omitempty"`
 	Profiles          []WorkspaceProfileV1 `json:"profiles"`
 	Provisioners      map[string]string    `json:"provisioners"`
+
+	// Pairs names, per mode, which profile IDs are offered with that layout.
+	//
+	// Omitting it means every advertised profile is available on every
+	// advertised layout. That is what this type has always meant -- Modes and
+	// Profiles are separate lists and nothing related them -- so leaving it
+	// unset preserves an existing host's behaviour exactly.
+	//
+	// Setting it is how a host states the narrower thing it probably intends.
+	// A host declaring modes {shared, copy} with read and write profiles has,
+	// without this field, also declared that its SHARED layout may be
+	// written; if that layout is the operator's own checkout, the difference
+	// is whether an agent edits a snapshot or the operator's files.
+	//
+	// A mode absent from a non-nil map is offered with no profile at all,
+	// which is the restriction most worth being able to state.
+	Pairs map[string][]string `json:"pairs,omitempty"`
 }
 
 const WorkspaceCapabilitiesSchemaV1 = "arxi.host.workspace-capabilities/v1"

@@ -291,6 +291,14 @@ func hostWorkspaceCapabilities(declared *WorkspaceCapabilitiesV1) (workspace.Cap
 	for mode, version := range declared.Provisioners {
 		capabilities.Provisioners[workspace.Mode(mode)] = version
 	}
+	// Left nil when the host declares no pairs, which keeps the cross-product
+	// meaning every existing declaration was written against.
+	if declared.Pairs != nil {
+		capabilities.Pairs = map[workspace.Mode][]string{}
+		for mode, offered := range declared.Pairs {
+			capabilities.Pairs[workspace.Mode(mode)] = append([]string(nil), offered...)
+		}
+	}
 	for _, profile := range declared.Profiles {
 		if profile.Schema != WorkspaceProfileSchemaV1 {
 			return workspace.Capabilities{}, fmt.Errorf("profile %q schema %q is unsupported", profile.ID, profile.Schema)
@@ -329,6 +337,17 @@ func cloneWorkspaceCapabilities(in *WorkspaceCapabilitiesV1) *WorkspaceCapabilit
 	out.Provisioners = make(map[string]string, len(in.Provisioners))
 	for mode, version := range in.Provisioners {
 		out.Provisioners[mode] = version
+	}
+	// Deep-copied for the same reason as Provisioners, and nil preserved
+	// rather than replaced with an empty map: nil and empty mean opposite
+	// things here. Nil is the cross product, empty offers nothing at all, so
+	// normalizing one into the other would silently refuse every run of a
+	// host that never set the field.
+	if in.Pairs != nil {
+		out.Pairs = make(map[string][]string, len(in.Pairs))
+		for mode, offered := range in.Pairs {
+			out.Pairs[mode] = append([]string(nil), offered...)
+		}
 	}
 	return &out
 }
