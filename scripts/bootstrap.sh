@@ -91,6 +91,28 @@ else
 	die "tests failed — see /tmp/arxi-test.log"
 fi
 
+# The race detector is a SEPARATE execution, not a better version of the run
+# above. It changes scheduling and timing, so a failure here that passes there
+# is real information about concurrency rather than a flake -- and collapsing
+# the two would hide which one broke.
+#
+# It is not redundant. The plain suite reported TestRequestsGetOneResponse-
+# EachWhileStreaming as passing while its fixture had a genuine data race on a
+# counter the request path and the subscription pump both wrote. `go test`
+# alone cannot see that.
+#
+# Skippable because it roughly quintuples the wall time and this script's first
+# job is getting a broken sandbox back to work. Skipping it is a deliberate,
+# announced choice; forgetting it was the previous default.
+if [ "${SKIP_RACE:-}" = "1" ]; then
+	warn "race detector skipped (SKIP_RACE=1) — run it before opening a pull request"
+elif go test -count=1 -race ./... >/tmp/arxi-race.log 2>&1; then
+	ok "tests pass under -race"
+else
+	tail -30 /tmp/arxi-race.log
+	die "race detector found a problem — see /tmp/arxi-race.log"
+fi
+
 step "ready"
 cat <<'EOF'
     binary:  /tmp/arxi

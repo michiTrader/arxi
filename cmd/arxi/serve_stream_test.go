@@ -59,8 +59,21 @@ func (s *scriptedSubscription) nextCount() int {
 // inspect projection, which together drive the pump's terminal detection.
 type streamingHost struct {
 	recordingLifecycleHost
-	sub     *scriptedSubscription
-	job     hostv1.Job
+	sub *scriptedSubscription
+	job hostv1.Job
+
+	// mu guards inspect because the host is genuinely called from two
+	// goroutines at once, which is the arrangement under test rather than an
+	// artefact of it: the request path calls Inspect while the subscription
+	// pump calls it again to detect terminal (serve_stream.go:97). Production
+	// holds a mutex for the same reason (serve_stream.go:46, :119); this
+	// fixture did not, so `go test -race ./...` reported a data race here
+	// while the ordinary suite stayed green.
+	//
+	// The counter is shared rather than per-goroutine on purpose: the
+	// assertion is that terminal detection inspected the job AT ALL, which is
+	// a fact about the pair of callers.
+	mu      sync.Mutex
 	inspect int
 }
 
@@ -70,8 +83,22 @@ func (h *streamingHost) Subscribe(ctx context.Context, req hostv1.SubscribeReque
 }
 
 func (h *streamingHost) Inspect(context.Context, hostv1.InspectRequest) (hostv1.Job, error) {
+	h.mu.Lock()
 	h.inspect++
+	h.mu.Unlock()
 	return h.job, nil
+}
+
+// inspectCount reads the counter under the same lock that guards the writes.
+//
+// Reading the field directly from the test goroutine would leave half the race
+// in place: the pump goroutine can still be running when the assertion is
+// made, and an unsynchronised read of a concurrently written int is a race
+// whether or not the value looks right.
+func (h *streamingHost) inspectCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.inspect
 }
 
 // runConnection drives a real connection over in-memory pipes with the lines
@@ -235,7 +262,7 @@ func TestAttachEmitsTerminalMarkerAndCloses(t *testing.T) {
 	if host.sub.nextCount() > 2 {
 		t.Fatalf("pump pulled %d batches after terminal: the stream must end", host.sub.nextCount())
 	}
-	if host.inspect == 0 {
+	if host.inspectCount() == 0 {
 		t.Fatal("terminal detection never inspected the job")
 	}
 }
