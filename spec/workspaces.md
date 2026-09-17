@@ -66,13 +66,23 @@ complete native path can enforce:
 Linux direct-file operations can provide handle-relative, final-link-race-free
 access. Since ADR-0017 Linux advertises `shared` paired exclusively with the
 read-only `direct-files-read` profile: a read/grep requirement forms the one
-accepted source-backed combination, write requirements resolve to
-`worktree` — which stays unadvertised — and no accepted combination on Linux
-can write. The write-capable `direct-files` profile stays off the Linux
-advertisement; it remains available to writers and simulation. Neither
-platform advertises `contained-process`. Simulation may exercise every mode
-and profile, but that is simulation behavior and not a production isolation
-claim.
+accepted source-backed combination, file-only write requirements resolve to
+`copy` and `bash` to `worktree` — both unadvertised — and no accepted
+combination on Linux can write. The write-capable `direct-files` profile stays
+off the Linux advertisement; it remains available to writers and simulation.
+Neither platform advertises `contained-process`. Simulation may exercise every
+mode and profile, but that is simulation behavior and not a production
+isolation claim.
+
+An advertisement is a set of layouts and a set of profiles, and acceptance
+checks a requirement's layout and its profile independently. It does not check
+the pair: no capability field expresses "this profile is offered with that
+layout". "Paired exclusively" above is therefore true by arithmetic rather
+than by rule — Linux advertises one source-backed layout and one file profile,
+so the only pair available is the intended one. Advertising a second layout or
+a second profile makes every combination of them acceptable, so any widening
+must either accept the full cross product deliberately or introduce pair
+validation first.
 
 Internal `shared`, `copy` and `worktree` provisioners remain evidence toward the
 contract. A production probe must not add them until one platform decision can
