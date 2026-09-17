@@ -10,35 +10,27 @@ import (
 	"github.com/michiTrader/arxi/internal/workspace"
 )
 
-// TestWorktreeGitFileIsWritableAndRedirectsTheCommonDir pins a gap that a
-// writer platform decision must answer before `worktree` can be advertised.
+// TestWorktreeGitFileIsWritableAndRedirectsTheCommonDir pins the SECOND layer
+// of the worktree `.git` defense: what still holds when the first layer is
+// bypassed.
 //
 // `git worktree add` places a `.git` FILE at the root of the worktree whose
-// only content is `gitdir: <common>/worktrees/<name>`. That file is inside the
-// tool-visible tree, and toolrun's reserved-path list covers
-// `.arxi-workspace.json` and the metadata directory — not `.git`. So a member
-// holding write access to its own worktree can rewrite the pointer and make
-// every subsequent Git operation performed from that root resolve against a
-// repository it chose.
+// only content is `gitdir: <common>/worktrees/<name>`. That file sits inside
+// the tool-visible tree. The first layer is toolrun, which since ADR-0018
+// refuses `.git` as a reserved source-control path for read and write alike
+// (internal/toolrun/gitcontrol_test.go); a member using the built-in file
+// tools cannot reach it at all.
 //
-// This is not an escape of the confined file API: the write lands inside the
-// workspace, which is exactly where the profile says writes may land. It is a
-// consequence of `worktree` being a layout whose root contains a control file,
-// which `shared` (ADR-0017, read-only) and `copy` (a plain snapshot) do not
-// have.
+// This test deliberately writes the pointer DIRECTLY, bypassing toolrun, and
+// asserts that ownership verification still refuses the release. That is not
+// redundant with the toolrun rule -- it answers "what if something other than
+// the built-in tools mutates the tree", and the honest answer today is: the
+// redirect is detected, the release fails closed, and the worktree stays
+// registered in the operator's repository for a human to remove.
 //
-// The existing ownership verification does catch it — `verifyWorktree`
-// compares the observed common directory against the frozen source and
-// refuses. The test pins both halves, because they are different promises:
-// detection is real, but the resulting behavior is a REFUSED RELEASE, which
-// leaves the worktree registered in the operator's repository. A platform
-// decision that advertises `worktree` has to say which of those it promises —
-// "a writer cannot redirect it" (it can) or "a redirected worktree is detected
-// and the run fails closed, leaving cleanup to the operator" (what happens).
-//
-// Deliberately not asserting a fix: the behavior below is the current contract,
-// and choosing between hardening the reserved-path list and documenting the
-// failure mode is the decision itself, not a detail of it.
+// Both halves are asserted because they are different promises. Deleting the
+// second would leave `git worktree remove --force` running against whatever
+// repository the pointer happens to name.
 func TestWorktreeGitFileIsWritableAndRedirectsTheCommonDir(t *testing.T) {
 	probe := testRepo(t)
 	manager := &Manager{Root: t.TempDir()}

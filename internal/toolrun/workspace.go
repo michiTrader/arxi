@@ -221,10 +221,39 @@ func (w *Workspace) validateToolPath(path string) error {
 	if strings.EqualFold(first, ".arxi-workspace.json") || strings.EqualFold(first, metadataDirName) {
 		return fmt.Errorf("toolrun: %s: reserved workspace metadata path %q is not agent-writable", w.Member, relative)
 	}
+	if strings.EqualFold(first, gitControlName) {
+		return fmt.Errorf("toolrun: %s: reserved source-control path %q is not agent-accessible\n"+
+			"  in a worktree layout this is a gitdir: pointer into the operator's repository. "+
+			"Writing it redirects every Git operation performed from this root at a repository "+
+			"the member chose; reading it discloses the operator's absolute repository path, and "+
+			"through it a config that may carry credentials. The workspace promise is the tracked "+
+			"tree, never the control plane that produced it", w.Member, relative)
+	}
 	return nil
 }
 
 const metadataDirName = ".arxi-workspace-metadata"
+
+// gitControlName is refused for READ as well as write, which is the part worth
+// spelling out because it is not symmetric with the metadata paths above.
+//
+// Write is the obvious half: in a worktree layout the workspace root holds a
+// `.git` FILE containing `gitdir: <common>/worktrees/<name>`, and rewriting it
+// repoints every Git operation run from that root (verified against real Git:
+// rev-parse --git-common-dir follows the rewrite).
+//
+// Read is the half that is easy to miss. That same pointer names the
+// operator's repository by absolute path, and following it reaches the common
+// config -- where a remote URL can carry an embedded token. A member that can
+// read it learns both where the operator's checkout lives and, potentially, a
+// credential nobody granted it.
+//
+// Refusing the name in every layout, including `copy` and `shared` where the
+// provisioner creates no such entry, is deliberate. A reserved name whose
+// meaning depends on the mode is a rule nobody can apply from the path alone,
+// and the tracked tree is what the workspace promises in all three layouts; a
+// repository control directory never is.
+const gitControlName = ".git"
 
 // contains reports whether p is the root or beneath it.
 //

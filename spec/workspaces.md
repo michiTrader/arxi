@@ -95,13 +95,18 @@ registration, HEAD and ownership. A worktree separates working trees; it is not
 a process sandbox.
 
 A `worktree` root also contains a `.git` file — a `gitdir:` pointer into the
-common repository — inside the tool-visible tree. It is not on the reserved
-metadata path list, so a member with write access can rewrite it and redirect
-where Git operations from that root resolve. Ownership verification detects the
-redirect and refuses the release, which fails closed but leaves the worktree
-registered in the operator's repository. A platform decision advertising
-`worktree` for writers must state which guarantee it makes here; neither
-`shared` nor `copy` carries a control file in its root, so this constraint is
+common repository — inside the tool-visible tree. Since ADR-0018 the repository
+control plane is not workspace content: `.git` is a reserved path in every
+layout, refused for read and for write before any path is resolved, so the
+built-in tools can neither redirect where Git operations from that root resolve
+nor read the operator's repository path and, through it, a config that may
+carry credentials. Ownership verification remains as a second layer for
+mutations that do not go through those tools: it detects the redirect and
+refuses the release, which fails closed but leaves the worktree registered in
+the operator's repository.
+
+A `copy` snapshot carries no control plane. It materializes only tracked blobs,
+and Git refuses to track a path named `.git`, so the redirect constraint is
 specific to the worktree layout.
 
 ## Execution-profile guarantees
