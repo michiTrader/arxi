@@ -39,7 +39,7 @@ func (w *Workspace) requireWrite(path string) error {
 	return fmt.Errorf("toolrun: %s is read-only (file access %s) and may not write %q\n"+
 		"  this is the session boundary of ADR-0017: preflight refused the configuration at "+
 		"acceptance, the session refuses the dispatch at execution, and a future grant that "+
-			"misses preflight still cannot mutate the frozen tree", w.Member, stated, path)
+		"misses preflight still cannot mutate the frozen tree", w.Member, stated, path)
 }
 
 // WriteFile writes data to a path inside the workspace.
