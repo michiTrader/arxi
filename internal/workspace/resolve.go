@@ -57,8 +57,27 @@ func Resolve(input ResolutionInput) ([]Requirement, error) {
 		selected := input.TopLevel
 		inferred := selected == ""
 		if selected == "" {
-			if access == FileAccessWrite || bash {
+			if bash {
+				// A process user needs a repository in its root: a contained
+				// command is expected to be able to run Git, which is what
+				// worktree provides and copy does not.
 				selected = ModeWorktree
+			} else if access == FileAccessWrite {
+				// A file-only writer resolves to copy, not worktree, because
+				// copy's root holds tracked files and nothing else, while a
+				// worktree root also holds a `.git` pointer into the
+				// operator's repository (ADR-0018). Writing that pointer
+				// redirects Git operations run from the root; reading it
+				// discloses the operator's path and, through the common
+				// config, possibly a credential.
+				//
+				// ADR-0018 refuses the pointer at the tool boundary, so
+				// worktree is defensible too. This is about which guarantee
+				// is simpler to promise: "an isolated snapshot of tracked
+				// files" needs no clause about a control plane, and a member
+				// without `bash` cannot invoke Git anyway, so the repository
+				// a worktree serves buys it nothing.
+				selected = ModeCopy
 			} else if access == FileAccessRead {
 				selected = ModeShared
 			} else {

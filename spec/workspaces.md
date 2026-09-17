@@ -39,8 +39,13 @@ display name. Authorization and resume bind that identity.
 Resolution performs no probing or provisioning. Text-only members resolve to
 `none` and `no-tools`. `read` and `grep` require a shared source view and
 read-only direct files. `write` and `edit` require a per-writer source view and
-write-capable direct files. `bash` requires a per-writer source view and the
-contained-process profile.
+write-capable direct files, and when no mode is declared they resolve to `copy`:
+both per-writer layouts isolate one tree per member, and `copy` is the one whose
+root holds tracked files and nothing else, while a `worktree` root also holds a
+`gitdir:` pointer (ADR-0018). A member without `bash` cannot invoke Git, so the
+repository a worktree serves buys it nothing. `bash` requires a per-writer
+source view and the contained-process profile, and resolves to `worktree`,
+because a contained command is expected to be able to run Git.
 
 Stage declarations are combined before acceptance. An explicit `none` conflicts
 with source or tool requirements. `shared` may yield to an explicitly stronger
