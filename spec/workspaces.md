@@ -92,7 +92,14 @@ specification makes no cross-member isolation claim beyond one shared view.
 If advertised, `copy` is one deterministic tracked-tree snapshot per writing
 member. Dirty, untracked and ignored content is excluded. Submodules and special
 files are refused. A symlink is reproduced only when its recorded relative
-target remains inside the snapshot.
+target remains inside the snapshot. Every entry is materialized by writing the
+tracked blob, so no snapshot path shares an inode with the source tree or with
+anything outside the workspace. That property is load-bearing rather than
+incidental: the confined file API restricts paths, and a hardlink is a second
+name for one inode rather than a path pointing elsewhere, so it cannot be
+refused by path confinement. A snapshot that linked or reflinked its entries
+would let a writing member mutate the operator's tree through a path nothing
+has reason to refuse.
 
 If advertised, `worktree` is one registered detached Git worktree per writing
 member at the frozen commit. Recovery verifies the common Git directory,
