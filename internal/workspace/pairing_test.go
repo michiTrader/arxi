@@ -91,42 +91,20 @@ func TestPreflightDoesNotBindAProfileToALayout(t *testing.T) {
 		"modes and profiles are validated independently, so an advertisement is their cross product")
 }
 
-// TestTodaysLinuxAdvertisementIsSafeByArithmeticNotByRule is the other half,
-// and the reason the gap above has never bitten.
+// RETIRED: TestTodaysLinuxAdvertisementIsSafeByArithmeticNotByRule.
 //
-// ADR-0017 says Linux advertises shared "only with" the read-only profile.
-// That sentence describes an intent no mechanism enforces — what makes it true
-// is that only ONE file profile is advertised, so there is no second pairing
-// to get wrong.
+// It pinned that Linux advertised exactly one source-backed layout and one
+// file profile, so that ADR-0017's "shared only with the read-only profile"
+// -- true by arithmetic, not by rule -- would fail loudly the moment anyone
+// widened either list.
 //
-// Pinning the arithmetic makes the dependency explicit: the moment Linux
-// advertises a second file profile, this fails, and whoever is widening the
-// advertisement is told that ADR-0017's guarantee rested on a count.
-func TestTodaysLinuxAdvertisementIsSafeByArithmeticNotByRule(t *testing.T) {
-	linux := CurrentCapabilities("linux")
-
-	sourceBacked := 0
-	for _, mode := range linux.Modes {
-		if mode != ModeNone {
-			sourceBacked++
-		}
-	}
-	fileProfiles := 0
-	for _, profile := range linux.Profiles {
-		if profile.FileAccess != FileAccessNone {
-			fileProfiles++
-		}
-	}
-
-	if sourceBacked != 1 || fileProfiles != 1 {
-		t.Fatalf("Linux advertises %d source-backed layout(s) and %d file profile(s).\n"+
-			"  ADR-0017's \"shared only with the read-only profile\" is not enforced by any rule: "+
-			"preflight validates modes and profiles independently, so an advertisement is their "+
-			"cross product and the guarantee held only while that product was 1x1.\n"+
-			"  Widening it means deciding which layout/profile PAIRS are offered, and teaching "+
-			"preflight to check pairs — otherwise every advertised profile becomes available on "+
-			"every advertised layout, including ones nobody chose.\n"+
-			"  See TestPreflightDoesNotBindAProfileToALayout for the mechanism",
-			sourceBacked, fileProfiles)
-	}
-}
+// It did exactly that. ADR-0019 widened both, the test failed, and its
+// message named the work required: decide which pairs are offered, and teach
+// preflight to check them. That is what Capabilities.Pairs does.
+//
+// Deleted rather than adapted, because its subject no longer exists. The
+// arithmetic it guarded is gone and the rule it demanded is now enforced and
+// pinned by TestLinuxNowPairsByRuleRatherThanByArithmetic and by the shared
+// case in TestLinuxPreflightAcceptsFileWorkAndStillRefusesTheSharedTreeAnd-
+// Processes. Keeping a 1x1 assertion would forbid the widening it was written
+// to make safe -- a test outliving its own success.

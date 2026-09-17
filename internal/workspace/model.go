@@ -127,34 +127,43 @@ func CurrentCapabilities(platform string) Capabilities {
 		Provisioners: map[Mode]string{ModeNone: "arxi.workspace.none/v1"},
 	}
 	if platform == "linux" {
-		// ADR-0017: Linux advertises shared paired exclusively with the
-		// read-only profile. The write-capable direct-files profile stays off
-		// this advertisement so no accepted combination can write. Two
-		// independent refusals carry that, and both must stay true:
+		// ADR-0017 advertises shared with the read-only profile; ADR-0019
+		// adds copy with the write-capable one. The pairing below is what
+		// keeps those two facts from combining into a third nobody decided:
+		// shared+write is not offered, so the read-only-ness of the
+		// operator's tree is a rule rather than a side effect of the write
+		// profile being absent, which is what it was before Pairs existed.
 		//
-		//   - a file-only write requirement resolves to copy, which is not in
-		//     Modes, so preflight refuses the mode (ADR-0018 moved this from
-		//     worktree to copy; either way the mode is unadvertised);
-		//   - a write requirement over shared finds no advertised profile
-		//     providing write, so preflight refuses the access.
+		// What stays unadvertised is the load-bearing half:
 		//
-		// The second is the one that does not depend on resolution's choice of
-		// layout. Widening this branch back to the write-capable profile would
-		// remove it and reopen shared+write, returning read-only-ness to
-		// grant-accident status; that combination needs its own platform
-		// decision.
-		capabilities.Modes = append(capabilities.Modes, ModeShared)
+		//   - worktree, whose root carries a gitdir: pointer into the
+		//     operator's repository (ADR-0018). A file-only writer resolves
+		//     to copy, so nothing needs it;
+		//   - contained-process, because every process guarantee is still
+		//     "unavailable": descendants, filesystem, environment, network.
+		//     A bash member resolves to worktree AND that profile, so it is
+		//     refused twice over.
+		//
+		// A member with write or edit is accepted; a member with bash is not.
+		// That asymmetry is the decision, not an oversight: the file
+		// guarantees are enforced and audited, the process ones are not.
+		capabilities.Modes = append(capabilities.Modes, ModeShared, ModeCopy)
 		capabilities.Provisioners[ModeShared] = GitLayoutProvisionerV1
-		capabilities.Profiles = append(capabilities.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesReadProfileID,
-			FileAccess: FileAccessRead, HandleRelative: true, FinalLinkRaceFree: true,
-			Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}})
-		// "Paired exclusively" is now a rule rather than an arithmetic
-		// accident. Stated even though the product is currently 1x1 and the
-		// map changes nothing today: the point is that widening either list
-		// can no longer silently widen what is accepted.
+		capabilities.Provisioners[ModeCopy] = GitLayoutProvisionerV1
+		capabilities.Profiles = append(capabilities.Profiles,
+			Profile{Schema: ProfileSchemaV1, ID: DirectFilesReadProfileID,
+				FileAccess: FileAccessRead, HandleRelative: true, FinalLinkRaceFree: true,
+				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}},
+			Profile{Schema: ProfileSchemaV1, ID: DirectFilesProfileID,
+				FileAccess: FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
+				Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}})
+		// copy carries the read-only profile too, so a reader that declares
+		// `workspace: copy` is accepted rather than refused for asking for
+		// less than the layout offers.
 		capabilities.Pairs = map[Mode][]string{
 			ModeNone:   {NoToolsProfileID},
 			ModeShared: {DirectFilesReadProfileID},
+			ModeCopy:   {DirectFilesProfileID, DirectFilesReadProfileID},
 		}
 	}
 	if platform == "simulation" {

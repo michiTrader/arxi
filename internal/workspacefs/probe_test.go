@@ -29,13 +29,23 @@ func TestProbePinsTheADR0017CapabilityMatrix(t *testing.T) {
 	for _, mode := range caps.Modes {
 		advertised[mode] = true
 	}
-	// Copy and worktree stay unadvertised on every production platform: their
-	// provisioners are internal evidence only, and no platform decision has
-	// promised their lifecycle or isolation contract (ADR-0012).
-	for _, mode := range []workspace.Mode{workspace.ModeCopy, workspace.ModeWorktree} {
-		if advertised[mode] {
-			t.Errorf("%s is advertised by the %s probe: internal provisioner evidence must not become production availability before the platform decision guarantees the contract", mode, runtime.GOOS)
-		}
+	// worktree stays unadvertised everywhere. Its provisioner works, so the
+	// refusal is not about missing machinery: the root carries a gitdir:
+	// pointer into the operator's repository (ADR-0018), and a layout that
+	// promises the tracked tree must not deliver the control plane as well.
+	if advertised[workspace.ModeWorktree] {
+		t.Errorf("worktree is advertised by the %s probe: no platform decision has promised a "+
+			"layout whose root exposes a pointer into the operator's repository", runtime.GOOS)
+	}
+	// copy is advertised on Linux only, and only since ADR-0019. Its file
+	// guarantees were audited rather than assumed before that decision: no
+	// control plane in the root, no inode shared with the source, writes
+	// confined to the snapshot and discarded on release.
+	if advertised[workspace.ModeCopy] != (runtime.GOOS == "linux") {
+		t.Errorf("copy advertised = %v on %s: ADR-0019 promised the copy snapshot on Linux and "+
+			"nowhere else, so advertising it elsewhere claims an audit that platform never had, "+
+			"and withholding it on Linux means the decision is not in effect",
+			advertised[workspace.ModeCopy], runtime.GOOS)
 	}
 	if runtime.GOOS == "linux" && !advertised[workspace.ModeShared] {
 		t.Error("the Linux probe does not advertise shared: ADR-0017 promised the shared read-only combination, so a read/grep run would be refused at preflight and the milestone would be blocked")
@@ -57,6 +67,43 @@ func TestProbePinsTheADR0017CapabilityMatrix(t *testing.T) {
 	if _, err := workspace.Preflight([]workspace.Requirement{{Schema: workspace.SchemaV1, Member: "writer",
 		Mode: workspace.ModeWorktree, FileAccess: workspace.FileAccessWrite, RequiresSource: true,
 		ProfileID: workspace.DirectFilesProfileID}}, caps); err == nil {
-		t.Fatal("preflight accepted a source-backed write requirement against probed capabilities: a live run would start with a workspace no platform decision promised")
+		t.Fatal("preflight accepted a worktree write requirement against probed capabilities: a live run would start with a workspace no platform decision promised")
+	}
+
+	// The two boundaries ADR-0019 did NOT move, checked against the PROBED
+	// capabilities rather than CurrentCapabilities. Probe rewrites
+	// Provisioners, so it is a second construction of the advertisement and
+	// can drift from the one the preflight tests reason about.
+	if _, err := workspace.Preflight([]workspace.Requirement{{Schema: workspace.SchemaV1, Member: "writer",
+		Mode: workspace.ModeShared, FileAccess: workspace.FileAccessWrite, RequiresSource: true,
+		ProfileID: workspace.DirectFilesProfileID}}, caps); err == nil {
+		t.Fatal("the probed capabilities accept writing the SHARED layout: that is the operator's " +
+			"own frozen tree, kept read-only by ADR-0017 and left read-only by ADR-0019, which " +
+			"advertises the write profile for the copy snapshot only")
+	}
+	if _, err := workspace.Preflight([]workspace.Requirement{{Schema: workspace.SchemaV1, Member: "runner",
+		Mode: workspace.ModeCopy, FileAccess: workspace.FileAccessWrite, RequiresSource: true,
+		RequiresBash: true, ProfileID: workspace.ContainedProcessProfileID}}, caps); err == nil {
+		t.Fatal("the probed capabilities accept a contained-process requirement: descendants, " +
+			"filesystem, environment and network are all still \"unavailable\", so nothing has " +
+			"proven what such a process would be contained by")
+	}
+
+	// And the combination the decision exists to offer, on the platform it
+	// was decided for.
+	writer, err := workspace.Resolve(workspace.ResolutionInput{Members: []workspace.Member{
+		{Name: "writer", Tools: []string{"read", "write", "edit"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writerErr := workspace.Preflight(writer, caps)
+	if runtime.GOOS == "linux" && writerErr != nil {
+		t.Errorf("the probed Linux capabilities refuse a file-only writer: %v\n"+
+			"  ADR-0019 advertises copy with the write-capable profile precisely so this is "+
+			"accepted", writerErr)
+	}
+	if runtime.GOOS != "linux" && writerErr == nil {
+		t.Errorf("a file-only writer was accepted on %s: ADR-0019 audited the copy snapshot on "+
+			"Linux only", runtime.GOOS)
 	}
 }
