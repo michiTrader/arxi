@@ -161,6 +161,34 @@ Concretely:
    and keep updating it. Do not wait for the whole step to be done.
 5. Before ending a turn, verify `git status` is clean and that
    `git log origin/<branch>..HEAD` shows nothing unpushed.
+6. **A pull request reporting "merged" is not evidence that the code shipped.**
+   Verify against `origin/main` itself:
+
+   ```bash
+   git merge-base --is-ancestor <pr-merge-commit> origin/main && echo in-main
+   ./scripts/audit-merged-prs.sh        # or audit every recent PR at once
+   ```
+
+### Never leave a stacked base branch alive after merging it
+
+Stacking a pull request on another is fine; leaving the base branch alive after
+merging it is not. GitHub re-points a stacked PR onto main only when its base
+branch is **deleted**. If the base is merged but kept, the PR above it stays
+pointed at a branch that no longer leads to main. Merging it then writes a
+merge commit onto that dead branch: GitHub reports MERGED, CI is green, and
+main receives nothing.
+
+This has happened twice on this project:
+
+- **#33 / #34** — stranded this way. Rescued later by #35, which diagnosed the
+  mechanism precisely in its own description.
+- **#73** — stranded the same way regardless, after that diagnosis existed. Its
+  ADR (#72) was already published on main, so the decision was visible while
+  the defect it forbids stayed live in the code. The worst available shape.
+
+Prose did not prevent the second occurrence, which is why the check above is a
+script. Either merge a stack **top-down**, or delete each base branch as it
+merges. Both are safe; keeping a merged base branch is not.
 
 ### Recovering from a sandbox reset
 
