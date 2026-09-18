@@ -130,13 +130,21 @@ func (r MemoryReceipt) Presentable() bool {
 	return memoryKindPresentable[r.Kind]
 }
 
-// Validate refuses a receipt that advertises more identity than it carries.
+// Validate refuses a receipt that advertises more identity than it carries, or
+// that carries no evidence at all.
 //
 // This is the assertion that keeps RecordID and VersionID from being
 // decoration. A governed record whose VersionID is empty would otherwise
 // encode, verify and present exactly like one that named its version, letting
 // a store ship without version identity while every existing test stayed
 // green.
+//
+// Prepare calls this on every receipt it builds (ADR-0024). Until it did, this
+// function had no production caller: ADR-0021's version rule, ADR-0023's
+// enumeration and ADR-0023's candidate refusal were all reachable only from
+// tests, so an artifact carrying a candidate receipt marshalled cleanly and
+// would have been committed by the durable barrier. A guard with no caller is
+// an intention, and a green suite is what disguises it.
 func (r MemoryReceipt) Validate() error {
 	if r.Kind == "" {
 		return fmt.Errorf("memory receipt has no kind: a receipt must say what it is evidence of")
@@ -151,11 +159,41 @@ func (r MemoryReceipt) Validate() error {
 			"material may be stored and promoted but never presented, and a candidate that "+
 			"can be presented is not a candidate", r.Kind)
 	}
+	// Evidence before identity: a receipt is evidence of what was presented, so
+	// one that names no content is evidence of nothing. This held for every
+	// kind before ADR-0024 -- an empty ContentDigest validated -- which made
+	// Phase 7's exit requirement that "every influence identifies its source
+	// and version" satisfiable by a receipt identifying neither.
+	if r.ContentDigest == "" {
+		return fmt.Errorf("memory receipt of kind %q has no content_digest: a receipt is evidence "+
+			"of what memory was presented, and one that names no content proves nothing about "+
+			"the presentation it accompanies", r.Kind)
+	}
 	if !r.Governed() {
 		if r.RecordID != "" || r.VersionID != "" {
 			return fmt.Errorf("memory receipt of kind %q carries record_id %q and version_id %q: "+
 				"frozen configuration memory has no record identity, so naming one invents a "+
 				"version that no store can correct", r.Kind, r.RecordID, r.VersionID)
+		}
+		// The config SHA is this kind's only version identity. ADR-0021 left
+		// RecordID and VersionID empty for frozen memory because a
+		// configuration field has no record identity -- the effective config
+		// SHA was what made that exemption acceptable. Empty, the frozen kind
+		// has no version identity of any sort, which is the state ADR-0021
+		// refuses for governed records, reached from the other side.
+		//
+		// Production reaches here with a SHA today only because
+		// internal/exec/turn.go declines the durable path when
+		// Context.EffectiveConfigSHA is empty. That gate is a compatibility
+		// decision about which runs record proofs, not an assertion about
+		// receipt integrity, and it is two packages from the evidence. Asserted
+		// here so relaxing it fails a preparation instead of silently
+		// committing memory nobody can trace.
+		if r.EffectiveConfigSHA == "" {
+			return fmt.Errorf("memory receipt of kind %q has no effective_config_sha: frozen "+
+				"configuration memory names no record, so the config version is the only "+
+				"identity it has, and without it nothing can say which blueprint presented "+
+				"this memory", r.Kind)
 		}
 		return nil
 	}
@@ -274,6 +312,22 @@ func Prepare(req Request) (Artifact, error) {
 	if memory := strings.TrimSpace(effect.Context.Memory); memory != "" {
 		artifact.MemoryReceipts = append(artifact.MemoryReceipts, MemoryReceipt{Kind: KindFrozenContextMemory,
 			EffectiveConfigSHA: req.EffectiveConfigSHA, ContentDigest: digest("arxi.context-memory/v1", []byte(memory))})
+	}
+	// Every receipt is validated here, before any digest is computed (ADR-0024).
+	// Position is the decision, not the call: ADR-0013 freezes the artifact once
+	// committed, so validating after PresentationDigest and ContentDigest would
+	// describe bytes that are already immutable. A refused receipt must not
+	// reach the barrier at all.
+	//
+	// Failing the preparation rather than dropping the receipt is deliberate.
+	// Dropping it would present the memory to the model and record nothing,
+	// making the presentation un-auditable while looking clean -- the worse of
+	// the two failures, and the one Phase 7's exit evidence forbids.
+	for i, receipt := range artifact.MemoryReceipts {
+		if err := receipt.Validate(); err != nil {
+			return Artifact{}, fmt.Errorf("memory receipt %d of %d for context %s is not presentable "+
+				"evidence: %w", i+1, len(artifact.MemoryReceipts), contextID, err)
+		}
 	}
 	presentation, err := json.Marshal(artifact.Messages)
 	if err != nil {

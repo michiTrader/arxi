@@ -269,6 +269,20 @@ and therefore a blocklist with one entry. Every string that was not
 `Presentable()` so a candidate is never presented, and makes an unknown kind fail
 closed.
 
+A fifth prerequisite is settled, and it is the one that made the previous three
+enforceable. ADR-0023 recorded its own weakness — `Presentable()` had no
+production caller — and probing that admission found it understated: nothing
+called `MemoryReceipt.Validate()` at all. The version rule of ADR-0021, the
+vocabulary of ADR-0022 and the enumeration of ADR-0023 were each reachable only
+from tests, so an artifact carrying a candidate receipt marshalled cleanly,
+computed a content digest and would have been committed by the durable barrier.
+The same probe found two receipts the preparer itself emits that prove nothing:
+one with an empty effective config SHA, which is the only version identity
+frozen memory has, and one with no content digest at all. ADR-0024 calls
+`Validate` from `Prepare` before either digest is computed, and requires the
+evidence fields to hold evidence, so "every influence identifies its source and
+version" is refused rather than merely documented.
+
 Temporal validity, ranking and deletion lineage remain
 undecided and still need their own record (item 7 below). The store itself does
 not exist.
