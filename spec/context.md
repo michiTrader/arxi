@@ -180,6 +180,14 @@ and effective-config digest. The receipt list is empty when no memory contribute
 Semantic retrieval, ranking, autonomous memory and cross-run scope belong to Phase
 7 and are not performed here.
 
+Receipt kinds are enumerated, not inferred: `frozen_context_memory`,
+`approved_memory_record` and `proposed_memory_candidate`. An unrecognized kind is
+refused rather than treated as authority, so a typo or a kind from a newer store
+fails closed instead of inheriting the authority of an approved record. A
+`proposed_memory_candidate` may be stored, inspected and promoted but is never
+presented — model material cannot create active memory, and a candidate that can
+be presented is not a candidate. See ADR-0023.
+
 A receipt may also name the memory record version it presented: `record_id` is the
 stable identity of a record across versions, `version_id` the immutable identity of
 one version. Both are omitted for frozen configuration memory, which has no record
