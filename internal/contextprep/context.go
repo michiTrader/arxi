@@ -257,6 +257,22 @@ type Request struct {
 	Route              Route
 	OutputLimit        int
 	Generator          compaction.Generator
+
+	// RetrievedMemory is governed memory a store selected for this turn, and
+	// RetrievedReceipts is the evidence for it. Both or neither: a body with no
+	// receipts would present memory this artifact cannot account for, and
+	// receipts with no body would claim an influence that never reached the
+	// model. Prepare refuses each half alone.
+	//
+	// Carried as rendered text and receipts rather than as records because this
+	// package must not import the store. contextprep is the package the store
+	// depends on for the receipt vocabulary (ADR-0023 owns the kinds here), so
+	// importing it back would be an import cycle -- and more importantly, the
+	// preparer's job is to freeze a presentation, not to decide what memory is
+	// relevant. Retrieval and authorization happen before this call and their
+	// outcome arrives as data.
+	RetrievedMemory   string
+	RetrievedReceipts []MemoryReceipt
 }
 
 // OverflowError marks every failure on the overflow path — an unusable mode, a
@@ -279,7 +295,19 @@ func Prepare(req Request) (Artifact, error) {
 	artifact := Artifact{Schema: Schema, ContextID: contextID, RunID: runID, ParentWorkID: req.ParentWorkID,
 		Subject: effect.Agent, SourceThroughSeq: history.SourceThroughSeq, EffectiveConfigSHA: req.EffectiveConfigSHA,
 		Transcript: history, PreparerVersion: PreparerVersion, Route: req.Route, MemoryReceipts: []MemoryReceipt{}}
+	if err := checkRetrieved(req); err != nil {
+		return Artifact{}, err
+	}
 	static := staticMessages(effect.Context)
+	// Retrieved memory joins the STATIC layer, on the same channel and in the
+	// same position as frozen configuration memory. Both are memory, so both
+	// are measured against the static budget and both arrive as a user-role
+	// message; putting retrieved memory in another layer would silently re-cut
+	// the budget while claiming to be a retrieval change, which is the mistake
+	// ADR-0025's own comment warns about one function down.
+	if memory := strings.TrimSpace(req.RetrievedMemory); memory != "" {
+		static = append(static, textMessage(turn.RoleUser, memoryMessageText(memory)))
+	}
 	prior := transcriptMessages(history.Items)
 	trailing := inputMessages(effect.Context, prior)
 	full := joinMessages(static, prior, trailing)
@@ -313,6 +341,13 @@ func Prepare(req Request) (Artifact, error) {
 		artifact.MemoryReceipts = append(artifact.MemoryReceipts, MemoryReceipt{Kind: KindFrozenContextMemory,
 			EffectiveConfigSHA: req.EffectiveConfigSHA, ContentDigest: digest("arxi.context-memory/v1", []byte(memory))})
 	}
+	// Retrieved receipts are appended after the frozen one so the order of the
+	// evidence matches the order of the presentation. They go through the same
+	// validation loop below rather than a separate path: a receipt a store
+	// produced earns no more trust than one this package produced, and the
+	// barrier must not be able to receive an unvalidated receipt through any
+	// route.
+	artifact.MemoryReceipts = append(artifact.MemoryReceipts, req.RetrievedReceipts...)
 	// Every receipt is validated here, before any digest is computed (ADR-0024).
 	// Position is the decision, not the call: ADR-0013 freezes the artifact once
 	// committed, so validating after PresentationDigest and ContentDigest would
@@ -349,6 +384,31 @@ func Prepare(req Request) (Artifact, error) {
 	}
 	artifact.ContentDigest = digest("arxi.context-content/v1", content)
 	return artifact, nil
+}
+
+// checkRetrieved refuses a request whose retrieved memory and receipts
+// disagree about whether memory exists.
+//
+// Both halves or neither. A body with no receipts presents memory the artifact
+// cannot account for, which is the un-auditable presentation Phase 7's exit
+// evidence forbids; receipts with no body claim an influence that never reached
+// the model, which is a false audit trail and the worse of the two. Neither is
+// recoverable later: ADR-0013 freezes the artifact once committed, so a
+// mismatch has to fail here or become permanent.
+func checkRetrieved(req Request) error {
+	memory := strings.TrimSpace(req.RetrievedMemory)
+	switch {
+	case memory != "" && len(req.RetrievedReceipts) == 0:
+		return fmt.Errorf("prepared context carries retrieved memory with no receipts: the "+
+			"presentation would influence the model with %d bytes of memory that the artifact "+
+			"cannot attribute to any record version, and the exit evidence requires every "+
+			"influence to identify its source", len(memory))
+	case memory == "" && len(req.RetrievedReceipts) > 0:
+		return fmt.Errorf("prepared context carries %d retrieved memory receipts with no "+
+			"memory: the artifact would claim an influence that never reached the model, which "+
+			"is a false audit trail rather than a missing one", len(req.RetrievedReceipts))
+	}
+	return nil
 }
 
 // compact runs the overflow path: select, present, re-measure and verify.

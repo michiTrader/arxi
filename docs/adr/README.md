@@ -36,6 +36,7 @@ has to decide which — not ignore the contradiction.
 | [0024](0024-the-preparer-validates-the-receipts-it-emits.md) | The preparer validates the receipts it emits, and evidence names content | accepted |
 | [0025](0025-every-assembler-uses-the-memory-channel.md) | Every assembler uses the memory channel, not just the durable one | accepted |
 | [0026](0026-the-roadmap-cites-every-enabling-decision.md) | The roadmap cites every decision that claims to enable it | accepted |
+| [0027](0027-memory-records-are-a-store-outside-every-run.md) | Governed memory is a store outside every run, and retrieval is authorized before it is ranked | accepted |
 
 ## Format
 

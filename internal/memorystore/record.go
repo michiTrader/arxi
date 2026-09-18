@@ -1,0 +1,216 @@
+package memorystore
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/michiTrader/arxi/internal/contextprep"
+)
+
+// Schema names the persisted record format. Versioned from the first commit
+// because a record outlives the binary that wrote it: this is the one store in
+// the project whose whole purpose is to be read by a later run.
+const Schema = "arxi.memory-record/v1"
+
+// Kind mirrors the authority enumeration contextprep already owns, rather than
+// redeclaring it.
+//
+// Importing the constants is the decision. A parallel enumeration here would be
+// the defect ADR-0023 was written about, one layer up: two lists of authority
+// kinds drift, and the drift shows up as a record this store considers approved
+// and the preparer refuses — or worse, the reverse. contextprep is the package
+// that enforces presentability at the barrier, so it owns the vocabulary and
+// this store spends it.
+const (
+	Approved  = contextprep.KindApprovedMemoryRecord
+	Candidate = contextprep.KindProposedMemoryCandidate
+)
+
+// Record is one immutable version of one governed memory record.
+//
+// # Versions are values, not mutations
+//
+// ADR-0021 decided a receipt names the record version it presented, so that a
+// correction has something to supersede. That is only true if a version is
+// immutable once written: if editing a record rewrote its body in place, a
+// receipt naming version 2 would describe whatever version 2 says *now*, and
+// correction propagation — the thing Phase 7's exit evidence requires — would be
+// unverifiable against it. So `Correct` appends a new version and supersedes the
+// old one; nothing here is ever edited.
+//
+// # Provenance is recorded, never inferred
+//
+// Phase 7 opens with a containment rule: model material "may propose candidates
+// but cannot create active memory". `Kind` is how that is represented, and it is
+// set by the caller that has the authority to know — a user approval, an
+// operator import, or a model proposal — never derived from the content. Content
+// cannot be evidence of its own provenance, which is the whole argument of
+// ADR-0020: memory is data, and data does not get to declare its own authority.
+type Record struct {
+	Schema string `json:"schema"`
+	// RecordID is the stable identity across every version of this record.
+	RecordID string `json:"record_id"`
+	// VersionID is the immutable identity of this particular version. It is
+	// content-addressed, so two stores given the same writes produce the same
+	// version IDs and a receipt is portable between them.
+	VersionID string `json:"version_id"`
+	// Supersedes names the version this one corrects, empty for a first
+	// version. It makes the correction chain walkable from either end, which
+	// is what lets retrieval prove it returned a tip rather than trusting a
+	// flag on the record.
+	Supersedes string `json:"supersedes,omitempty"`
+
+	Scope Scope  `json:"scope"`
+	Kind  string `json:"kind"`
+	Body  string `json:"body"`
+
+	// Origin records who or what produced this version: an authenticated
+	// principal, an import name, or the run that proposed it. The exit
+	// evidence requires that "every influence identifies its source", and the
+	// scope says which holder the record belongs to, not who wrote it.
+	Origin string `json:"origin"`
+	// CreatedSeq and CreatedRun bind a version to the execution that produced
+	// it when there was one. Empty for user and operator writes, which happen
+	// outside any run; a synthetic run ID for those would be indistinguishable
+	// downstream from a real one, the same argument ADR-0021 makes for leaving
+	// RecordID empty on frozen configuration memory.
+	CreatedRun string `json:"created_run,omitempty"`
+	CreatedSeq int64  `json:"created_seq,omitempty"`
+
+	// Deleted marks a tombstone. Deletion is a version like any other, for
+	// the reason the phase's exit evidence gives: deletion must propagate
+	// "without resurrection", and a record removed by truncating a file can be
+	// resurrected by any replica or backup that still holds the old bytes.
+	// A tombstone is a positive assertion that travels with the data.
+	Deleted bool `json:"deleted,omitempty"`
+
+	ContentDigest string `json:"content_digest"`
+}
+
+// identity is the subset of a record that determines its version ID. Declared
+// as its own type so the digest cannot silently change meaning when a field is
+// added to Record: a new field is not part of the identity until someone adds
+// it here on purpose, and an accidentally-included field would change every
+// existing version ID, invalidating every receipt already committed.
+type identity struct {
+	RecordID   string `json:"record_id"`
+	Supersedes string `json:"supersedes,omitempty"`
+	Scope      Scope  `json:"scope"`
+	Kind       string `json:"kind"`
+	Body       string `json:"body"`
+	Origin     string `json:"origin"`
+	CreatedRun string `json:"created_run,omitempty"`
+	CreatedSeq int64  `json:"created_seq,omitempty"`
+	Deleted    bool   `json:"deleted,omitempty"`
+}
+
+// Seal computes the content digest and the content-addressed version ID.
+//
+// The version ID is derived from the content rather than assigned from a
+// counter, and that is a durability decision rather than an aesthetic one. A
+// counter needs a writer with exclusive state to allocate from, so two
+// processes writing concurrently either serialize on a lock or mint colliding
+// IDs; the store's whole point is to be read and written by many runs. A
+// content-addressed ID also makes a correction that restates an earlier body
+// resolve to that earlier version, which is honest: it is the same assertion.
+func (r Record) Seal() (Record, error) {
+	body, err := json.Marshal(identity{
+		RecordID: r.RecordID, Supersedes: r.Supersedes, Scope: r.Scope, Kind: r.Kind,
+		Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq,
+		Deleted: r.Deleted,
+	})
+	if err != nil {
+		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
+	}
+	out := r
+	out.Schema = Schema
+	out.ContentDigest = digest("arxi.memory-record/v1", body)
+	out.VersionID = "mv-" + out.ContentDigest[:24]
+	return out, nil
+}
+
+// Validate refuses a record that cannot be retrieved safely.
+//
+// It runs before a write reaches the disk, not after. A record that fails these
+// checks on the way out would already be persisted, and every reader would have
+// to defend against it forever; ADR-0024 made the same choice for receipts, on
+// the same reasoning that a refused artifact must not reach the barrier at all.
+func (r Record) Validate() error {
+	if err := r.Scope.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.RecordID) == "" {
+		return fmt.Errorf("memory record has no record_id: without a stable identity across " +
+			"versions, a correction has nothing to attach to and every write is a new record")
+	}
+	switch r.Kind {
+	case Approved, Candidate:
+	case contextprep.KindFrozenContextMemory:
+		return fmt.Errorf("memory record has kind %q: frozen configuration memory is a field on "+
+			"a blueprint and has no record identity, so storing one here would mint a version "+
+			"ID that no correction could ever supersede", r.Kind)
+	case "":
+		return fmt.Errorf("memory record has no kind: authority is enumerated, and a record " +
+			"that does not say what it is evidence of cannot be authorized")
+	default:
+		return fmt.Errorf("memory record has unknown kind %q: authority is enumerated, so an "+
+			"unrecognized kind fails closed rather than inheriting the authority of a record "+
+			"somebody approved", r.Kind)
+	}
+	// A tombstone carries no body by design, so the body check is scoped to
+	// live versions. Requiring a body on a deletion would force callers to
+	// invent text that retrieval must then remember never to present.
+	if !r.Deleted && strings.TrimSpace(r.Body) == "" {
+		return fmt.Errorf("memory record %q has an empty body: a record that asserts nothing "+
+			"would occupy the context window and the retrieval receipt without influencing "+
+			"anything, which is cost with no evidence of benefit", r.RecordID)
+	}
+	if strings.TrimSpace(r.Origin) == "" {
+		return fmt.Errorf("memory record %q has no origin: the exit evidence requires every "+
+			"influence to identify its source, and the scope names the holder the record "+
+			"belongs to rather than whoever wrote it", r.RecordID)
+	}
+	if r.CreatedSeq != 0 && r.CreatedRun == "" {
+		return fmt.Errorf("memory record %q has created_seq %d and no created_run: a sequence "+
+			"number is only meaningful within one log, so a seq without its run points at "+
+			"every run and none of them", r.RecordID, r.CreatedSeq)
+	}
+	return nil
+}
+
+// Receipt renders the retrieval evidence for this version in the form the
+// preparer already validates.
+//
+// Constructed here rather than at the call site because this is the first
+// production code in the project able to produce a governed receipt at all: a
+// probe found `KindApprovedMemoryRecord` with zero construction sites outside
+// tests and `RecordID` assigned in production zero times. Building it beside
+// the record means the record's own identity fields are what populate it, so
+// the receipt cannot describe a version the store does not hold.
+//
+// EffectiveConfigSHA is filled by the preparer, not here. It identifies the
+// blueprint that presented the memory, which is a property of the presentation
+// and unknown to a store.
+func (r Record) Receipt() contextprep.MemoryReceipt {
+	return contextprep.MemoryReceipt{
+		Kind:          r.Kind,
+		ContentDigest: r.ContentDigest,
+		RecordID:      r.RecordID,
+		VersionID:     r.VersionID,
+	}
+}
+
+// digest binds content the way every other persisted digest in this repository
+// does: a domain-separated lowercase hex SHA-256. The domain prefix keeps a
+// record digest from colliding with a transcript or presentation digest that
+// happens to cover the same bytes.
+func digest(domain string, body []byte) string {
+	h := sha256.New()
+	h.Write([]byte(domain))
+	h.Write([]byte{0})
+	h.Write(body)
+	return hex.EncodeToString(h.Sum(nil))
+}
