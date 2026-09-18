@@ -24,6 +24,50 @@ var adrCitation = regexp.MustCompile(`ADR-(\d{4})`)
 // adrFilename extracts the number an ADR file is named with.
 var adrFilename = regexp.MustCompile(`^(\d{4})-`)
 
+// headerField matches any "- Field:" line in an ADR's header block.
+var headerField = regexp.MustCompile(`(?m)^- ([A-Za-z][A-Za-z ]*):`)
+
+// firstSection marks the end of the header block: the first "## " heading.
+//
+// Scoping matters and was measured. Applied to the whole document, headerField
+// matches prose bullets such as "- Existing runs are unaffected: ..." in the
+// body of ADR-0017, so an unscoped vocabulary check reports a dozen false
+// violations and would have to be weakened to pass -- which is how a guard
+// stops guarding.
+var firstSection = regexp.MustCompile(`(?m)^## `)
+
+// adrHeaderBlock returns the text above an ADR's first "## " section, where the
+// status, affects, depends-on and enables fields live.
+func adrHeaderBlock(body string) string {
+	if at := firstSection.FindStringIndex(body); at != nil {
+		return body[:at[0]]
+	}
+	return body
+}
+
+// adrHeaderVocabulary enumerates every field name an ADR header may use.
+//
+// Enumerated rather than inferred, for the reason ADR-0023 gives about receipt
+// kinds: a check that looks only for the fields it knows cannot tell a missing
+// claim from a claim spelled differently. This was measured, not supposed —
+// renaming "Enables" to "Unblocks" in one ADR made that ADR invisible to the
+// enablement check above and the whole test passed, because a header nobody
+// matches is indistinguishable from a header nobody wrote.
+//
+// So an unrecognized field fails closed. The cost is that adding a legitimate
+// new field requires editing this set, which is the intended trade: the edit is
+// a deliberate decision recorded in one place, whereas the silence it replaces
+// was undetectable.
+// The set is the measured vocabulary of all 25 records, not a guess: Status and
+// Affects appear in every one, "Depends on" in 16, Enables in 6 and Origin in 2.
+var adrHeaderVocabulary = map[string]bool{
+	"Status":     true,
+	"Affects":    true,
+	"Depends on": true,
+	"Enables":    true,
+	"Origin":     true,
+}
+
 // TestEveryEnablingDecisionIsCitedByThePhaseItEnables closes the gap between an
 // ADR claiming to unblock a phase and that phase's status narration admitting
 // it exists.
@@ -77,6 +121,20 @@ func TestEveryEnablingDecisionIsCitedByThePhaseItEnables(t *testing.T) {
 		body, err := os.ReadFile(filepath.Join("../docs/adr", entry.Name()))
 		if err != nil {
 			t.Fatalf("cannot read ADR %s: %v", entry.Name(), err)
+		}
+		// Refuse an unknown header field before trusting the absence of an
+		// "Enables" line. Without this, a renamed header is silently read as
+		// "this ADR enables nothing" and the citation check below holds
+		// vacuously for it.
+		for _, match := range headerField.FindAllStringSubmatch(adrHeaderBlock(string(body)), -1) {
+			if !adrHeaderVocabulary[match[1]] {
+				t.Errorf("ADR %s carries header field %q, which is not in the header vocabulary.\n"+
+					"  Consequence: a field nobody matches is indistinguishable from a field "+
+					"nobody wrote, so renaming \"Enables\" silently exempts this ADR from the "+
+					"citation check below.\n"+
+					"  Remedy: use an enumerated field name, or add this one to "+
+					"adrHeaderVocabulary as a deliberate decision.", entry.Name(), match[1])
+			}
 		}
 		for _, match := range enablesLine.FindAllStringSubmatch(string(body), -1) {
 			claimed[match[1]] = append(claimed[match[1]], number[1])
