@@ -51,10 +51,73 @@ type OverflowDecision struct {
 	CompactionDigest string `json:"compaction_digest,omitempty"`
 }
 
+// MemoryReceipt is evidence of what memory was presented. ADR-0020 decided the
+// channel memory arrives through; this records which record version arrived.
+//
+// RecordID and VersionID are empty for KindFrozenContextMemory and that is a
+// fact about the source, not a gap: ContextSpec.Memory is a configuration field
+// on a frozen blueprint, so it has no record identity to name. Minting one
+// would produce a synthetic version ID indistinguishable downstream from a real
+// one, and nothing could ever correct it.
+//
+// They are required for any governed record, which Governed reports and
+// Validate enforces. ADR-0021 exists because ADR-0020 stated this receipt
+// already carried "record identities and version IDs" when no field did; a
+// field that nothing fails on is how that claim survived unmeasured.
 type MemoryReceipt struct {
 	Kind               string `json:"kind"`
 	EffectiveConfigSHA string `json:"effective_config_sha"`
 	ContentDigest      string `json:"content_digest"`
+
+	// RecordID is the stable identity of a governed record across all of its
+	// versions. Empty for frozen configuration memory.
+	RecordID string `json:"record_id,omitempty"`
+	// VersionID is the immutable identity of this particular version of that
+	// record. Empty for frozen configuration memory. Phase 7's correction
+	// propagation is unverifiable without it: with no version named, there is
+	// nothing for a correction to supersede.
+	VersionID string `json:"version_id,omitempty"`
+}
+
+// KindFrozenContextMemory marks a receipt for ContextSpec.Memory, the static
+// prose Phase 5 carries on a frozen blueprint.
+const KindFrozenContextMemory = "frozen_context_memory"
+
+// Governed reports whether the receipt describes a stored memory record rather
+// than frozen configuration prose. Governed records must name their version.
+func (r MemoryReceipt) Governed() bool {
+	return r.Kind != "" && r.Kind != KindFrozenContextMemory
+}
+
+// Validate refuses a receipt that advertises more identity than it carries.
+//
+// This is the assertion that keeps RecordID and VersionID from being
+// decoration. A governed record whose VersionID is empty would otherwise
+// encode, verify and present exactly like one that named its version, letting
+// a store ship without version identity while every existing test stayed
+// green.
+func (r MemoryReceipt) Validate() error {
+	if r.Kind == "" {
+		return fmt.Errorf("memory receipt has no kind: a receipt must say what it is evidence of")
+	}
+	if !r.Governed() {
+		if r.RecordID != "" || r.VersionID != "" {
+			return fmt.Errorf("memory receipt of kind %q carries record_id %q and version_id %q: "+
+				"frozen configuration memory has no record identity, so naming one invents a "+
+				"version that no store can correct", r.Kind, r.RecordID, r.VersionID)
+		}
+		return nil
+	}
+	if r.RecordID == "" {
+		return fmt.Errorf("memory receipt of kind %q has no record_id: a governed record must "+
+			"identify its source", r.Kind)
+	}
+	if r.VersionID == "" {
+		return fmt.Errorf("memory receipt of kind %q for record %q has no version_id: without it "+
+			"a correction cannot supersede the version that was presented, which is the "+
+			"guarantee Phase 7 owes", r.Kind, r.RecordID)
+	}
+	return nil
 }
 
 // Route binds the presentation to the destination it was prepared for. The
@@ -158,7 +221,7 @@ func Prepare(req Request) (Artifact, error) {
 		artifact.Measurement = m
 	}
 	if memory := strings.TrimSpace(effect.Context.Memory); memory != "" {
-		artifact.MemoryReceipts = append(artifact.MemoryReceipts, MemoryReceipt{Kind: "frozen_context_memory",
+		artifact.MemoryReceipts = append(artifact.MemoryReceipts, MemoryReceipt{Kind: KindFrozenContextMemory,
 			EffectiveConfigSHA: req.EffectiveConfigSHA, ContentDigest: digest("arxi.context-memory/v1", []byte(memory))})
 	}
 	presentation, err := json.Marshal(artifact.Messages)
