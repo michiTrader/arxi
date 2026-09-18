@@ -150,6 +150,20 @@ process tests verify each advertised mode on every supported platform.
 
 ## Phase 5 — Canonical transcript and prepared context
 
+**Status:** implemented. `internal/transcript` projects the confirmed prefix
+into ordered items; `internal/contextprep` turns one projection into an
+immutable presentation. The barrier below is committed as real events
+(`kernel.ContextPrepareRequested`, `ContextPrepared`, `ContextPrepareFailed`,
+`ExecWorkPrepared`), specified in [`spec/events.md`](../spec/events.md), and
+enforced in `internal/exec`: a model child cannot start without a verified
+`context.prepared`, and `loadPreparedContext` reuses the committed bytes
+byte-for-byte rather than rebuilding them. Two values for one context ID, a
+digest that disagrees with its bytes, a changed source boundary, or a terminal
+`prepare_failed` are each refused rather than retried. Phase 6 builds directly
+on this barrier, so it could not have been implemented without it.
+
+The original phase text follows.
+
 Project confirmed events and immutable artifacts bound by them into transcript
 items covering user input, model output, tool calls/results, human decisions and
 referenced artifacts. Add a durable preparation barrier:
