@@ -54,6 +54,16 @@ Before expanding the public surface:
 configuration; unsupported provider capabilities fail explicitly; crash-boundary
 tests demonstrate that pending work is neither silently skipped nor invented.
 
+**Status:** implemented. `internal/runconfig.Publish` freezes the fully resolved
+configuration into an artifact published by hard link, so a run cannot acquire a
+different prompt, model or policy than the one it started under, and replay reads
+the same bytes. Unsupported provider shapes fail explicitly rather than decoding
+as empty text: `internal/provider/anthropic.go` rejects unknown content-block
+types and turns an unrecognized stop reason into an explicit refusal.
+`ReadConfirmed` in `internal/logstore` defines the confirmed-prefix boundary that
+background consumers read, withholding in-flight batches instead of exposing a
+partial one.
+
 ## Phase 1 — Public host and common application services
 
 Extract capability implementations from `cmd/arxi` behind a small versioned host
@@ -69,6 +79,21 @@ handshakes advertise installed and authorized handlers, not vocabulary alone.
 shelling out or importing `internal/`; the CLI and protocol exercise the same
 application service in contract tests.
 
+**Status:** implemented. `host/v1` is the versioned surface, with nine
+capabilities — `job.submit`, `job.inspect`, `job.cancel`, `decision.approve`,
+`decision.reject`, `decision.answer`, `job.wait`, `event.subscribe` and
+`job.recover` — and public ports for providers, tools, job storage and workspace
+provisioning that do not re-export kernel types. Handshakes advertise the
+installed and authorized set rather than vocabulary alone.
+
+One boundary is worth stating because it is load-bearing for Phase 8 and is not
+visible from the capability list: the protocol is served over a **unix socket**
+(`cmd/arxi/serve.go`), exposing five methods (`run.start`, `run.show`,
+`run.result`, `run.attach`, `run.cancel`). That is sufficient for a local client
+and insufficient for a remote or mobile one, so an out-of-process product adapter
+needs a transport decision that has not been made. The capability surface is not
+the constraint; the transport is.
+
 ## Phase 2 — Provider-neutral turns and native tool loops
 
 Introduce a canonical turn representation for text/content blocks, tool schemas,
@@ -83,6 +108,15 @@ must not leak into reducer contracts.
 **Exit evidence:** the fake provider requests one read-only tool, receives the
 result under the same call ID and completes the turn; Anthropic and OpenAI produce
 the same canonical events; denied calls never reach a runner.
+
+**Status:** implemented. `internal/turn` holds the canonical representation:
+roles, content blocks, media sources, tool definitions, tool calls and results,
+refusals, finish reasons, usage and a stream event vocabulary
+(`content_delta`, `usage`, `completed`, `canceled`). `turn.NewToolCall` binds a
+provider call ID to canonical arguments so a result cannot be matched to the
+wrong request. Native tool dispatch runs through `ClassifyToolDispatch` and
+`ExecuteTurnToolDispatch` in `internal/exec`, which is what keeps a
+model-requested tool inside the durable loop instead of beside it.
 
 ## Phase 3 — Durable jobs, attempts and scheduling
 
