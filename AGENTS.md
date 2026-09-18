@@ -255,8 +255,39 @@ activated. Weakening the test would have hidden a bug that costs real money.
 Requires Go 1.22.
 
 ```bash
+./scripts/verify.sh            # gofmt, vet, build and the suite -- the merge gate
+./scripts/verify.sh --race     # also under the race detector
+./scripts/verify.sh --audit    # also audit merged pull requests against main
+```
+
+Run `verify.sh` before proposing a merge. It collects failures rather than
+stopping at the first, so one run reports everything that is wrong, and it names
+the offending files and failing tests instead of a count.
+
+The individual commands, when you need one in isolation:
+
+```bash
 go build -o arxi ./cmd/arxi
 go vet ./... && gofmt -l .
 go test -count=1 ./...
 UPDATE_GOLDEN=1 go test ./internal/kernel   # regenerate golden fixtures
 ```
+
+### There is no GitHub Actions workflow, and that is a permission, not a choice
+
+The GitHub App this project is developed through cannot write
+`.github/workflows/`. Measured, not assumed — the push is refused with
+`refusing to allow a GitHub App to create or update workflow ... without
+'workflows' permission`.
+
+The refusal covers that directory only. A checked-in script elsewhere was never
+blocked, which is why the gate is `scripts/verify.sh`: the runner was missing,
+not the verification. That distinction went unreported for five turns while
+every check stayed manual — a blocker verified at its narrowest point and then
+generalised to the whole capability, which is the failure shape this repository
+keeps finding in its own documents.
+
+**Nothing runs automatically.** Until somebody with `workflows` permission adds
+the YAML, a green result exists only if a human or an agent ran the script and
+said so. When that YAML is added, it should call `scripts/verify.sh` rather than
+restate the checks: two copies of a check list is how the list drifts.
