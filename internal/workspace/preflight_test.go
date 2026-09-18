@@ -6,13 +6,26 @@ import (
 	"testing"
 )
 
-func TestPreflightRefusesUnimplementedSourceProvisioners(t *testing.T) {
-	for _, mode := range []Mode{ModeCopy, ModeWorktree} {
-		_, err := Preflight([]Requirement{{Schema: SchemaV1, Member: "writer", Mode: mode,
-			FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID}}, CurrentCapabilities("linux"))
-		if err == nil || !strings.Contains(err.Error(), "does not provide") {
-			t.Errorf("%s preflight error = %v: a nominal per-member directory is not a source snapshot or Git worktree; refuse until that provisioner exists", mode, err)
-		}
+// TestPreflightRefusesUnadvertisedSourceLayouts covers worktree only.
+//
+// It used to cover copy as well, on the grounds that no production
+// provisioner existed for either. That is no longer true for copy: the
+// git-layout provisioner materializes a tracked-tree snapshot, and its
+// behaviour has been audited rather than assumed -- no control plane in the
+// root, no inode shared with the source, writes confined to the snapshot and
+// discarded on release (ADR-0019 cites the tests).
+//
+// worktree stays refused for a reason that has nothing to do with a missing
+// provisioner: its root carries a gitdir: pointer into the operator's
+// repository (ADR-0018). The layout works; what is unadvertised is the
+// promise, which is the distinction ADR-0012 exists to keep visible.
+func TestPreflightRefusesUnadvertisedSourceLayouts(t *testing.T) {
+	_, err := Preflight([]Requirement{{Schema: SchemaV1, Member: "writer", Mode: ModeWorktree,
+		FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID}}, CurrentCapabilities("linux"))
+	if err == nil || !strings.Contains(err.Error(), "does not provide") {
+		t.Errorf("worktree preflight error = %v: the layout is implemented, but its root holds a "+
+			"gitdir: pointer into the operator's repository, so advertising it would promise a "+
+			"tracked tree and deliver a control plane as well", err)
 	}
 }
 
@@ -32,7 +45,8 @@ func TestCurrentCapabilitiesAdvertiseExactlyTheADR0017Matrix(t *testing.T) {
 		profiles []string
 	}{
 		{platform: "windows", modes: []Mode{ModeNone}, profiles: []string{NoToolsProfileID}},
-		{platform: "linux", modes: []Mode{ModeNone, ModeShared}, profiles: []string{NoToolsProfileID, DirectFilesReadProfileID}},
+		{platform: "linux", modes: []Mode{ModeNone, ModeShared, ModeCopy},
+			profiles: []string{NoToolsProfileID, DirectFilesReadProfileID, DirectFilesProfileID}},
 		{platform: "simulation", modes: []Mode{ModeNone, ModeShared, ModeCopy, ModeWorktree},
 			profiles: []string{NoToolsProfileID, DirectFilesReadProfileID, DirectFilesProfileID, ContainedProcessProfileID}},
 	} {
@@ -56,16 +70,39 @@ func TestCurrentCapabilitiesAdvertiseExactlyTheADR0017Matrix(t *testing.T) {
 		if tc.platform == "linux" {
 			read := capabilities.Profiles[1]
 			if read.FileAccess != FileAccessRead || !read.HandleRelative || !read.FinalLinkRaceFree {
-				t.Errorf("Linux read-only profile = %#v: shared availability promises handle-relative, final-link-race-free READ access; anything stronger reopens shared+write", read)
+				t.Errorf("Linux read-only profile = %#v: shared availability promises handle-relative, final-link-race-free READ access", read)
 			}
-			if capabilities.Provisioners[ModeShared] != GitLayoutProvisionerV1 {
-				t.Errorf("Linux shared provisioner = %q, want %q: an advertised mode without its real provisioner version is availability with no machinery behind it", capabilities.Provisioners[ModeShared], GitLayoutProvisionerV1)
+			write := capabilities.Profiles[2]
+			if write.FileAccess != FileAccessWrite || !write.HandleRelative || !write.FinalLinkRaceFree {
+				t.Errorf("Linux write profile = %#v: ADR-0019 advertises write only with the same "+
+					"handle-relative, final-link-race-free guarantees the read profile makes; a "+
+					"write profile promising less would be a weaker contract under the same name", write)
+			}
+			for _, mode := range []Mode{ModeShared, ModeCopy} {
+				if capabilities.Provisioners[mode] != GitLayoutProvisionerV1 {
+					t.Errorf("Linux %s provisioner = %q, want %q: an advertised mode without its real provisioner version is availability with no machinery behind it", mode, capabilities.Provisioners[mode], GitLayoutProvisionerV1)
+				}
+			}
+			// The pairing is the load-bearing part of ADR-0019: both layouts
+			// and both file profiles are advertised now, so without it the
+			// cross product would offer write over the operator's shared tree.
+			if offered := capabilities.Pairs[ModeShared]; len(offered) != 1 || offered[0] != DirectFilesReadProfileID {
+				t.Errorf("Linux offers %v with shared, want only %q: advertising the write profile "+
+					"for copy must not make the operator's shared tree writable (ADR-0017)",
+					offered, DirectFilesReadProfileID)
 			}
 		}
 	}
 }
 
-func TestLinuxPreflightAcceptsReadersAndRefusesEveryWriteCombination(t *testing.T) {
+// TestLinuxPreflightAcceptsFileWorkAndStillRefusesTheSharedTreeAndProcesses
+// replaces the ADR-0017-era test that asserted EVERY write was refused.
+//
+// That assertion was correct until ADR-0019 and is now false by decision: a
+// file-only writer over copy is accepted. What survives unchanged is what
+// ADR-0017 actually protects -- the operator's shared tree stays read-only --
+// plus the process boundary, which no platform decision has moved.
+func TestLinuxPreflightAcceptsFileWorkAndStillRefusesTheSharedTreeAndProcesses(t *testing.T) {
 	caps := CurrentCapabilities("linux")
 
 	requirements, err := Resolve(ResolutionInput{Members: []Member{{Name: "reader", Tools: []string{"read", "grep"}}}})
@@ -74,12 +111,11 @@ func TestLinuxPreflightAcceptsReadersAndRefusesEveryWriteCombination(t *testing.
 	}
 	decisions, err := Preflight(requirements, caps)
 	if err != nil {
-		t.Fatalf("read/grep requirement refused against Linux capabilities: %v\n"+
-			"  ADR-0017 exists to make this the one accepted source-backed combination; "+
-			"refusing it here blocks the read-only milestone on every platform", err)
+		t.Fatalf("read/grep requirement refused against Linux capabilities: %v", err)
 	}
 	if decisions[0].ProfileID != DirectFilesReadProfileID {
-		t.Fatalf("reader decision profile = %q, want %q: a reader accepted with the write-capable profile would make read-only a grant accident", decisions[0].ProfileID, DirectFilesReadProfileID)
+		t.Fatalf("reader decision profile = %q, want %q: a reader accepted with the write-capable "+
+			"profile would make read-only a grant accident", decisions[0].ProfileID, DirectFilesReadProfileID)
 	}
 
 	for _, tc := range []struct {
@@ -90,63 +126,95 @@ func TestLinuxPreflightAcceptsReadersAndRefusesEveryWriteCombination(t *testing.
 		{name: "write requirement over the read-only profile",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeShared, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesReadProfileID},
 			fragment:    "provides read"},
-		{name: "shared writer resolves to the unadvertised write-capable profile",
+		// The case that matters most after ADR-0019. Both the shared layout
+		// and the write profile are advertised now, so ONLY the pairing
+		// refuses this. Before Pairs existed it would have been accepted.
+		{name: "the operator's shared tree is still not writable",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeShared, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
-			fragment:    "does not provide"},
-		{name: "worktree writer mode is unadvertised",
+			fragment:    "does not offer that combination"},
+		{name: "worktree remains unadvertised, so its gitdir: pointer is unreachable",
 			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeWorktree, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
 			fragment:    "does not provide"},
-		{name: "copy writer mode is unadvertised",
-			requirement: Requirement{Schema: SchemaV1, Member: "writer", Mode: ModeCopy, FileAccess: FileAccessWrite, RequiresSource: true, ProfileID: DirectFilesProfileID},
+		{name: "contained-process remains unadvertised",
+			requirement: Requirement{Schema: SchemaV1, Member: "runner", Mode: ModeCopy, FileAccess: FileAccessWrite, RequiresSource: true, RequiresBash: true, ProfileID: ContainedProcessProfileID},
 			fragment:    "does not provide"},
 	} {
 		_, err := Preflight([]Requirement{tc.requirement}, caps)
 		if err == nil || !strings.Contains(err.Error(), tc.fragment) {
 			t.Errorf("%s: preflight error = %v\n"+
-				"  every path to a writable view on Linux must be refused at acceptance; "+
-				"the read-only promise only holds if no accepted combination can write", tc.name, err)
+				"  ADR-0019 widened Linux to file-only writes over copy and nothing else; each "+
+				"case here is a boundary that widening must not have moved", tc.name, err)
 		}
+	}
+
+	// And the combination the decision exists to offer.
+	accepted, err := Resolve(ResolutionInput{Members: []Member{{Name: "writer", Tools: []string{"read", "write", "edit"}}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if _, err := Preflight(accepted, caps); err != nil {
+		t.Fatalf("a file-only writer was refused on Linux: %v\n"+
+			"  ADR-0019 advertises copy with the write-capable profile precisely so this is "+
+			"accepted; if it is refused the decision is not in effect", err)
 	}
 }
 
-// TestNoToolConfigurationResolvesToAnAcceptedWriteOnLinux pins the ADR-0017
-// guarantee end to end, through Resolve rather than around it.
+// TestEveryToolConfigurationLandsOnTheSideOfTheLineADR0019Drew walks real
+// tool lists through Resolve and checks each against the boundary, rather
+// than against a remembered assumption about which layout resolution picks.
 //
-// The table above hand-builds requirements, which is right for proving that
-// specific mode/profile pairs are refused -- but it means the cases are
-// hypothetical. It asserts that a worktree write requirement is refused; it
-// never asks what a writer ACTUALLY resolves to. When file-only writers moved
-// from worktree to copy, nothing here failed, and a comment in model.go went
-// on describing a refusal path that was no longer the one being taken. The
-// guarantee held by luck of copy also being unadvertised, not by a check.
+// Its ancestor asserted that EVERY write configuration was refused. That was
+// right under ADR-0017 and is now wrong by decision, but the reason it
+// existed survives: when file-only writers moved from worktree to copy,
+// nothing failed, because the guarantee was held by copy happening to be
+// unadvertised rather than by a check. Driving real tool lists through
+// Resolve is what makes this insensitive to that mapping.
 //
-// So this drives real tool lists through Resolve and requires that every
-// configuration able to write is refused by Preflight. It cannot be satisfied
-// by a stale assumption about which layout resolution picks: change the
-// mapping however you like, and this still demands that the result be refused
-// until a platform decision advertises it.
-func TestNoToolConfigurationResolvesToAnAcceptedWriteOnLinux(t *testing.T) {
+// The line ADR-0019 draws is file access, not write access: a member that
+// only touches files is accepted, a member that can start a process is not,
+// because every process guarantee is still "unavailable".
+func TestEveryToolConfigurationLandsOnTheSideOfTheLineADR0019Drew(t *testing.T) {
 	caps := CurrentCapabilities("linux")
-	for _, tools := range [][]string{
-		{"write"},
-		{"edit"},
-		{"write", "edit"},
-		{"read", "write"},
-		{"grep", "edit"},
-		{"bash"},
-		{"read", "bash"},
-		{"write", "bash"},
+	for _, tc := range []struct {
+		tools    []string
+		accepted bool
+	}{
+		{tools: []string{"read"}, accepted: true},
+		{tools: []string{"read", "grep"}, accepted: true},
+		{tools: []string{"write"}, accepted: true},
+		{tools: []string{"edit"}, accepted: true},
+		{tools: []string{"write", "edit"}, accepted: true},
+		{tools: []string{"read", "write"}, accepted: true},
+		{tools: []string{"grep", "edit"}, accepted: true},
+
+		// bash resolves to worktree AND the contained-process profile, so it
+		// is refused twice over. Neither refusal is incidental: the layout
+		// carries the operator's gitdir: pointer, and the profile claims
+		// descendant, filesystem, environment and network guarantees that no
+		// adapter enforces.
+		{tools: []string{"bash"}, accepted: false},
+		{tools: []string{"read", "bash"}, accepted: false},
+		{tools: []string{"write", "bash"}, accepted: false},
 	} {
-		requirements, err := Resolve(ResolutionInput{Members: []Member{{Name: "w", Tools: tools}}})
+		requirements, err := Resolve(ResolutionInput{Members: []Member{{Name: "w", Tools: tc.tools}}})
 		if err != nil {
-			// Resolution refusing outright is an acceptable refusal too.
+			if tc.accepted {
+				t.Errorf("tools %v were refused by Resolve: %v", tc.tools, err)
+			}
 			continue
 		}
-		if _, err := Preflight(requirements, caps); err == nil {
-			t.Errorf("tools %v resolved to mode %q with profile %q and PASSED Linux preflight: "+
-				"ADR-0017 promises that no accepted combination on Linux can write, and this "+
-				"configuration would now run with a writable view that no platform decision has "+
-				"proven", tools, requirements[0].Mode, requirements[0].ProfileID)
+		_, err = Preflight(requirements, caps)
+		if tc.accepted && err != nil {
+			t.Errorf("tools %v resolved to mode %q with profile %q and were REFUSED: %v\n"+
+				"  ADR-0019 accepts file-only work on Linux; refusing it means the decision is "+
+				"not in effect", tc.tools, requirements[0].Mode, requirements[0].ProfileID, err)
+		}
+		if !tc.accepted && err == nil {
+			t.Errorf("tools %v resolved to mode %q with profile %q and were ACCEPTED.\n"+
+				"  ADR-0019 deliberately stops at files: this configuration can start a process, "+
+				"and descendants, filesystem, environment and network are all still "+
+				"\"unavailable\", so nothing has proven what it would be contained by",
+				tc.tools, requirements[0].Mode, requirements[0].ProfileID)
 		}
 	}
 }

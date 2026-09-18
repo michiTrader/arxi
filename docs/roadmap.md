@@ -111,17 +111,21 @@ platform decisions, source identity and pre-accept prepared/started/finished
 lifecycle fail closed and survive recovery.
 
 Native availability remains deliberately narrower than the internal adapters and
-tests. Windows advertises only `none` with `no-tools`. Since ADR-0017 Linux
-advertises that pair plus `shared` paired exclusively with the read-only
-`direct-files-read` profile: a read/grep member forms the one accepted
-file-using combination, the write-capable `direct-files` profile left the Linux
-advertisement, file-only writers resolve to `copy` and `bash` users to
-`worktree` (ADR-0018), and no accepted combination on Linux can write — the
-load-bearing refusal being that no advertised Linux profile provides write
-access, which holds whatever layout a writer resolves to. Native `copy`,
-`worktree` and `contained-process`, and every
-native writable source-backed combination, are not advertised on either
-platform. Their internal
+tests. Windows advertises only `none` with `no-tools`. Linux advertises that
+pair plus `shared` with the read-only `direct-files-read` profile (ADR-0017)
+and `copy` with the write-capable `direct-files` profile (ADR-0019), so
+read/grep and write/edit members both form accepted file-using combinations.
+The layout is what separates them: reads may see the operator's frozen tree,
+writes land in a per-member snapshot and never reach it. That separation is a
+stated pairing rather than a consequence of which profiles happen to be
+advertised.
+
+The line is file access, not write access. `bash` is refused on both counts —
+it resolves to `worktree`, unadvertised because its root holds a `gitdir:`
+pointer into the operator's repository (ADR-0018), and to
+`contained-process`, which no platform advertises while descendants,
+filesystem, environment and network remain unavailable. Native `worktree` and
+`contained-process` are not advertised on either platform. Their internal
 implementations and negative tests are evidence toward the contract, not a claim
 that production provisioners are generally available. They remain preflight
 unavailable until the production capability decision can guarantee source,

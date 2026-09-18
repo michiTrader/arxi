@@ -61,18 +61,24 @@ complete native path can enforce:
 | platform | modes | profiles | accepted source-backed combination |
 |---|---|---|---|
 | Windows | `none` | `no-tools` | none |
-| Linux | `none`, `shared` | `no-tools`, `direct-files-read` | `shared` + `direct-files-read` (read-only) |
+| Linux | `none`, `shared`, `copy` | `no-tools`, `direct-files-read`, `direct-files` | `shared` + `direct-files-read` (read-only); `copy` + `direct-files` (writable snapshot) |
 
 Linux direct-file operations can provide handle-relative, final-link-race-free
 access. Since ADR-0017 Linux advertises `shared` paired exclusively with the
-read-only `direct-files-read` profile: a read/grep requirement forms the one
-accepted source-backed combination, file-only write requirements resolve to
-`copy` and `bash` to `worktree` — both unadvertised — and no accepted
-combination on Linux can write. The write-capable `direct-files` profile stays
-off the Linux advertisement; it remains available to writers and simulation.
-Neither platform advertises `contained-process`. Simulation may exercise every
-mode and profile, but that is simulation behavior and not a production
-isolation claim.
+read-only `direct-files-read` profile, and since ADR-0019 it also advertises
+`copy` with the write-capable `direct-files` profile. So a read/grep member
+and a write/edit member both form accepted source-backed combinations, and
+the layout each lands on is what separates them: reads may see the operator's
+frozen tree, writes may not. Writing `shared` stays refused — the pairing
+below is what refuses it, now that both profiles are advertised.
+
+The line is file access, not write access. `bash` remains refused on both
+counts: it resolves to `worktree`, which is unadvertised because its root
+holds a `gitdir:` pointer into the operator's repository (ADR-0018), and to
+`contained-process`, which no platform advertises because descendants,
+filesystem, environment and network are all still unavailable. Simulation may
+exercise every mode and profile, but that is simulation behavior and not a
+production isolation claim.
 
 An advertisement carries a set of layouts, a set of profiles, and optionally a
 pairing naming which profiles are offered with which layout. Acceptance checks

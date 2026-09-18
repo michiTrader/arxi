@@ -65,10 +65,25 @@ func TestTheDocumentedLinuxAdvertisementStaysTrue(t *testing.T) {
 			"ADR-0017 was reverted or superseded, so re-derive the claims this test pins "+
 			"before trusting it again", DirectFilesReadProfileID, advertisesShared, readOnly)
 	}
-	if writable {
-		t.Errorf("Linux advertises the write-capable %s profile: ADR-0017 removed it so that "+
-			"no accepted Linux combination can write, and every document pinned below still "+
-			"tells the reader that writable file-using runs fail preflight", DirectFilesProfileID)
+	// Under ADR-0017 this asserted the write-capable profile was ABSENT.
+	// ADR-0019 advertises it for copy, so the assertion inverted: what must
+	// stay true is no longer that writes are impossible, but that the write
+	// profile reaches only the snapshot layout. The pairing carries that, so
+	// the pairing is what gets checked.
+	if !writable {
+		t.Errorf("Linux no longer advertises the write-capable %s profile.\n"+
+			"  ADR-0019 was reverted or superseded. That is allowed, but the documents pinned "+
+			"below now describe an accepted file-only writer that does not exist, so re-derive "+
+			"them before trusting this test again", DirectFilesProfileID)
+	}
+	for _, offered := range linux.Pairs[ModeShared] {
+		if offered == DirectFilesProfileID {
+			t.Errorf("Linux offers the write-capable %s profile with the SHARED layout.\n"+
+				"  ADR-0017 keeps the operator's tree read-only and ADR-0019 did not change "+
+				"that: the write profile exists for the copy snapshot only. Every document "+
+				"pinned below tells the reader the shared view cannot be written",
+				DirectFilesProfileID)
+		}
 	}
 
 	// Claims that were true before ADR-0017 and are false now. Each is matched

@@ -149,32 +149,39 @@ func TestAPairingThatNamesSomethingUnadvertisedIsRefused(t *testing.T) {
 
 // TestLinuxNowPairsByRuleRatherThanByArithmetic is the native half.
 //
-// ADR-0017's "shared only with the read-only profile" was previously true
-// because the advertisement was 1x1. It is now stated. The distinction is only
-// observable by widening the lists, which is what this does.
+// When it was written, Linux advertised one layout and one profile, so it had
+// to SIMULATE the widening the writer decision would bring. ADR-0019 made
+// that widening real, so the test now asserts against the live
+// advertisement: no simulation, no synthesised profile, nothing that could
+// pass while production differs.
+//
+// The property is the one that survives every future widening: both file
+// profiles are advertised, so the only thing keeping the operator's shared
+// tree read-only is the pairing. Delete Pairs and this fails.
 func TestLinuxNowPairsByRuleRatherThanByArithmetic(t *testing.T) {
 	linux := CurrentCapabilities("linux")
 	if linux.Pairs == nil {
-		t.Fatal("the Linux advertisement states no pairs, so shared+read-only is still true only " +
-			"because the product happens to be 1x1")
+		t.Fatal("the Linux advertisement states no pairs, so with two layouts and two file " +
+			"profiles advertised every combination of them is accepted -- including write over " +
+			"the operator's shared tree")
 	}
 
-	// Widen exactly as the pending writer decision would, WITHOUT extending
-	// the pairing. The new profile must not become available on shared.
-	linux.Modes = append(linux.Modes, ModeCopy)
-	linux.Provisioners[ModeCopy] = GitLayoutProvisionerV1
-	linux.Profiles = append(linux.Profiles, Profile{Schema: ProfileSchemaV1, ID: DirectFilesProfileID,
-		FileAccess: FileAccessWrite, HandleRelative: true, FinalLinkRaceFree: true,
-		Process: ProcessProfile{Descendants: "unavailable", Filesystem: "unavailable", Environment: "unavailable", Network: "unavailable"}})
-	linux.Pairs[ModeCopy] = []string{DirectFilesProfileID}
+	// Guard against passing vacuously: with a 1x1 advertisement there is no
+	// second pairing to get wrong, and this test would prove nothing.
+	if len(linux.Modes) < 3 || len(linux.Profiles) < 3 {
+		t.Fatalf("Linux advertises %d modes and %d profiles: this test is only meaningful once "+
+			"more than one layout and one file profile are offered",
+			len(linux.Modes), len(linux.Profiles))
+	}
 
 	if _, err := Preflight(requirement(ModeCopy, FileAccessWrite, DirectFilesProfileID), linux); err != nil {
-		t.Fatalf("the widened advertisement refuses the combination it was widened for: %v", err)
+		t.Fatalf("Linux refuses write over copy, the combination ADR-0019 advertises: %v", err)
 	}
 	if err := Preflight2Err(t, linux, requirement(ModeShared, FileAccessWrite, DirectFilesProfileID)); err == nil {
-		t.Fatal("advertising copy+write also made shared writable.\n" +
-			"  This is the exact regression the writer decision would have shipped before pairs " +
-			"existed: ADR-0017 removed the write-capable profile from Linux so that no accepted " +
-			"combination could write, and re-adding it for copy would have re-opened shared")
+		t.Fatal("the operator's shared tree is writable.\n" +
+			"  Both the shared layout and the write-capable profile are advertised, so nothing " +
+			"but the pairing separates them. This is the regression ADR-0019 would have shipped " +
+			"before Pairs existed: ADR-0017 kept shared read-only by omitting the write profile " +
+			"entirely, and advertising it for copy re-opens shared unless a rule says otherwise")
 	}
 }

@@ -1624,7 +1624,7 @@ unrecoverable:
 |---|---|
 | `deny` | `tool.call_denied`. Nothing runs, and the log records why. |
 | `ask` | `tool.call_denied` with `policy: ask`, which the reducer turns into an inbox item plus a `blocked_ref`. Per `spec/events.md` this is **not an error, it is a question**. |
-| `allow` | Runs only when the frozen workspace mode/profile passed native preflight. Since ADR-0017 Linux advertises `shared` with the read-only `direct-files-read` profile, so read/grep is accepted there and the session refuses mutating tools; no writable source-backed mode is advertised, and Windows advertises no direct-file profile. Native `bash` has no advertised contained-process profile. Unsupported combinations stop before `run.started`; `tool.call_completed` exists only after a genuinely available runner returns. |
+| `allow` | Runs only when the frozen workspace mode/profile passed native preflight. Linux advertises `shared` with the read-only `direct-files-read` profile (ADR-0017) and `copy` with the write-capable `direct-files` profile (ADR-0019), so read/grep and write/edit are both accepted there; writes land in a per-member snapshot and the operator's shared tree stays read-only. Windows advertises no direct-file profile. Native `bash` has no advertised contained-process profile on any platform. Unsupported combinations stop before `run.started`; `tool.call_completed` exists only after a genuinely available runner returns. |
 
 The `allow` row is narrower than it sounds, and the reason is worth stating.
 Because a granted *mutating* tool resolves to `ask`, `bash`, `write` and `edit`
