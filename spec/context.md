@@ -126,11 +126,26 @@ A prepared context contains:
 - overflow decision;
 - content digest and presentation digest.
 
-The stable layer order is identity, situation, frozen memory, shared context,
-prior transcript, then current causes and input. Transcript content remains
-role/content-block structured and is not flattened into prose. Provider adapters
-translate this presentation at the edge but cannot select, reorder or reconstruct
-it.
+The stable layer order is identity, situation and shared context, then frozen
+memory, then prior transcript, then current causes and input. Transcript content
+remains role/content-block structured and is not flattened into prose. Provider
+adapters translate this presentation at the edge but cannot select, reorder or
+reconstruct it.
+
+Identity, situation and shared context form one system message: they are what
+the operator authored. Frozen memory is a separate **user-role** message and is
+never merged into the system message (ADR-0020). The system channel is a
+structural grant of authority, and memory content is data; a record that arrived
+through the system channel would carry the operator's authority regardless of
+its recorded provenance, which is the property Phase 7 exists to establish.
+
+A second system message is not an acceptable substitute, and the reason is not
+visible in this specification's own vocabulary: the Anthropic adapter
+concatenates every system message into one string, so the separation would
+exist in the preparer and be absent on the wire. The role is what carries the
+guarantee; the `Memory:` label is legibility, not a boundary, because a record
+can contain those same bytes. Both messages remain in the **static** layer for
+measurement and budgeting — only the channel differs.
 
 The content digest binds provider-neutral semantic material and source identity.
 The presentation digest binds exact canonical message bytes, including order and
@@ -164,6 +179,11 @@ Phase 5 records frozen `ContextSpec.Memory` as a receipt bound to its field iden
 and effective-config digest. The receipt list is empty when no memory contributes.
 Semantic retrieval, ranking, autonomous memory and cross-run scope belong to Phase
 7 and are not performed here.
+
+The receipt is evidence, not containment: it proves what was presented, while
+the user-role channel above decides what authority the presented material
+carries. The two were once conflated, and separating them is what keeps Phase 7
+from re-solving a problem that was already solved.
 
 ## Pressure, budgets and compaction
 
