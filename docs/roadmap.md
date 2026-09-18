@@ -228,6 +228,16 @@ every influence identifies its source and version; stale versions stop appearing
 after correction; deletion propagates through content, indexes, summaries, caches
 and unused prepared contexts without resurrection.
 
+**Status:** not started; the store, retrieval and deletion lineage do not exist.
+One prerequisite is already settled: ADR-0020 decided the channel retrieved
+memory arrives on, and the preparer presents it as a user-role message rather
+than folding it into the system message. That was done ahead of the phase on
+purpose — the presentation shape is the expensive thing to change once prepared
+contexts have been committed against it, and settling it first is what lets the
+retrieval decision be about retrieval. Record identity, scope, temporal
+validity, authority and deletion lineage remain undecided and still need their
+own record (item 7 below).
+
 ## Phase 8 — First useful Asha vertical slice
 
 Build Asha as an external product adapter with authenticated text and push-to-talk.

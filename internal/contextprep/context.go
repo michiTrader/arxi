@@ -303,6 +303,27 @@ func inputMessages(context kernel.ContextSpec, prior []turn.Message) []turn.Mess
 	return []turn.Message{textMessage(turn.RoleUser, "Proceed.")}
 }
 
+// staticMessages renders the frozen framing: what the operator authored, and
+// what memory supplied, as two different kinds of thing.
+//
+// The system message carries only operator-authored material — identity,
+// situation, shared instructions. Memory occupies its own user-role message
+// (ADR-0020), because the system channel is a structural grant of authority
+// and memory content is data. It previously shared the system message, which
+// meant a Phase 7 record would have arrived carrying the authority of "You are
+// backend." no matter what its recorded provenance said.
+//
+// The user role rather than a second system message, and this is the part that
+// is not obvious from here: internal/provider/anthropic.go concatenates EVERY
+// system message into one `System` string. A second system message would look
+// separated in this function and arrive fused on the wire — the appearance of
+// a boundary with none of the effect. internal/provider/memory_channel_test.go
+// pins that, because it is invisible at this layer.
+//
+// Both messages stay in the STATIC layer. Memory is still frozen blueprint
+// prose measured against the static budget; only its channel changed. Moving
+// it to another layer would have silently re-cut the budget quarters while
+// claiming to be a channel change.
 func staticMessages(context kernel.ContextSpec) []turn.Message {
 	var system strings.Builder
 	if context.Identity != "" {
@@ -311,20 +332,30 @@ func staticMessages(context kernel.ContextSpec) []turn.Message {
 		system.WriteString(".\n")
 	}
 	writeSection(&system, "Situation", context.Situation)
-	if memory := strings.TrimSpace(context.Memory); memory != "" {
-		if system.Len() > 0 {
-			system.WriteString("\n")
-		}
-		system.WriteString("Memory:\n")
-		system.WriteString(memory)
-		system.WriteString("\n")
-	}
 	writeSection(&system, "Shared", context.Shared)
 	var messages []turn.Message
 	if text := strings.TrimSpace(system.String()); text != "" {
 		messages = append(messages, textMessage(turn.RoleSystem, text))
 	}
+	if memory := strings.TrimSpace(context.Memory); memory != "" {
+		messages = append(messages, textMessage(turn.RoleUser, memoryMessageText(memory)))
+	}
 	return messages
+}
+
+// memoryMessageText labels the memory message for a reader without pretending
+// the label is a security boundary.
+//
+// The prefix is a courtesy to the model, not a control: a record can contain
+// the same words, which is exactly why ADR-0020 discarded delimiter-based
+// marking inside the system message and moved the channel instead. The
+// guarantee comes from the role; this text only makes the message legible.
+func memoryMessageText(memory string) string {
+	var b strings.Builder
+	b.WriteString("Memory:\n")
+	b.WriteString(memory)
+	b.WriteString("\n")
+	return b.String()
 }
 
 func transcriptMessages(items []transcript.Item) []turn.Message {

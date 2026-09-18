@@ -42,8 +42,27 @@ func TestPrepareOrdersStaticContextBeforeCanonicalHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(artifact.Messages) != 4 || artifact.Messages[0].Role != turn.RoleSystem || artifact.Messages[1].Role != turn.RoleUser || artifact.Messages[2].Role != turn.RoleAssistant || artifact.Messages[3].Role != turn.RoleUser {
+	// Five messages, not four: this fixture supplies memory, and under
+	// ADR-0020 memory is its own user-role message instead of a paragraph
+	// inside the system message. The guarantee under test is unchanged --
+	// the frozen static layer still prefixes canonical history, and the
+	// presentation still ends on a user message so provider requests stay
+	// valid -- so the sequence is asserted rather than just the count.
+	wantRoles := []turn.Role{
+		turn.RoleSystem,    // operator-authored framing
+		turn.RoleUser,      // memory, on the data channel
+		turn.RoleUser,      // history: "continue"
+		turn.RoleAssistant, // history: "prior answer"
+		turn.RoleUser,      // this turn's input
+	}
+	if len(artifact.Messages) != len(wantRoles) {
 		t.Fatalf("prepared roles = %#v: stable context must prefix canonical history and a final user instruction must keep provider requests valid", artifact.Messages)
+	}
+	for i, want := range wantRoles {
+		if artifact.Messages[i].Role != want {
+			t.Fatalf("prepared message %d role = %q, want %q (full presentation %#v): stable context must prefix canonical history and a final user instruction must keep provider requests valid",
+				i, artifact.Messages[i].Role, want, artifact.Messages)
+		}
 	}
 	if artifact.Measurement.Mode != "estimate" {
 		t.Fatalf("measurement mode = %q: a rune upper bound is not an exact tokenizer and must never claim otherwise", artifact.Measurement.Mode)
