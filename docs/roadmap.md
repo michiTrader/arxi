@@ -87,12 +87,30 @@ provisioning that do not re-export kernel types. Handshakes advertise the
 installed and authorized set rather than vocabulary alone.
 
 One boundary is worth stating because it is load-bearing for Phase 8 and is not
-visible from the capability list: the protocol is served over a **unix socket**
-(`cmd/arxi/serve.go`), exposing five methods (`run.start`, `run.show`,
-`run.result`, `run.attach`, `run.cancel`). That is sufficient for a local client
-and insufficient for a remote or mobile one, so an out-of-process product adapter
-needs a transport decision that has not been made. The capability surface is not
-the constraint; the transport is.
+visible from the capability list: the protocol is served over **stdio or a unix
+socket** (`cmd/arxi/serve.go`). Stdio is the default — `arxi serve` with no
+`--listen` speaks NDJSON over stdin/stdout — and the socket is the opt-in,
+because stdio needs no path, no mode and no stale-file cleanup when a parent
+process owns both ends.
+
+Which one is the default matters for what can be built today. A local client
+does not need a transport decision at all: it execs the binary and reads lines.
+That makes a terminal UI reachable now against the ten methods the handshake
+implements (`run.start`, `run.show`, `run.result`, `run.attach`, `run.cancel`,
+`blueprint.validate`, `schema`, and `inbox.approve` / `inbox.reject` /
+`inbox.reply` — the last three being the approvals an `ask`-policy tool will
+request). A remote or mobile client still needs a transport that has not been
+decided. The capability surface is not the constraint; the transport is, and
+only for out-of-process consumers that are not local.
+
+This paragraph replaces an earlier version of itself that said "unix socket"
+and "five methods", both measured only against the single `net.Listen` call in
+the tree. `serve.go` states the stdio default in a comment two functions above
+that call, so the error was reading one site and generalizing rather than
+missing information. It is recorded here instead of quietly fixed because it is
+the same half-measured-claim shape the rest of this document keeps correcting,
+and the distinction it got wrong is precisely the one that decides whether a
+local client is blocked or unblocked.
 
 ## Phase 2 — Provider-neutral turns and native tool loops
 
@@ -363,9 +381,43 @@ exists, never what it says. ADR-0026 derives the pairs from the corpus on every
 run and fails when a phase omits a decision that claimed it, so the citation
 cannot silently age again.
 
-Temporal validity, ranking and deletion lineage remain
-undecided and still need their own record (item 7 below). The store itself does
-not exist.
+The store now exists. ADR-0027 builds it, and it was reached by measuring the
+seven prerequisites above rather than by planning from them: all seven are rules
+about a receipt, and a probe of the production build found nothing that could
+produce one. `KindApprovedMemoryRecord` had zero construction sites outside
+tests, `MemoryReceipt.RecordID` was assigned in production zero times, and the
+only receipt any code path emitted was `frozen_context_memory`. The channel was
+a finished pipe with nothing flowing through it, so the version rule, the
+vocabulary and the authority enumeration were reachable only from tests.
+
+That measurement also explains the user-visible symptom that prompted it — an
+agent remembers nothing between runs — and the cause is structural rather than a
+missing feature. A run's truth is its event log (ADR-0002) and a log is per-run
+by construction, so nothing inside a run directory can be read by a run that
+does not exist yet. `ContextSpec.Memory` is frozen blueprint prose, identical
+for every run of that blueprint; `ContextSpec.Shared` is within-run team
+material; and `run fork` copies a parent's prefix, which is continuation of one
+history rather than recall across histories. None of the three is a memory.
+
+`internal/memorystore` holds immutable content-addressed versions outside every
+run, derives the current version by walking supersession rather than trusting a
+flag, deletes by tombstone so deletion survives replication, and authorizes
+before ranking because a relevance score computed across tenants is itself a
+cross-tenant inference. `contextprep.Request` accepts the retrieved text and its
+receipts, which pass the same validation the frozen receipt does. Phase 7's exit
+evidence is now testable end to end: cross-scope leakage, correction
+propagation, deletion without resurrection and per-influence identification each
+have a witness that fails when its mechanism is removed.
+
+Two gaps are deliberate rather than pending. **Retrieval is not wired into
+`internal/exec`**: which principals a run is authorized for is an identity
+question, and the boundary above assigns identity, authentication and consent to
+Asha, so wiring it now would mean inventing a principal from whatever the run
+happens to know — the class of guess ADR-0022 exists to stop. **Temporal
+validity, evidence class, confidence, sensitivity, purpose and retention are not
+implemented** and still need their own record (item 7 below); adding them as
+struct fields with nothing authorizing them would be the "field nothing fails
+on" defect this corpus has now recorded four times.
 
 ## Phase 8 — First useful Asha vertical slice
 
