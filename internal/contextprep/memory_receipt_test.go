@@ -116,6 +116,13 @@ func TestPhase5ReceiptEncodesWithoutTheNewKeys(t *testing.T) {
 // which record it returned but not which revision), and it is the one that
 // breaks correction propagation: there is nothing for a correction to
 // supersede.
+//
+// These cases originally used the kind "governed_memory_record", a string this
+// test invented. ADR-0023 enumerated the kinds and they began failing with
+// "unknown kind" -- correctly: the invented string was never authority, and
+// the negation form of Governed() had been accepting it. The cases now name
+// KindApprovedMemoryRecord. That is the enumeration working, not a test
+// weakened to accommodate it.
 func TestGovernedReceiptWithoutAVersionIsRejected(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -124,13 +131,13 @@ func TestGovernedReceiptWithoutAVersionIsRejected(t *testing.T) {
 	}{
 		{
 			name: "governed record naming neither record nor version",
-			receipt: MemoryReceipt{Kind: "governed_memory_record",
+			receipt: MemoryReceipt{Kind: KindApprovedMemoryRecord,
 				EffectiveConfigSHA: "cfg", ContentDigest: "sha"},
 			wantErr: "no record_id",
 		},
 		{
 			name: "governed record naming a record but not a version",
-			receipt: MemoryReceipt{Kind: "governed_memory_record", RecordID: "rec-1",
+			receipt: MemoryReceipt{Kind: KindApprovedMemoryRecord, RecordID: "rec-1",
 				EffectiveConfigSHA: "cfg", ContentDigest: "sha"},
 			wantErr: "no version_id",
 		},
@@ -161,7 +168,7 @@ func TestGovernedReceiptWithoutAVersionIsRejected(t *testing.T) {
 
 	// The positive case must pass, or the rejections above would also be
 	// satisfied by a Validate that refuses everything.
-	complete := MemoryReceipt{Kind: "governed_memory_record", RecordID: "rec-1",
+	complete := MemoryReceipt{Kind: KindApprovedMemoryRecord, RecordID: "rec-1",
 		VersionID: "rec-1@3", EffectiveConfigSHA: "cfg", ContentDigest: "sha"}
 	if err := complete.Validate(); err != nil {
 		t.Errorf("Validate() = %v on a governed receipt naming both record and version, want nil", err)

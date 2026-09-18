@@ -259,7 +259,17 @@ exists and shipped a store whose subject scope was its agent scope, silently.
 ADR-0022 removes `subject` from the vocabulary, adds `tenant` to the vision, and
 pins the agreement with a test that reads both documents.
 
-Temporal validity, authority, ranking and deletion lineage remain
+A fourth prerequisite is settled, found by probing the third rather than by
+planning. The phase opens with a containment rule — model material "may propose
+candidates but cannot create active memory" — and nothing represented it: a
+throwaway probe showed a candidate receipt validating identically to an approved
+one, and a misspelled kind validating too, because `Governed()` was a negation
+and therefore a blocklist with one entry. Every string that was not
+`frozen_context_memory` was authority. ADR-0023 enumerates the three kinds, adds
+`Presentable()` so a candidate is never presented, and makes an unknown kind fail
+closed.
+
+Temporal validity, ranking and deletion lineage remain
 undecided and still need their own record (item 7 below). The store itself does
 not exist.
 

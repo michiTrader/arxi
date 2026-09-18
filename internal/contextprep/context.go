@@ -79,14 +79,55 @@ type MemoryReceipt struct {
 	VersionID string `json:"version_id,omitempty"`
 }
 
-// KindFrozenContextMemory marks a receipt for ContextSpec.Memory, the static
-// prose Phase 5 carries on a frozen blueprint.
-const KindFrozenContextMemory = "frozen_context_memory"
+// The enumerated memory receipt kinds. ADR-0023 enumerates authority instead of
+// inferring it: a kind outside this set is not authority, it is invalid.
+const (
+	// KindFrozenContextMemory marks a receipt for ContextSpec.Memory, the
+	// static prose Phase 5 carries on a frozen blueprint. It has no record
+	// identity, because a configuration field is not a record.
+	KindFrozenContextMemory = "frozen_context_memory"
+	// KindApprovedMemoryRecord marks a stored record supplied or explicitly
+	// approved by a user, operator or import.
+	KindApprovedMemoryRecord = "approved_memory_record"
+	// KindProposedMemoryCandidate marks model-generated material. It may be
+	// stored, inspected and promoted, and it is never presented: the roadmap
+	// requires that model material "may propose candidates but cannot create
+	// active memory", and a candidate that can be presented is not a candidate.
+	KindProposedMemoryCandidate = "proposed_memory_candidate"
+)
+
+// memoryKindPresentable maps every enumerated kind to whether a receipt of that
+// kind may appear in a prepared context.
+//
+// A map rather than a switch so that Validate's unknown-kind refusal and
+// Presentable's answer come from one table: two lists would let a kind be
+// valid and un-presentable by omission rather than by decision.
+var memoryKindPresentable = map[string]bool{
+	KindFrozenContextMemory:     true,
+	KindApprovedMemoryRecord:    true,
+	KindProposedMemoryCandidate: false,
+}
 
 // Governed reports whether the receipt describes a stored memory record rather
 // than frozen configuration prose. Governed records must name their version.
+//
+// Derived from the enumeration, not from `!= KindFrozenContextMemory`. The
+// negation form was a blocklist with one entry, so a typo'd kind reported true
+// and validated as authority -- measured, not supposed. ADR-0020 had already
+// rejected a blocklist for memory content; this is the same shape on the kind
+// field.
 func (r MemoryReceipt) Governed() bool {
-	return r.Kind != "" && r.Kind != KindFrozenContextMemory
+	_, known := memoryKindPresentable[r.Kind]
+	return known && r.Kind != KindFrozenContextMemory
+}
+
+// Presentable reports whether the receipt may appear in a prepared context.
+//
+// False for an unknown kind, which is the inverted failure direction ADR-0023
+// decided: material nobody enumerated gets no authority rather than authority
+// by default.
+func (r MemoryReceipt) Presentable() bool {
+	return memoryKindPresentable[r.Kind]
 }
 
 // Validate refuses a receipt that advertises more identity than it carries.
@@ -99,6 +140,16 @@ func (r MemoryReceipt) Governed() bool {
 func (r MemoryReceipt) Validate() error {
 	if r.Kind == "" {
 		return fmt.Errorf("memory receipt has no kind: a receipt must say what it is evidence of")
+	}
+	if _, known := memoryKindPresentable[r.Kind]; !known {
+		return fmt.Errorf("memory receipt has unknown kind %q: authority is enumerated, so an "+
+			"unrecognized kind fails closed rather than inheriting the authority of a record "+
+			"somebody approved", r.Kind)
+	}
+	if !r.Presentable() {
+		return fmt.Errorf("memory receipt of kind %q reached the preparer: model-proposed "+
+			"material may be stored and promoted but never presented, and a candidate that "+
+			"can be presented is not a candidate", r.Kind)
 	}
 	if !r.Governed() {
 		if r.RecordID != "" || r.VersionID != "" {
