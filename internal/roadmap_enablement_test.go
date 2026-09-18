@@ -197,3 +197,84 @@ func TestEveryEnablingDecisionIsCitedByThePhaseItEnables(t *testing.T) {
 		}
 	}
 }
+
+// adrNumberWord spells the record counts this project's prose actually uses.
+// Only values near the current corpus size are listed: a number far outside
+// that range is a symptom of something other than a stale count.
+var adrNumberWord = map[int]string{
+	24: "Twenty-four", 25: "Twenty-five", 26: "Twenty-six",
+	27: "Twenty-seven", 28: "Twenty-eight", 29: "Twenty-nine", 30: "Thirty",
+}
+
+// TestEveryDocumentStatingTheADRCountAgreesWithTheCorpus holds the prose count
+// of decision records to the number of records on disk.
+//
+// Found by the same probe that produced ADR-0026, and it is the same defect one
+// document over: AGENTS.md opened with "Thirteen records" while docs/adr/ held
+// twenty-six. The sentence containing that number instructs the reader to read
+// them all before touching code, so the count is not decoration -- it is how a
+// reader decides whether they have finished. Off by thirteen, it invites
+// stopping at half the corpus, and the omitted half is every memory decision
+// Phase 7 rests on.
+//
+// It also sat directly beneath this project's own "verify, do not assume" rule,
+// which is the argument for pinning rather than correcting: a hand-maintained
+// count drifts precisely because nothing fails when it does.
+//
+// The index table and the prose count are checked separately, because they go
+// stale independently -- adding a record without a table row and adding one
+// without updating the count are different omissions.
+func TestEveryDocumentStatingTheADRCountAgreesWithTheCorpus(t *testing.T) {
+	entries, err := os.ReadDir("../docs/adr")
+	if err != nil {
+		t.Fatalf("cannot read the ADR directory: %v", err)
+	}
+	var numbers []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		if match := adrFilename.FindStringSubmatch(entry.Name()); match != nil {
+			numbers = append(numbers, match[1])
+		}
+	}
+	sort.Strings(numbers)
+	count := len(numbers)
+	if count == 0 {
+		t.Fatal("no numbered ADR files found: this test's only source of truth is empty, " +
+			"so every assertion below would hold vacuously")
+	}
+
+	word, ok := adrNumberWord[count]
+	if !ok {
+		t.Fatalf("the corpus holds %d records and adrNumberWord has no spelling for it.\n"+
+			"  Remedy: add it. Consequence of skipping: the prose-count check below stops "+
+			"running and the number is free to drift again", count)
+	}
+
+	agents, err := os.ReadFile("../AGENTS.md")
+	if err != nil {
+		t.Fatalf("cannot read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agents), word+" records") {
+		t.Errorf("AGENTS.md does not state %q for the %d records in docs/adr/.\n"+
+			"  That line tells a reader to read every record before touching code, so the "+
+			"count is how they know when they are done. Understated, it invites stopping "+
+			"early -- it read \"Thirteen records\" at twenty-six, omitting every memory "+
+			"decision Phase 7 rests on.\n"+
+			"  Remedy: update the count in AGENTS.md.", word, count)
+	}
+
+	index, err := os.ReadFile("../docs/adr/README.md")
+	if err != nil {
+		t.Fatalf("cannot read the ADR index: %v", err)
+	}
+	for _, number := range numbers {
+		if !strings.Contains(string(index), "("+number+"-") {
+			t.Errorf("ADR %s has no row in docs/adr/README.md.\n"+
+				"  The index is the only list of decisions a reader sees before opening "+
+				"files, so an unlisted record is an invisible one. Remedy: add its row.",
+				number)
+		}
+	}
+}
