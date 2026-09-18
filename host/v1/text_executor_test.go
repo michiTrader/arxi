@@ -36,7 +36,14 @@ func TestTextExecutorTurnsACompletionIntoThePhaseOneLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnTurn: %v", err)
 	}
-	wantRequest := TextRequest{Model: "member-model", System: "Identity: builder\none\nMemory: remember\ntwo\nCauses: event-1", Prompt: "do it", MaxTokens: 321}
+	// Memory is its own field and is absent from System. This assertion
+	// previously read "Identity: builder\none\nMemory: remember\ntwo\n..." --
+	// it pinned memory INSIDE the operator's instruction string, which is the
+	// channel ADR-0020 forbids, and it held that defect green on the public
+	// text port until ADR-0025 probed it. It failed when the channel moved,
+	// which is what a pin on a decision is for.
+	wantRequest := TextRequest{Model: "member-model", System: "Identity: builder\none\ntwo\nCauses: event-1",
+		Memory: "remember", Prompt: "do it", MaxTokens: 321}
 	if !reflect.DeepEqual(provider.request, wantRequest) {
 		t.Fatalf("request = %#v, want %#v", provider.request, wantRequest)
 	}

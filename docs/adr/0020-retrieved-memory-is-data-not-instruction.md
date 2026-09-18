@@ -79,6 +79,24 @@ This ADR governs the **channel**. It deliberately says nothing about
 retrieval, ranking, scoping or deletion; those are Phase 7's own decisions and
 belong in their own records.
 
+> **Correction (ADR-0025).** This decision was implemented in
+> `internal/contextprep` only. `internal/provider` — listed in *Affects* above —
+> kept concatenating memory into the system message, and so did `host/v1`, whose
+> `TextRequest` could not express the separation because `System` was one flat
+> string. A probe found `buildMessages` producing verbatim the example this
+> document quotes above as the defect, on both wires, more than four ADRs later.
+>
+> Three assemblers existed and one had adopted the decision. The verification
+> section below asked for the wire assertion and got a good one, but it was
+> written against hand-built `turn.Request` literals, so it proved the mapping
+> and never reached the code that assembles the messages in production.
+>
+> The reader who needs this most is whoever adds a fourth presentation path.
+> ADR-0025 is the record that publishing a channel decision, and naming the
+> packages it affects, did not cause two of those packages to adopt it — and
+> that a well-argued test asserting the right property at the wrong subject is
+> what kept it invisible.
+
 ## Consequences
 
 The presentation shape changes: a member with memory now produces at least two

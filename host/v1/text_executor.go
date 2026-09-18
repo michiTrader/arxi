@@ -39,7 +39,8 @@ func (x *textExecutor) SpawnTurn(ctx context.Context, effect kernel.SpawnTurn) (
 		}
 	}
 	response, err := x.provider.CompleteText(ctx, TextRequest{
-		Model: model, System: textSystem(effect.Context), Prompt: x.effective.Prompt,
+		Model: model, System: textSystem(effect.Context),
+		Memory: strings.TrimSpace(effect.Context.Memory), Prompt: x.effective.Prompt,
 		MaxTokens: effect.Context.MaxTokens,
 	})
 	if err != nil {
@@ -64,15 +65,21 @@ func (x *textExecutor) SpawnTurn(ctx context.Context, effect kernel.SpawnTurn) (
 	return events, nil
 }
 
+// textSystem assembles only what the operator authored.
+//
+// Memory is deliberately absent. It used to be appended here as
+// "Memory: <prose>", which placed a memory record in the same flat string as
+// "Identity: builder" -- one system prompt in which nothing downstream could
+// tell an instruction the operator wrote from a record a store returned.
+// ADR-0020 forbids that channel and ADR-0025 removed it here; memory now
+// travels on TextRequest.Memory, and appending it back to this string
+// reinstates the structural grant of authority the decision exists to remove.
 func textSystem(spec kernel.ContextSpec) string {
-	parts := make([]string, 0, 4+len(spec.Situation)+len(spec.Shared)+len(spec.Cause))
+	parts := make([]string, 0, 3+len(spec.Situation)+len(spec.Shared)+len(spec.Cause))
 	if spec.Identity != "" {
 		parts = append(parts, "Identity: "+spec.Identity)
 	}
 	parts = append(parts, spec.Situation...)
-	if spec.Memory != "" {
-		parts = append(parts, "Memory: "+spec.Memory)
-	}
 	parts = append(parts, spec.Shared...)
 	if len(spec.Cause) > 0 {
 		parts = append(parts, "Causes: "+strings.Join(spec.Cause, ", "))
