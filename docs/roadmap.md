@@ -317,6 +317,18 @@ decided, a retrieval design must assume more than one presentation path.
 and has no representation on `SpawnTurn` at all; extending it there needs a
 receipt on the turn request, which is undecided.
 
+A seventh prerequisite is settled, and it is about this paragraph's own
+reliability. Probing the artifact the store work would be planned *from* rather
+than the code found that six ADRs declared `Enables: Phase 7` and this status
+cited five. ADR-0025 was missing — so the first prerequisite above still read
+"the preparer presents it as a user-role message", preserving as current
+guidance the exact belief under which the channel defect survived four ADRs.
+Nothing connected an ADR's `Enables:` header to the phase it names, and
+`TestEveryImplementedPhaseSaysSo` deliberately checks only that a status line
+exists, never what it says. ADR-0026 derives the pairs from the corpus on every
+run and fails when a phase omits a decision that claimed it, so the citation
+cannot silently age again.
+
 Temporal validity, ranking and deletion lineage remain
 undecided and still need their own record (item 7 below). The store itself does
 not exist.
