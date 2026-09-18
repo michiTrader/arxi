@@ -280,7 +280,21 @@ every influence identifies its source and version; stale versions stop appearing
 after correction; deletion propagates through content, indexes, summaries, caches
 and unused prepared contexts without resurrection.
 
-**Status:** not started; the store, retrieval and deletion lineage do not exist.
+**Status:** partially implemented, and not exited. The store, retrieval and
+deletion lineage exist in `internal/memorystore` (ADR-0027) and the eight
+prerequisites below are settled. What remains is listed as the two deliberate
+gaps at the end of this section plus item 7's record vocabulary, so this phase
+must not be read as either finished or unstarted.
+
+This line said "not started; the store, retrieval and deletion lineage do not
+exist" for a full turn after ADR-0027 shipped all three, while the narration
+below already reported the store as built. The two guards nearest to it could
+not see the contradiction: one checks that a status marker exists rather than
+what it claims, the other checks that the phase cites its enabling ADRs and was
+satisfied by the very paragraph doing the refuting.
+`TestNoPhaseDeclaresMachineryAbsentThatItAlsoDescribesAsBuilt` now fails when a
+phase's headline contradicts its own status block.
+
 One prerequisite is already settled: ADR-0020 decided the channel retrieved
 memory arrives on, and the preparer presents it as a user-role message rather
 than folding it into the system message. That was done ahead of the phase on
