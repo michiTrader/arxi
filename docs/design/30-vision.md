@@ -189,9 +189,15 @@ to either project's formats, hooks or implementation.
 ### Cross-run memory
 
 **Proposed.** Persistent memory should be an optional capability with explicit
-scopes such as user, application, project, team, agent and run. A record must carry
+scopes: tenant, user, application, project, team, agent and run. A record must carry
 provenance, time, confidence and retention information sufficient to inspect why
 it exists and where it may be used.
+
+`tenant` is the trust boundary and behaves unlike the others: a record with no
+`project` may legitimately be visible across projects, but a record with no
+`tenant` must not be visible at all. ADR-0022 fixes this vocabulary, which
+three documents once stated differently — and removes `subject`, which named
+the retrieving agent in committed artifacts and a scope in the roadmap.
 
 User-provided facts, preferences, observed events and model-derived conclusions
 are different classes of evidence. Retrieval must respect authority and token

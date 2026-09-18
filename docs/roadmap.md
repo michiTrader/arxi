@@ -217,8 +217,8 @@ Records carry stable and immutable version IDs, provenance, evidence class,
 authority, confidence, sensitivity, purpose, retention, lifecycle and bitemporal
 validity.
 
-Authorization occurs before semantic ranking across tenant, subject, application,
-project, team/agent, run, evidence class, sensitivity, purpose and valid time.
+Authorization occurs before semantic ranking across tenant, user, application,
+project, team, agent, run, evidence class, sensitivity, purpose and valid time.
 Retrieval receipts record exact selected versions and excerpts, ranking/index
 versions and reasons. Provide inspection, correction, supersession, export and
 deletion controls before enabling autonomous writes.
@@ -247,7 +247,19 @@ that. ADR-0021 adds `RecordID` and `VersionID`, keeps them empty for frozen
 configuration memory because a config field has no record identity, and makes a
 governed receipt without a version **fail** rather than merely be documented.
 
-Scope, temporal validity, authority, ranking and deletion lineage remain
+A third prerequisite is settled, found the same way — by measuring the previous
+one instead of designing on top of it. The scope list above is what a store must
+implement first, since authorization runs before ranking, so it was compared
+against the two other places this project names scopes. All three disagreed:
+`docs/design/30-vision.md` said `user` and had no `tenant`; this roadmap said
+`tenant` and `subject`; and the code already commits `Subject` as
+`subject_agent` in five artifact schemas, meaning the subject *agent*. A reader
+implementing `subject` scoping would have wired it to the field that already
+exists and shipped a store whose subject scope was its agent scope, silently.
+ADR-0022 removes `subject` from the vocabulary, adds `tenant` to the vision, and
+pins the agreement with a test that reads both documents.
+
+Temporal validity, authority, ranking and deletion lineage remain
 undecided and still need their own record (item 7 below). The store itself does
 not exist.
 

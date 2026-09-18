@@ -31,6 +31,7 @@ has to decide which — not ignore the contradiction.
 | [0019](0019-copy-is-writable-on-linux.md) | Linux advertises the copy snapshot as writable, and stops at files | accepted |
 | [0020](0020-retrieved-memory-is-data-not-instruction.md) | Retrieved memory arrives as data, not as instruction | accepted |
 | [0021](0021-memory-records-are-addressable-versions.md) | A memory receipt names the record version it presented | accepted |
+| [0022](0022-memory-scope-is-a-principal-not-a-subject.md) | Memory scope names a principal, and `subject` is not one | accepted |
 
 ## Format
 
