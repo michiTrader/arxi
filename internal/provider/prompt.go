@@ -9,7 +9,7 @@ import (
 // buildMessages turns the context the reducer assembled into chat messages.
 //
 // The ORDER of the sections is copied from kernel.ContextSpec and must not be
-// rearranged: identity, situation, memory, shared, cause -- most stable first,
+// rearranged: identity, situation, shared, cause -- most stable first,
 // most volatile last. config.go explains why, and the reason is money. Providers
 // cache a prompt PREFIX; a section that changes every turn placed early
 // invalidates everything after it, so putting the causes first would turn a
@@ -19,6 +19,20 @@ import (
 // the volatile ones. That split is what makes the prefix an actual prefix: the
 // system message is byte-identical across the turns of a run, which is the
 // condition the cache is keyed on.
+//
+// Memory is the one section that does NOT follow that stability ordering, and
+// ADR-0020 is why: it leaves the system message entirely and becomes its own
+// user-role message. The system channel is a structural grant of authority, so
+// a memory record placed in it is obeyed for where it sits rather than for what
+// it says. ADR-0025 brought this assembler under that decision after a probe
+// measured it still concatenating memory between "You are backend." and the
+// shared instructions -- the exact text ADR-0020 quotes as the defect it exists
+// to remove, in a package ADR-0020 lists as affected.
+//
+// Memory sits between the system message and the volatile user content, so the
+// cacheable prefix keeps the stability it had: identity and situation are still
+// byte-identical across the turns of a run, and memory still precedes the causes
+// that change every turn.
 func buildMessages(cs kernel.ContextSpec, prompt string) []chatMessage {
 	var sys strings.Builder
 
@@ -31,24 +45,23 @@ func buildMessages(cs kernel.ContextSpec, prompt string) []chatMessage {
 	}
 
 	writeSection(&sys, "Situation", cs.Situation)
+	writeSection(&sys, "Shared", cs.Shared)
+
+	msgs := make([]chatMessage, 0, 3)
+	if s := strings.TrimSpace(sys.String()); s != "" {
+		msgs = append(msgs, chatMessage{Role: "system", Content: s})
+	}
 
 	// Memory is a single string, not a list -- it is prose the run carries
 	// forward rather than a set of facts. Written as a paragraph so it does not
 	// acquire a bullet it never had.
+	//
+	// The "Memory:" label is legibility for the model, never a boundary: a
+	// record can contain the same word, which is precisely why ADR-0020
+	// discarded delimiter marking and moved the channel instead. The guarantee
+	// is the role.
 	if m := strings.TrimSpace(cs.Memory); m != "" {
-		if sys.Len() > 0 {
-			sys.WriteString("\n")
-		}
-		sys.WriteString("Memory:\n")
-		sys.WriteString(m)
-		sys.WriteString("\n")
-	}
-
-	writeSection(&sys, "Shared", cs.Shared)
-
-	msgs := make([]chatMessage, 0, 2)
-	if s := strings.TrimSpace(sys.String()); s != "" {
-		msgs = append(msgs, chatMessage{Role: "system", Content: s})
+		msgs = append(msgs, chatMessage{Role: "user", Content: memoryContent(m)})
 	}
 
 	// Causes and the prompt go in the user message: they are what changed since
@@ -71,6 +84,21 @@ func buildMessages(cs kernel.ContextSpec, prompt string) []chatMessage {
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: content})
 	return msgs
+}
+
+// memoryContent frames one memory message.
+//
+// It matches contextprep's memoryMessageText by shape rather than by import.
+// The two assemblers are deliberately separate -- one freezes a durable
+// artifact, the other builds a legacy single-turn request -- and sharing a
+// helper would not have prevented the divergence ADR-0025 found, because the
+// divergence was the channel, not the framing.
+func memoryContent(memory string) string {
+	var b strings.Builder
+	b.WriteString("Memory:\n")
+	b.WriteString(memory)
+	b.WriteString("\n")
+	return b.String()
 }
 
 // writeSection appends a titled list, or nothing at all when the list is empty.

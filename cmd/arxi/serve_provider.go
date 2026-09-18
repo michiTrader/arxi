@@ -41,6 +41,35 @@ func newServeTextProvider() (*serveTextProvider, error) {
 	return &serveTextProvider{store: store, executor: &provider.Executor{}}, nil
 }
 
+// serveMessages maps one public text request onto canonical messages.
+//
+// Split out of CompleteText so the mapping is assertable without a resolver, a
+// provider store or a live endpoint. That is not a cosmetic refactor: while
+// this logic lived inline, a mutation that folded req.Memory back into the
+// system message passed the entire cmd suite, because no test could reach the
+// assembly without standing up a real provider. A decision no test can reach
+// is a decision nothing enforces.
+//
+// Memory becomes its own user-role message and is never merged into the system
+// message (ADR-0020, carried to this adapter by ADR-0025). Appending it to
+// req.System here would discard the separation the port exists to express, and
+// on Anthropic the damage would be invisible: that adapter joins every system
+// message into one string, so the collapse happens below the neutral layer
+// where no assertion above it can see.
+func serveMessages(req hostv1.TextRequest) []turn.Message {
+	messages := []turn.Message{}
+	if text := strings.TrimSpace(req.System); text != "" {
+		messages = append(messages, turn.Message{Role: turn.RoleSystem,
+			Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}}})
+	}
+	if memory := strings.TrimSpace(req.Memory); memory != "" {
+		messages = append(messages, turn.Message{Role: turn.RoleUser,
+			Content: []turn.ContentBlock{{Type: turn.BlockText, Text: "Memory:\n" + memory + "\n"}}})
+	}
+	return append(messages, turn.Message{Role: turn.RoleUser,
+		Content: []turn.ContentBlock{{Type: turn.BlockText, Text: req.Prompt}}})
+}
+
 // CompleteText resolves the model and performs one canonical text turn. The
 // request carries no provider route — that is the point of the port — so
 // resolution is the adapter's job, and a model nobody registered is a client
@@ -54,12 +83,7 @@ func (p *serveTextProvider) CompleteText(ctx context.Context, req hostv1.TextReq
 	if err != nil {
 		return hostv1.TextResponse{}, err
 	}
-	messages := []turn.Message{}
-	if text := strings.TrimSpace(req.System); text != "" {
-		messages = append(messages, turn.Message{Role: turn.RoleSystem, Content: []turn.ContentBlock{{Type: turn.BlockText, Text: text}}})
-	}
-	messages = append(messages, turn.Message{Role: turn.RoleUser,
-		Content: []turn.ContentBlock{{Type: turn.BlockText, Text: req.Prompt}}})
+	messages := serveMessages(req)
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		// The provider default, not an invented one: passing zero would ask

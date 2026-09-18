@@ -8,9 +8,30 @@ import (
 
 // TextRequest is the deliberately text-only Phase 1 provider request. Structured
 // transcripts, native tool calls, streaming, and provider wire types are absent.
+//
+// Memory is a separate field rather than part of System, and that separation is
+// a decision the port itself has to carry rather than an implementation detail
+// an adapter may collapse. ADR-0020 decided retrieved memory is data, not
+// instruction: the system channel is a structural grant of authority, so a
+// record placed in it is obeyed for where it sits rather than for what it says.
+// ADR-0025 added this field after a probe measured the host assembler
+// concatenating memory into System as
+// "Identity: builder\nMemory: ...\nhouse style" -- one flat string in which
+// nothing downstream could distinguish an instruction the operator wrote from a
+// record a store returned.
+//
+// The field is additive: a caller that never sets it produces the request it
+// produced before, byte for byte. An adapter that receives it and folds it back
+// into the system message fails the channel tests rather than silently
+// reinstating the grant.
 type TextRequest struct {
-	Model       string   `json:"model,omitempty"`
-	System      string   `json:"system,omitempty"`
+	Model string `json:"model,omitempty"`
+	// System carries what the operator authored: identity, situation, shared
+	// instructions and causes. Memory must never be folded into it.
+	System string `json:"system,omitempty"`
+	// Memory carries retrieved memory prose, to be presented as data on a
+	// user-role message. Empty when the member has no memory configured.
+	Memory      string   `json:"memory,omitempty"`
 	Prompt      string   `json:"prompt"`
 	MaxTokens   int      `json:"max_tokens,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`

@@ -34,6 +34,7 @@ has to decide which — not ignore the contradiction.
 | [0022](0022-memory-scope-is-a-principal-not-a-subject.md) | Memory scope names a principal, and `subject` is not one | accepted |
 | [0023](0023-memory-authority-is-enumerated-not-inferred.md) | Memory authority is enumerated, and an unknown kind is not authority | accepted |
 | [0024](0024-the-preparer-validates-the-receipts-it-emits.md) | The preparer validates the receipts it emits, and evidence names content | accepted |
+| [0025](0025-every-assembler-uses-the-memory-channel.md) | Every assembler uses the memory channel, not just the durable one | accepted |
 
 ## Format
 
