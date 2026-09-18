@@ -166,7 +166,7 @@ Concretely:
 
    ```bash
    git merge-base --is-ancestor <pr-merge-commit> origin/main && echo in-main
-   ./scripts/audit-merged-prs.sh        # or audit every recent PR at once
+   ./scripts/audit-merged-prs.sh        # audits every merged PR; exits 1 if any is stranded
    ```
 
 ### Never leave a stacked base branch alive after merging it
@@ -178,17 +178,25 @@ pointed at a branch that no longer leads to main. Merging it then writes a
 merge commit onto that dead branch: GitHub reports MERGED, CI is green, and
 main receives nothing.
 
-This has happened twice on this project:
+A full audit of all 73 merged pull requests found this has happened **three
+times**, not twice as first recorded:
 
+- **#30** — merged into `feat/exec-event-cause`. Found only after the audit
+  stopped truncating; it sits at position 45, past the original default of 40.
 - **#33 / #34** — stranded this way. Rescued later by #35, which diagnosed the
   mechanism precisely in its own description.
 - **#73** — stranded the same way regardless, after that diagnosis existed. Its
   ADR (#72) was already published on main, so the decision was visible while
   the defect it forbids stayed live in the code. The worst available shape.
 
-Prose did not prevent the second occurrence, which is why the check above is a
-script. Either merge a stack **top-down**, or delete each base branch as it
-merges. Both are safe; keeping a merged base branch is not.
+#30, #33 and #34 are benign today: their content reached main through later
+pull requests, leaving only dangling merge nodes. Only #73 cost the product
+working code. The script reports that difference as ORPHANED versus STRANDED
+rather than flattening the two.
+
+Prose did not prevent the recurrence, which is why the check above is a script.
+Either merge a stack **top-down**, or delete each base branch as it merges.
+Both are safe; keeping a merged base branch is not.
 
 ### Recovering from a sandbox reset
 
