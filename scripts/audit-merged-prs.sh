@@ -34,12 +34,27 @@
 # stranded PR still reports it as stranded, correctly: the fix has not landed
 # yet. It clears once that branch is merged.
 #
-# Usage:  ./scripts/audit-merged-prs.sh [limit]     (default: 40 most recent)
+# It audits EVERY merged pull request by default, deliberately. The first
+# version defaulted to the 40 most recent, which reported "every verifiable
+# merged pull request is in main" while never looking at #30 -- an orphaned PR
+# sitting at position 45. A bounded check that presents itself as a complete
+# one is the same class of defect this script exists to catch: a boundary that
+# looks present and is absent. Passing an explicit limit is still allowed, but
+# then the result says so instead of implying full coverage.
+#
+# Usage:  ./scripts/audit-merged-prs.sh [limit]     (default: all merged PRs)
 # Exit:   0 nothing stranded   1 something stranded   2 cannot run
 
 set -uo pipefail
 
-LIMIT="${1:-40}"
+# 0 or "all" means no bound; gh needs a concrete number, so use one above any
+# plausible repository size rather than paginating.
+LIMIT="${1:-all}"
+case "$LIMIT" in
+all | 0) GH_LIMIT=100000; BOUNDED=0 ;;
+*[!0-9]*) die_early="limit must be a positive integer, 0, or 'all' (got: $LIMIT)" ;;
+*) GH_LIMIT="$LIMIT"; BOUNDED=1 ;;
+esac
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
@@ -50,6 +65,8 @@ die()  { printf '\n\033[31mcannot run:\033[0m %s\n' "$1" >&2; exit 2; }
 
 cd "$REPO_DIR"
 
+[ -n "${die_early:-}" ] && die "$die_early"
+
 command -v gh >/dev/null 2>&1 || die "gh is not installed; this audit reads pull request state from GitHub"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated (run: gh auth login)"
 
@@ -57,11 +74,16 @@ step "fetching main"
 git fetch -q origin main || die "could not fetch origin/main"
 ok "origin/main at $(git rev-parse --short origin/main)"
 
-step "auditing the $LIMIT most recently merged pull requests"
+if [ "$BOUNDED" -eq 1 ]; then
+	step "auditing the $LIMIT most recently merged pull requests"
+else
+	step "auditing every merged pull request"
+fi
 
-numbers="$(gh pr list --state merged --limit "$LIMIT" --json number -q '.[].number')" \
+numbers="$(gh pr list --state merged --limit "$GH_LIMIT" --json number -q '.[].number')" \
 	|| die "could not list merged pull requests"
 [ -n "$numbers" ] || die "no merged pull requests returned"
+total="$(printf '%s\n' "$numbers" | grep -c .)"
 
 stranded=0
 orphaned=0
@@ -110,11 +132,17 @@ for n in $numbers; do
 done
 
 step "result"
-printf '    checked %s merged pull requests against origin/main (%s)\n' \
-	"$checked" "$(git rev-parse --short origin/main)"
+printf '    checked %s of %s merged pull requests against origin/main (%s)\n' \
+	"$checked" "$total" "$(git rev-parse --short origin/main)"
 
 if [ "$orphaned" -gt 0 ]; then
 	printf '    %s orphaned (merge node only, content present)\n' "$orphaned"
+fi
+
+# State the coverage, not just the verdict. A bounded run that says only "ok"
+# reads as a full audit and is not one.
+if [ "$BOUNDED" -eq 1 ]; then
+	warn "bounded to the $LIMIT most recent -- older merged pull requests were NOT examined"
 fi
 
 if [ "$stranded" -gt 0 ]; then
