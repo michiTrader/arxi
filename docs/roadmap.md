@@ -283,6 +283,40 @@ frozen memory has, and one with no content digest at all. ADR-0024 calls
 evidence fields to hold evidence, so "every influence identifies its source and
 version" is refused rather than merely documented.
 
+A sixth prerequisite is settled, and it corrects what the first one above
+claimed. With five prerequisites recorded as closed, the earliest — the
+channel — was measured before building on it, and the sentence "the preparer
+presents it as a user-role message" turned out to describe one assembler of
+three. ADR-0020 named `internal/provider` among its affected packages and only
+`internal/contextprep` had adopted the decision: `provider.buildMessages` and
+`host/v1.textSystem` both still folded memory into the system message, which is
+verbatim the defect ADR-0020 quotes in its own Context as the thing it exists to
+remove. The suite did not see it because the channel was asserted at the wire
+against hand-built `turn.Request` literals — the mapping was proven and the code
+that assembles the messages in production was never touched.
+
+That exposure was not theoretical: `PrepareTurn` is the fallback taken whenever
+durable preparation is not in force, and `SpawnTurn` builds and dispatches in one
+step, never reaching `internal/contextprep`. Because `turn.Request` has no
+receipt field, ADR-0021's version rule, ADR-0022's vocabulary, ADR-0023's
+enumeration and ADR-0024's validation are not merely unenforced on that path —
+there is no receipt for them to attach to, and the channel is its only
+guarantee. ADR-0025 moves memory to its own user-role message in the provider
+assembler, adds an additive `Memory` field to `host/v1.TextRequest` so the port
+can express the separation at all, and asserts the channel through the real
+assembler entry points rather than against literals.
+
+Two facts to carry into the store work rather than rediscover. **The channel is
+a property of every assembler, not of the preparer** — routing the legacy paths
+through `internal/contextprep` is the right long-term answer and is deliberately
+not done, because `contextprep` freezes a durable artifact under ADR-0013's
+barrier and a single-turn request is a different contract. Until that is
+decided, a retrieval design must assume more than one presentation path.
+**Receipt guarantees reach only the durable path**, so the exit evidence that
+"every influence identifies its source and version" holds for prepared contexts
+and has no representation on `SpawnTurn` at all; extending it there needs a
+receipt on the turn request, which is undecided.
+
 Temporal validity, ranking and deletion lineage remain
 undecided and still need their own record (item 7 below). The store itself does
 not exist.
