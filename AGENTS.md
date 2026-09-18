@@ -245,6 +245,35 @@ They were stale for two capabilities before that test existed.
 tests pass, run them. Counts, file contents and git state have all been wrong
 from memory on this project.
 
+**Check a claim at its widest point, not its narrowest.** The recurring failure
+here is not an unverified claim — it is a claim verified once, in one place, and
+then generalised to a whole capability. It has now happened ten times. Three
+worth knowing, because they look different and are the same:
+
+- "CI is blocked, the App lacks `workflows` permission." True, and reported for
+  five turns. The refusal covers `.github/workflows/` only; a checked-in script
+  anywhere else was never blocked. The runner was missing, not the verification.
+- "Memory arrives on the user channel." True in one assembler, false in the two
+  others ADR-0020 named, for four ADRs (ADR-0025).
+- "Phase 7 is not started; the store, retrieval and deletion lineage do not
+  exist." All three existed, and the same status block said so one hundred lines
+  below. The guard nearest to it checked that a status line *exists*, never what
+  it claimed.
+
+So when a check passes or a blocker is confirmed, state the scope you actually
+measured. If the claim is about a capability, probe the capability, not the one
+path you happened to try. A guard whose subject is enumerated by hand goes stale
+in the cases nobody enumerated — derive the subject from the corpus when you
+can, and when you cannot, make an unrecognized case fail closed.
+
+**A guard must be broken before it is trusted.** A test that has only ever
+passed is decoration: it is indistinguishable from one asserting nothing. Break
+each check in isolation, confirm it fails, and confirm the message names the
+offending file and the consequence. Mutation found a "derived" roadmap guard
+that passed over an empty set, and a vacuity check that would have forced a
+*clean* document to fail — the shape that gets a test relaxed instead of a
+document fixed.
+
 **Correct the code, not the test.** When a test fails, the default assumption is
 that the test is right. Three real reducer bugs were found this way, including a
 broadcast steer that opened a billed turn for an advisory member nobody had
