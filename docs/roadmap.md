@@ -234,9 +234,22 @@ memory arrives on, and the preparer presents it as a user-role message rather
 than folding it into the system message. That was done ahead of the phase on
 purpose — the presentation shape is the expensive thing to change once prepared
 contexts have been committed against it, and settling it first is what lets the
-retrieval decision be about retrieval. Record identity, scope, temporal
-validity, authority and deletion lineage remain undecided and still need their
-own record (item 7 below).
+retrieval decision be about retrieval.
+
+A second prerequisite is now settled, and it was found by measuring the first
+rather than by planning: ADR-0020's Decision section claimed the memory receipt
+already recorded "the record identities and version IDs it carries", and no
+field of `MemoryReceipt` held either. The exit evidence above requires that
+"every influence identifies its source and version", so a retrieval design
+reading ADR-0020 would have inherited a receipt that cannot tell version 1 of a
+record from version 2 — and correction propagation is unverifiable against
+that. ADR-0021 adds `RecordID` and `VersionID`, keeps them empty for frozen
+configuration memory because a config field has no record identity, and makes a
+governed receipt without a version **fail** rather than merely be documented.
+
+Scope, temporal validity, authority, ranking and deletion lineage remain
+undecided and still need their own record (item 7 below). The store itself does
+not exist.
 
 ## Phase 8 — First useful Asha vertical slice
 

@@ -180,6 +180,15 @@ and effective-config digest. The receipt list is empty when no memory contribute
 Semantic retrieval, ranking, autonomous memory and cross-run scope belong to Phase
 7 and are not performed here.
 
+A receipt may also name the memory record version it presented: `record_id` is the
+stable identity of a record across versions, `version_id` the immutable identity of
+one version. Both are omitted for frozen configuration memory, which has no record
+identity to name — `kind` distinguishes that case — so a Phase 5 receipt encodes
+exactly as it did before these fields existed. A receipt from a governed record is
+malformed without both, because a correction cannot supersede a version nobody
+recorded. See ADR-0021, which exists because ADR-0020 asserted this receipt
+already carried version identity when it did not.
+
 The receipt is evidence, not containment: it proves what was presented, while
 the user-role channel above decides what authority the presented material
 carries. The two were once conflated, and separating them is what keeps Phase 7

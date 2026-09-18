@@ -56,9 +56,24 @@ shared instructions. Memory occupies its own message, in the role every
 adapter already reserves for content the model should treat as input rather
 than as its own directive.
 
-The presentation records, for each memory message, the record identities and
-version IDs it carries, so the existing `MemoryReceipt` continues to bind what
-was presented. The receipt mechanism is unchanged and was never the gap.
+The existing `MemoryReceipt` continues to bind what was presented. The receipt
+mechanism is unchanged and was never the gap.
+
+> **Correction (ADR-0021).** This paragraph originally read: "The presentation
+> records, for each memory message, the record identities and version IDs it
+> carries, so the existing `MemoryReceipt` continues to bind what was
+> presented." The second clause was true; the first was not. No field of
+> `MemoryReceipt` held a record identity or a version ID, and none did when
+> this decision was accepted — the struct carried `Kind`,
+> `EffectiveConfigSHA` and `ContentDigest`. `spec/context.md` described it
+> correctly the whole time as bound to "field identity and effective-config
+> digest", so two documents disagreed and the more precise one was right.
+>
+> The claim is left on the record rather than quietly deleted because this is
+> the document a Phase 7 retrieval design reads first, and a reader who
+> concluded from it that version identity was already solved should find out
+> here. ADR-0021 adds `RecordID` and `VersionID`, and makes a governed receipt
+> without a version fail rather than merely be documented.
 
 This ADR governs the **channel**. It deliberately says nothing about
 retrieval, ranking, scoping or deletion; those are Phase 7's own decisions and
