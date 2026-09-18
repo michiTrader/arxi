@@ -33,6 +33,7 @@ has to decide which — not ignore the contradiction.
 | [0021](0021-memory-records-are-addressable-versions.md) | A memory receipt names the record version it presented | accepted |
 | [0022](0022-memory-scope-is-a-principal-not-a-subject.md) | Memory scope names a principal, and `subject` is not one | accepted |
 | [0023](0023-memory-authority-is-enumerated-not-inferred.md) | Memory authority is enumerated, and an unknown kind is not authority | accepted |
+| [0024](0024-the-preparer-validates-the-receipts-it-emits.md) | The preparer validates the receipts it emits, and evidence names content | accepted |
 
 ## Format
 
