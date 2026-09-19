@@ -110,39 +110,112 @@ func (s *Store) Put(r Record) (Record, error) {
 	// supersession leaves nothing behind. Ordering it after the write would
 	// persist the losing version and then report failure, which is the forked
 	// state this exists to prevent, reached by the code preventing it.
-	if err := s.claimSupersession(sealed); err != nil {
+	//
+	// `mine` reports whether this call created the claim, which is what makes
+	// the rollback below safe: O_EXCL means only the creator can be inside
+	// that window, so releasing a claim this call created cannot release one
+	// somebody else is relying on.
+	mine, err := s.claimSupersession(sealed)
+	if err != nil {
 		return Record{}, err
+	}
+	// Every failure from here on abandons the write, and an abandoned write
+	// must not leave its exclusion behind. Before this, a claim outlived the
+	// version it was taken for and permanently froze a record whose chain was
+	// perfectly healthy -- see releaseClaimAfterFailedWrite.
+	fail := func(err error) (Record, error) {
+		return Record{}, s.releaseClaimAfterFailedWrite(sealed, mine, err)
 	}
 	body, err := json.MarshalIndent(sealed, "", "  ")
 	if err != nil {
-		return Record{}, fmt.Errorf("encode memory record %s: %w", sealed.VersionID, err)
+		return fail(fmt.Errorf("encode memory record %s: %w", sealed.VersionID, err))
 	}
 	path := filepath.Join(s.dir, sealed.VersionID+ext)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if os.IsExist(err) {
-			return s.verifyExisting(path, sealed)
+			// The version already exists. If its bytes match, the claim is
+			// fulfilled by that file and must stay; if they do not, this write
+			// is refused and the claim goes back.
+			existing, verifyErr := s.verifyExisting(path, sealed)
+			if verifyErr != nil {
+				return fail(verifyErr)
+			}
+			return existing, nil
 		}
-		return Record{}, fmt.Errorf("create memory version %s: %w", sealed.VersionID, err)
+		return fail(fmt.Errorf("create memory version %s: %w", sealed.VersionID, err))
 	}
 	if _, err := f.Write(append(body, '\n')); err != nil {
 		f.Close()
-		return Record{}, fmt.Errorf("write memory version %s: %w", sealed.VersionID, err)
+		return fail(fmt.Errorf("write memory version %s: %w", sealed.VersionID, err))
 	}
 	// Sync the file before the directory, then the directory, so that a crash
 	// cannot leave a directory entry pointing at a file with no contents. The
 	// same order every other store in this project uses.
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return Record{}, fmt.Errorf("sync memory version %s: %w", sealed.VersionID, err)
+		return fail(fmt.Errorf("sync memory version %s: %w", sealed.VersionID, err))
 	}
 	if err := f.Close(); err != nil {
-		return Record{}, fmt.Errorf("close memory version %s: %w", sealed.VersionID, err)
+		return fail(fmt.Errorf("close memory version %s: %w", sealed.VersionID, err))
 	}
 	if err := fsdurability.SyncDirectory(s.dir); err != nil {
-		return Record{}, err
+		return fail(err)
 	}
 	return sealed, nil
+}
+
+// releaseClaimAfterFailedWrite undoes a claim whose version was never written.
+//
+// # Why a failed write must not keep its exclusion
+//
+// The claim is taken first so that a refused supersession leaves nothing
+// behind, and ADR-0028 justified preferring it to a lock on the grounds that it
+// "needs no release because it is the durable record of a fact that does not
+// expire: that predecessor now has a successor". A probe of that claim found
+// the gap in the sentence. When the write that the claim was taken for fails,
+// the fact it records never became true -- no successor exists -- and the claim
+// that outlives it is precisely the stale lock the ADR rejected locking to
+// avoid, reintroduced under another name.
+//
+// The consequence was measured, not supposed. An ordinary I/O failure on the
+// version write -- no crash, no tampering, no hostile replica -- left a claim
+// naming a version that does not exist. `Correct` and `Delete` both resolve a
+// tip and then supersede it, so both were refused from then on, permanently,
+// for a record whose supersession chain was completely healthy and whose
+// retrieval kept serving the pre-correction body as current. Worse, the refusal
+// told the user the predecessor "is already superseded by" a version ID that is
+// on no disk anywhere, and no verb in the package could see the claim at all:
+// Versions, Retrieve and Forks were all blind to it, because a fork is two
+// versions and this is zero.
+//
+// Releasing it is safe here and only here. O_EXCL means the creator of a claim
+// is its exclusive holder, so a claim this call created is one no other writer
+// can be acting on; `mine` carries that distinction, and a claim found already
+// held is never released, because it belongs to somebody else's write.
+//
+// A crash between the claim and the write still strands one -- no in-process
+// rollback can cover a process that stops existing -- and that residue is now
+// visible through Claims and resolvable through ReleaseClaim rather than being
+// permanent and invisible.
+func (s *Store) releaseClaimAfterFailedWrite(sealed Record, mine bool, cause error) error {
+	if !mine || sealed.Supersedes == "" {
+		return cause
+	}
+	path := filepath.Join(s.dir, sealed.Supersedes+claimExt)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		// Reported together with the cause rather than swallowed: the write
+		// failed AND the record is now frozen, and an operator who is told only
+		// the first will not know to run ReleaseClaim.
+		return fmt.Errorf("%w -- and the supersession claim on %s could not be released "+
+			"afterwards (%v), so memory record %q now refuses correction and deletion until "+
+			"an operator releases it", cause, sealed.Supersedes, err, sealed.RecordID)
+	}
+	if err := fsdurability.SyncDirectory(s.dir); err != nil {
+		return fmt.Errorf("%w -- and the directory holding the released supersession claim on "+
+			"%s could not be synced (%v)", cause, sealed.Supersedes, err)
+	}
+	return cause
 }
 
 // claimSupersession reserves a predecessor for exactly one successor.
@@ -176,51 +249,74 @@ func (s *Store) Put(r Record) (Record, error) {
 // version by walking supersession, so this is a write-side exclusion and not a
 // second source of truth: a claim file that retrieval trusted would be the
 // `current` pointer ADR-0027 rejected, and it could disagree with the chain.
-func (s *Store) claimSupersession(sealed Record) error {
+// It reports whether this call created the claim. Only the creator may release
+// it on a failed write, and that distinction is what keeps the rollback from
+// stealing a claim another writer is mid-flight on.
+func (s *Store) claimSupersession(sealed Record) (bool, error) {
 	if sealed.Supersedes == "" {
-		return nil
+		return false, nil
 	}
 	path := filepath.Join(s.dir, sealed.Supersedes+claimExt)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if !os.IsExist(err) {
-			return fmt.Errorf("claim memory version %s for supersession: %w", sealed.Supersedes, err)
+			return false, fmt.Errorf("claim memory version %s for supersession: %w", sealed.Supersedes, err)
 		}
 		held, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("read supersession claim on memory version %s: %w",
+			return false, fmt.Errorf("read supersession claim on memory version %s: %w",
 				sealed.Supersedes, readErr)
 		}
+		holder := strings.TrimSpace(string(held))
 		// The identical successor is the benign collision and must stay
 		// successful: version IDs are content-addressed, so re-applying the
 		// same correction produces the same version, and Put is idempotent by
 		// design. Refusing here would break re-Put and every retry above it.
-		if strings.TrimSpace(string(held)) == sealed.VersionID {
-			return nil
+		if holder == sealed.VersionID {
+			return false, nil
 		}
-		return fmt.Errorf("memory version %s is already superseded by %s, so %s cannot also "+
+		// A claim whose successor was never written is refused with the truth
+		// rather than with the fork message. The holder does not exist, so
+		// saying the predecessor "is already superseded by" it asserts a
+		// supersession that never happened and sends the operator looking for
+		// a version that is on no disk. This is the residue of a crash between
+		// claim and write; the in-process rollback cannot cover that, so the
+		// message names the verb that can.
+		if _, statErr := os.Stat(filepath.Join(s.dir, holder+ext)); os.IsNotExist(statErr) {
+			return false, fmt.Errorf("memory version %s is claimed for supersession by %s, but "+
+				"no such version was ever written: the write that took the claim did not "+
+				"complete, so the record is frozen behind an exclusion for a successor that "+
+				"does not exist. This is not a fork -- there is nothing to choose between. "+
+				"Release the claim with ReleaseClaim(%q) after confirming no writer is still "+
+				"in flight, then re-apply the correction",
+				sealed.Supersedes, holder, sealed.Supersedes)
+		}
+		return false, fmt.Errorf("memory version %s is already superseded by %s, so %s cannot also "+
 			"supersede it: one predecessor has one successor, because two would make both "+
 			"current with no rule able to say which correction the user meant. Re-read the "+
 			"current version and decide whether this correction still applies to it -- it is "+
 			"not retried automatically, because replaying it onto a version its author never "+
 			"saw would silently overwrite the correction that won",
-			sealed.Supersedes, strings.TrimSpace(string(held)), sealed.VersionID)
+			sealed.Supersedes, holder, sealed.VersionID)
 	}
 	if _, err := f.Write([]byte(sealed.VersionID + "\n")); err != nil {
 		f.Close()
-		return fmt.Errorf("write supersession claim on memory version %s: %w", sealed.Supersedes, err)
+		return true, fmt.Errorf("write supersession claim on memory version %s: %w", sealed.Supersedes, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return fmt.Errorf("sync supersession claim on memory version %s: %w", sealed.Supersedes, err)
+		return true, fmt.Errorf("sync supersession claim on memory version %s: %w", sealed.Supersedes, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close supersession claim on memory version %s: %w", sealed.Supersedes, err)
+		return true, fmt.Errorf("close supersession claim on memory version %s: %w", sealed.Supersedes, err)
 	}
 	// The claim is durable before the version that depends on it is written.
 	// Reversed, a crash could leave a version file whose predecessor was never
 	// claimed, and the next writer would fork the chain against it.
-	return fsdurability.SyncDirectory(s.dir)
+	if err := fsdurability.SyncDirectory(s.dir); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // verifyExisting handles the O_EXCL collision: a file already carries this
@@ -447,6 +543,122 @@ func (s *Store) Forks() ([]Fork, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RecordID < out[j].RecordID })
 	return out, nil
+}
+
+// Claim is one supersession claim held against a predecessor version.
+type Claim struct {
+	// Predecessor is the version that has been claimed for supersession.
+	Predecessor string `json:"predecessor"`
+	// Successor is the version ID recorded in the claim.
+	Successor string `json:"successor"`
+	// RecordID is the record the predecessor belongs to, empty when the
+	// predecessor's own version file is not in this store.
+	RecordID string `json:"record_id,omitempty"`
+	// Fulfilled reports whether the successor was actually written. An
+	// unfulfilled claim is the residue of a write that did not complete, and
+	// it freezes its record until it is released.
+	Fulfilled bool `json:"fulfilled"`
+}
+
+// Claims reports every supersession claim and whether its successor exists.
+//
+// This is the verb that was missing, and its absence is what made an
+// unfulfilled claim permanent. A fork is two versions and is reported by
+// Forks; an unfulfilled claim is *zero* versions, so Forks cannot see it,
+// Versions skips it because it does not end in .json, and Retrieve keeps
+// serving the pre-correction body as though nothing were wrong. A record could
+// therefore be frozen against correction and deletion with no verb in the
+// package able to say why. ADR-0028 argued that excluding a record with no
+// trace makes a lost correction indistinguishable from one never written; an
+// exclusion with no trace is that same failure one layer down.
+func (s *Store) Claims() ([]Claim, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read memory store %s: %w", s.dir, err)
+	}
+	owner := make(map[string]string)
+	versions, err := s.Versions()
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range versions {
+		owner[v.VersionID] = v.RecordID
+	}
+	out := make([]Claim, 0)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), claimExt) {
+			continue
+		}
+		predecessor := strings.TrimSuffix(e.Name(), claimExt)
+		held, err := os.ReadFile(filepath.Join(s.dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read supersession claim %s: %w", e.Name(), err)
+		}
+		successor := strings.TrimSpace(string(held))
+		_, statErr := os.Stat(filepath.Join(s.dir, successor+ext))
+		out = append(out, Claim{Predecessor: predecessor, Successor: successor,
+			RecordID: owner[predecessor], Fulfilled: statErr == nil})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Predecessor < out[j].Predecessor })
+	return out, nil
+}
+
+// ReleaseClaim removes an unfulfilled supersession claim so the record it
+// froze can be corrected again.
+//
+// # Why this refuses to release a fulfilled claim
+//
+// A claim whose successor exists is load-bearing: it is the exclusion that
+// makes one predecessor have one successor, which is the whole of ADR-0028.
+// Releasing it would let a second successor be written against a predecessor
+// that already has one, recreating by hand exactly the fork that ADR made
+// unreachable. So this verb is scoped to the case where the successor was
+// never written, and that condition is checked here rather than trusted to the
+// caller.
+//
+// # Why it is explicit rather than automatic
+//
+// A claim with no successor file is *usually* abandoned, and sometimes it is a
+// writer a few microseconds into its own Put. Nothing on disk distinguishes
+// the two, so an automatic sweep -- "no file, take the claim" -- would race the
+// legitimate in-flight window and let two writers supersede one predecessor,
+// which is the fork this store refuses to resolve. A probe confirmed the naive
+// rule reclaims a live in-flight claim. That is why recovery is an operator
+// act with the evidence from Claims in hand, on the same reasoning ADR-0028
+// gives for not retrying a losing correction automatically: the machine cannot
+// know the fact, and guessing it silently overwrites somebody's work.
+func (s *Store) ReleaseClaim(predecessor string) error {
+	if strings.TrimSpace(predecessor) == "" {
+		return fmt.Errorf("release supersession claim: no predecessor version named")
+	}
+	path := filepath.Join(s.dir, predecessor+claimExt)
+	held, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no supersession claim is held on memory version %s: releasing "+
+				"a claim that does not exist would report a repair that did not happen",
+				predecessor)
+		}
+		return fmt.Errorf("read supersession claim on memory version %s: %w", predecessor, err)
+	}
+	successor := strings.TrimSpace(string(held))
+	if _, err := os.Stat(filepath.Join(s.dir, successor+ext)); err == nil {
+		return fmt.Errorf("the supersession claim on memory version %s is fulfilled by %s, "+
+			"which exists: releasing it would allow a second version to supersede %s, and two "+
+			"successors is the fork that has no rule able to say which correction the user "+
+			"meant. Only a claim whose successor was never written may be released",
+			predecessor, successor, predecessor)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat claimed successor %s of memory version %s: %w",
+			successor, predecessor, err)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("release supersession claim on memory version %s: %w", predecessor, err)
+	}
+	return fsdurability.SyncDirectory(s.dir)
 }
 
 // tips reduces a set of versions to the current version of each healthy record,

@@ -445,6 +445,24 @@ a catastrophic one. ADR-0028 claims a predecessor exclusively so the fork cannot
 be created, and contains an imported one to its own record so it cannot take the
 store down.
 
+Probing *that* record in turn found what its own argument had not measured, and
+ADR-0029 corrects it. ADR-0028 preferred a claim file to a lock because a claim
+"needs no release: it is the durable record of a fact that does not expire —
+that predecessor now has a successor". True when the write succeeds; when the
+write fails the fact never became true, and the surviving claim is exactly the
+stale lock that reasoning rejected locking to avoid. An ordinary I/O failure —
+no crash, no tampered file, no hostile replica — left a claim naming a version
+that was never written, and because `Correct` and `Delete` both supersede the
+tip, both were refused **permanently** for a record whose chain never forked,
+while retrieval kept serving the pre-correction body as current. It was also
+invisible: a fork is two versions and `Forks()` reports it, this is zero
+versions, so no verb in the package could see the claim at all. The refusal even
+named the absent successor as though the supersession had happened. ADR-0029
+releases a claim whose write failed, scoping the release to the claim that call
+created so it cannot steal an in-flight one, and adds `Claims()` and
+`ReleaseClaim()` so the residue of a crash is diagnosable and repairable instead
+of permanent and silent.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to

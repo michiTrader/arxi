@@ -1001,3 +1001,397 @@ func TestTextRendersOneBodyForEveryAssembler(t *testing.T) {
 			"memory that does not exist")
 	}
 }
+
+// obstructVersionWrite makes the version file that `body` would produce
+// impossible to create, by occupying its exact path with a directory.
+//
+// This models the ordinary I/O failure -- a full disk, a permission change, a
+// filesystem error -- rather than a crash or a tampered file. That distinction
+// is the point: the claim residue it produces needs no hostile actor and no
+// kill signal, only a write that did not finish, which is the failure mode any
+// store on a real disk must survive.
+func obstructVersionWrite(t *testing.T, store *memorystore.Store, recordID, predecessor string,
+	scope memorystore.Scope, body, origin string) string {
+	t.Helper()
+	blocked, err := memorystore.Record{RecordID: recordID, Supersedes: predecessor, Scope: scope,
+		Kind: memorystore.Approved, Body: body, Origin: origin}.Seal()
+	if err != nil {
+		t.Fatalf("seal the version whose write is to be obstructed: %v", err)
+	}
+	path := filepath.Join(store.Dir(), blocked.VersionID+".json")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("obstruct version path %s: %v", path, err)
+	}
+	return blocked.VersionID
+}
+
+// TestAFailedWriteReleasesTheClaimItTook is the defect ADR-0029 was written
+// about, and it is the half ADR-0028 did not measure.
+//
+// ADR-0028 preferred a claim file to a lock because a claim "needs no release:
+// it is the durable record of a fact that does not expire -- that predecessor
+// now has a successor". When the write fails, that fact never became true. The
+// claim that outlives it is exactly the stale lock the ADR rejected locking to
+// avoid, and it froze Correct and Delete permanently for a record whose chain
+// was entirely healthy.
+func TestAFailedWriteReleasesTheClaimItTook(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("deploy-window", user("ana"), "deploys land on Tuesdays", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	obstructVersionWrite(t, store, "deploy-window", first.VersionID, user("ana"),
+		"deploys land on Wednesdays", "ana")
+
+	if _, err := store.Correct("deploy-window", "deploys land on Wednesdays", "ana"); err == nil {
+		t.Fatal("a correction whose version file could not be written reported success: the " +
+			"caller would believe a correction was stored that is on no disk")
+	}
+
+	// The claim must be gone, because the successor it names never existed.
+	claims, err := store.Claims()
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	for _, c := range claims {
+		if c.Predecessor == first.VersionID {
+			t.Fatalf("the failed write left a supersession claim on %s naming successor %s, "+
+				"which was never written: Correct and Delete both supersede the tip, so this "+
+				"record is now frozen against every repair verb -- permanently, for a chain "+
+				"that never forked", c.Predecessor, c.Successor)
+		}
+	}
+
+	// And the record must still be correctable, which is the consequence a
+	// user actually feels.
+	corrected, err := store.Correct("deploy-window", "deploys land on Thursdays", "ana")
+	if err != nil {
+		t.Fatalf("correcting after a failed write was refused (%v): the record was frozen by "+
+			"the leftover exclusion of a write that never completed, so a transient disk "+
+			"error became permanent data loss for that record", err)
+	}
+	if corrected.Body != "deploys land on Thursdays" {
+		t.Fatalf("correction stored body %q, want the corrected text", corrected.Body)
+	}
+}
+
+// TestAFailedWriteDoesNotFreezeDeletion is the deletion half. Correct and
+// Delete are separate verbs and a user locked out of deletion cannot exercise
+// the "deletion propagates without resurrection" guarantee Phase 7 exits on.
+func TestAFailedWriteDoesNotFreezeDeletion(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("secret", user("ana"), "the original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	obstructVersionWrite(t, store, "secret", first.VersionID, user("ana"), "amended", "ana")
+	if _, err := store.Correct("secret", "amended", "ana"); err == nil {
+		t.Fatal("the obstructed correction reported success")
+	}
+
+	if _, err := store.Delete("secret", "ana"); err != nil {
+		t.Fatalf("deleting after a failed correction was refused (%v): a user asking for their "+
+			"memory to be deleted would be told no, because an unrelated write failed earlier "+
+			"-- and deletion is the one control Phase 7 requires to always work", err)
+	}
+	got, _, err := store.Retrieve(memorystore.Query{Scopes: []memorystore.Scope{user("ana")}})
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	for _, r := range got {
+		if r.RecordID == "secret" {
+			t.Fatalf("a deleted record was still presented as %q", r.Body)
+		}
+	}
+}
+
+// TestAFulfilledClaimIsNeverReleased pins the boundary of the rollback. The
+// claim of a write that SUCCEEDED is load-bearing -- it is the whole exclusion
+// ADR-0028 added -- and releasing it would let a second successor supersede the
+// same predecessor, recreating by hand the fork that ADR made unreachable.
+func TestAFulfilledClaimIsNeverReleased(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("fact", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := store.Correct("fact", "corrected", "ana"); err != nil {
+		t.Fatalf("correct: %v", err)
+	}
+
+	err = store.ReleaseClaim(first.VersionID)
+	if err == nil {
+		t.Fatalf("releasing the fulfilled claim on %s succeeded: its successor exists, so the "+
+			"next write may now supersede the same predecessor and fork the chain -- which is "+
+			"the exact state ADR-0028 made unreachable through this API", first.VersionID)
+	}
+	if !strings.Contains(err.Error(), "fork") {
+		t.Fatalf("the refusal %q does not tell the operator that releasing a fulfilled claim "+
+			"forks the chain, which is the consequence that makes it refusable", err)
+	}
+	claims, err := store.Claims()
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	var found bool
+	for _, c := range claims {
+		if c.Predecessor == first.VersionID {
+			found = true
+			if !c.Fulfilled {
+				t.Fatalf("the claim on %s reports unfulfilled, but its successor %s was "+
+					"written: an operator reading this would release a load-bearing claim "+
+					"and fork the record", c.Predecessor, c.Successor)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the fulfilled claim on %s vanished from Claims(): the refusal above depends "+
+			"on it still being there", first.VersionID)
+	}
+}
+
+// TestAnUnfulfilledClaimIsVisibleAndReleasable covers the residue no in-process
+// rollback can reach: a crash between taking the claim and writing the version.
+//
+// Before ADR-0029 this state was permanent AND invisible. A fork is two
+// versions and Forks() reports it; this is zero versions, so Forks saw nothing,
+// Versions skipped the claim because it does not end in .json, and Retrieve
+// went on serving the pre-correction body as current while every repair verb
+// refused.
+func TestAnUnfulfilledClaimIsVisibleAndReleasable(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("fact", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	// The exact disk state a process leaves when it dies after claiming and
+	// before writing: a claim naming a version that is on no disk.
+	ghost := "mv-000000000000000000000000"
+	claimPath := filepath.Join(store.Dir(), first.VersionID+".claim")
+	if err := os.WriteFile(claimPath, []byte(ghost+"\n"), 0o644); err != nil {
+		t.Fatalf("write the stranded claim: %v", err)
+	}
+
+	// It must be visible. This is the verb whose absence made the freeze
+	// undiagnosable.
+	claims, err := store.Claims()
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	var stranded *memorystore.Claim
+	for i := range claims {
+		if claims[i].Predecessor == first.VersionID {
+			stranded = &claims[i]
+		}
+	}
+	if stranded == nil {
+		t.Fatalf("Claims() does not report the stranded claim on %s: no other verb can see it "+
+			"either -- Forks needs two versions and this has none, Versions ignores .claim "+
+			"files -- so the record is frozen with nothing in the package able to say why",
+			first.VersionID)
+	}
+	if stranded.Fulfilled {
+		t.Fatalf("the claim on %s naming absent successor %s reports fulfilled: an operator "+
+			"would leave it in place and the record stays frozen forever",
+			stranded.Predecessor, stranded.Successor)
+	}
+	if stranded.RecordID != "fact" {
+		t.Fatalf("the stranded claim reports record %q, want \"fact\": an operator holding a "+
+			"version ID and no record ID cannot tell whose memory is frozen", stranded.RecordID)
+	}
+
+	// The refusal must tell the truth: this is not a fork.
+	_, err = store.Correct("fact", "a correction", "ana")
+	if err == nil {
+		t.Fatal("correcting past a stranded claim succeeded: the claim is the exclusion that " +
+			"keeps one predecessor to one successor, so bypassing it forks the chain")
+	}
+	if strings.Contains(err.Error(), "already superseded by") {
+		t.Fatalf("the refusal %q says the predecessor is already superseded by a version that "+
+			"was never written: it asserts a supersession that did not happen and sends the "+
+			"operator looking for a version on no disk", err)
+	}
+	if !strings.Contains(err.Error(), "ReleaseClaim") {
+		t.Fatalf("the refusal %q does not name the verb that repairs it: a permanent freeze "+
+			"whose remedy is unnamed is a freeze the operator cannot lift", err)
+	}
+
+	// And releasing it must restore the record.
+	if err := store.ReleaseClaim(first.VersionID); err != nil {
+		t.Fatalf("releasing the stranded claim on %s failed: %v", first.VersionID, err)
+	}
+	corrected, err := store.Correct("fact", "a correction", "ana")
+	if err != nil {
+		t.Fatalf("correcting after the claim was released was still refused (%v): the repair "+
+			"verb does not repair", err)
+	}
+	if corrected.Body != "a correction" {
+		t.Fatalf("stored body %q, want the correction", corrected.Body)
+	}
+}
+
+// TestReleasingAClaimThatIsNotHeldIsRefused keeps the repair verb honest.
+// Reporting success for a claim that was never there would tell an operator
+// the freeze was lifted while the real cause is untouched.
+func TestReleasingAClaimThatIsNotHeldIsRefused(t *testing.T) {
+	store := open(t)
+	if err := store.ReleaseClaim("mv-000000000000000000000000"); err == nil {
+		t.Fatal("releasing a claim that is not held reported success: an operator would " +
+			"believe a frozen record was repaired and stop looking for the real cause")
+	}
+	if err := store.ReleaseClaim(""); err == nil {
+		t.Fatal("releasing an unnamed predecessor reported success")
+	}
+}
+
+// TestTheRollbackDoesNotStealAnotherWritersClaim is the safety boundary on the
+// rollback, and it is why the release is scoped to the claim this call created.
+//
+// A rule of "the successor is missing, so take the claim" cannot distinguish an
+// abandoned claim from a writer a few microseconds into its own Put. Under
+// concurrency that rule lets two writers supersede one predecessor, which is
+// the fork the store refuses to resolve.
+func TestTheRollbackDoesNotStealAnotherWritersClaim(t *testing.T) {
+	for attempt := 0; attempt < 10; attempt++ {
+		store := open(t)
+		first, err := store.Approve("fact", user("ana"), "original", "ana")
+		if err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+		// One correction will fail on a blocked path; the other must succeed.
+		// If the failing one released the winner's claim, the chain forks.
+		obstructVersionWrite(t, store, "fact", first.VersionID, user("ana"), "blocked", "ana")
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); store.Correct("fact", "blocked", "ana") }()
+		go func() { defer wg.Done(); store.Correct("fact", "allowed", "ana") }()
+		wg.Wait()
+
+		forks, err := store.Forks()
+		if err != nil {
+			t.Fatalf("forks: %v", err)
+		}
+		if len(forks) != 0 {
+			t.Fatalf("attempt %d: a failing write released a claim it did not own, so two "+
+				"versions now supersede %s and the record is forked: %+v -- the rollback "+
+				"reintroduced the exact race ADR-0028 closed", attempt, first.VersionID, forks)
+		}
+	}
+}
+
+// TestAFailedWriteNeverReleasesAClaimItDidNotCreate is why the rollback is
+// scoped to the claim this call created, and it was added because a mutation
+// removing that scope survived the rest of this file.
+//
+// The sequence is three writers, and only the third makes the damage visible:
+// writer A takes the claim on P naming successor X and is still in flight; B
+// attempts the identical correction, so it meets A's claim as the benign
+// content-addressed collision and does not own it; B's write then fails. If B
+// released A's claim on the way out, A still goes on to write X, but P is now
+// unclaimed -- so a later writer C supersedes P with a different version and
+// the chain forks. Content addressing hides this from any two-writer test,
+// because A and B produce identical bytes; it takes a third, differing
+// correction to expose it.
+func TestAFailedWriteNeverReleasesAClaimItDidNotCreate(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("fact", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Writer A: in flight, claim taken, version not yet written. Its successor
+	// is the version the identical correction below would produce.
+	inFlight := obstructVersionWrite(t, store, "fact", first.VersionID, user("ana"),
+		"shared correction", "ana")
+	claimPath := filepath.Join(store.Dir(), first.VersionID+".claim")
+	if err := os.WriteFile(claimPath, []byte(inFlight+"\n"), 0o644); err != nil {
+		t.Fatalf("write the in-flight claim: %v", err)
+	}
+
+	// Writer B: the same correction, so it meets A's claim as the benign
+	// collision rather than as a conflict, and its own write then fails.
+	if _, err := store.Correct("fact", "shared correction", "ana"); err == nil {
+		t.Fatal("the obstructed correction reported success")
+	}
+
+	claims, err := store.Claims()
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	var held bool
+	for _, c := range claims {
+		if c.Predecessor == first.VersionID && c.Successor == inFlight {
+			held = true
+		}
+	}
+	if !held {
+		t.Fatalf("a failed write released the claim on %s that another writer created and is "+
+			"still in flight on: once that writer lands successor %s, the predecessor is "+
+			"superseded but no longer claimed, so the next differing correction supersedes it "+
+			"too and the chain forks -- the exact race ADR-0028 closed, reopened by the "+
+			"rollback meant to repair a different one", first.VersionID, inFlight)
+	}
+}
+
+// TestAnIdempotentRePutKeepsTheClaimItCreated is the other boundary of the
+// rollback, and it was added because a mutation releasing the claim on this
+// path survived every other test here.
+//
+// The path is a re-Put whose version file already exists with identical bytes.
+// It is a SUCCESS, not a failure, so the rollback must not run -- but the claim
+// it created a moment earlier is the exclusion protecting that predecessor, and
+// dropping it would leave a superseded version unclaimed. The next differing
+// correction would then supersede it a second time and fork the chain.
+//
+// It is reachable: claims do not travel with replicated bytes, so a successor
+// imported from a replica arrives with no claim beside it, and re-Putting that
+// content is how a claim gets created for an already-present version.
+func TestAnIdempotentRePutKeepsTheClaimItCreated(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("fact", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// A successor that arrived as bytes from a replica: version file present,
+	// no claim beside it.
+	sealed, err := memorystore.Record{RecordID: "fact", Supersedes: first.VersionID,
+		Scope: user("ana"), Kind: memorystore.Approved, Body: "imported correction",
+		Origin: "replica"}.Seal()
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	encoded, err := json.MarshalIndent(sealed, "", "  ")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir(), sealed.VersionID+".json"),
+		append(encoded, '\n'), 0o644); err != nil {
+		t.Fatalf("write imported version: %v", err)
+	}
+
+	// Re-Put of that identical content: creates the claim, then finds the
+	// version already on disk and returns success.
+	if _, err := store.Put(sealed); err != nil {
+		t.Fatalf("re-Put of an identical imported version was refused (%v): content addressing "+
+			"makes this the benign collision, and refusing it would break every retry", err)
+	}
+
+	claims, err := store.Claims()
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	var guarded bool
+	for _, c := range claims {
+		if c.Predecessor == first.VersionID && c.Successor == sealed.VersionID {
+			guarded = true
+		}
+	}
+	if !guarded {
+		t.Fatalf("a successful re-Put dropped the claim it created on %s: that predecessor is "+
+			"superseded by %s and now carries no exclusion, so the next differing correction "+
+			"supersedes it a second time and forks the chain -- the rollback is for writes "+
+			"that FAILED, and this one succeeded", first.VersionID, sealed.VersionID)
+	}
+}
