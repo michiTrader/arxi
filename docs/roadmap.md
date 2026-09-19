@@ -423,6 +423,28 @@ evidence is now testable end to end: cross-scope leakage, correction
 propagation, deletion without resurrection and per-influence identification each
 have a witness that fails when its mechanism is removed.
 
+Probing that store rather than reading it found the defect ADR-0028 corrects,
+and it is worth recording because the guard that missed it looked adequate.
+ADR-0027 decided a forked supersession chain is refused rather than resolved by
+a tiebreak, which is right. What nothing measured is what "refused" cost: the
+refusal was raised for the **whole store**, so one forked record denied
+retrieval to every other principal — including other tenants — and the error
+named version IDs across the boundary ADR-0027 calls the one no retrieval
+crosses. It was also permanent, because `Correct`, `Delete` and `Promote` all
+resolve a tip through the function the fork made fail, so the three verbs that
+could repair a fork were the three a fork disabled. Four of the five controls
+this phase promises were gone after one bad record.
+
+Worse, the fork did not need a hostile replica to arrive. `Correct` reads the
+tip and then writes against it, so two concurrent corrections both succeeded and
+bricked the store — in three runs out of five — which is the concurrency
+ADR-0027 explicitly says the store exists to support. The existing guard built
+its fork with two deliberate `Put` calls and asserted only that retrieval then
+failed, and a test asking "does this fail?" cannot tell a contained refusal from
+a catastrophic one. ADR-0028 claims a predecessor exclusively so the fork cannot
+be created, and contains an imported one to its own record so it cannot take the
+store down.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to

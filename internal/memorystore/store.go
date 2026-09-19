@@ -24,6 +24,15 @@ const DefaultDir = "memory"
 // ext is the suffix that makes a file a memory version.
 const ext = ".json"
 
+// claimExt is the suffix of a supersession claim: a marker that some version
+// has already taken a given predecessor as the one it supersedes.
+//
+// A distinct suffix rather than a subdirectory so that Versions' existing
+// filter — "a file is a version if it ends in .json" — keeps claims out of the
+// record set without needing to know they exist. A claim in the record set
+// would fail to decode and take the whole store's read down with it.
+const claimExt = ".claim"
+
 // ErrNotFound reports that no live version of a record is visible.
 var ErrNotFound = errors.New("memory record not found")
 
@@ -97,6 +106,13 @@ func (s *Store) Put(r Record) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
+	// The claim is taken before the version file is written, so a refused
+	// supersession leaves nothing behind. Ordering it after the write would
+	// persist the losing version and then report failure, which is the forked
+	// state this exists to prevent, reached by the code preventing it.
+	if err := s.claimSupersession(sealed); err != nil {
+		return Record{}, err
+	}
 	body, err := json.MarshalIndent(sealed, "", "  ")
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record %s: %w", sealed.VersionID, err)
@@ -127,6 +143,84 @@ func (s *Store) Put(r Record) (Record, error) {
 		return Record{}, err
 	}
 	return sealed, nil
+}
+
+// claimSupersession reserves a predecessor for exactly one successor.
+//
+// # Why the filesystem and not a check
+//
+// `Correct` reads the current tip and then writes a version superseding it.
+// Two callers read the same tip and both write: both succeed, the record has
+// two current versions, and the store is unreadable. That is ADR-0006's race
+// exactly — two writers modifying state the other one read — and that ADR
+// settled this project's answer as compare-and-swap against a version token
+// rather than a lock. `Supersedes` is that token: it names one immutable
+// version of one record.
+//
+// A probe raced two concurrent `Correct` calls and bricked the store in three
+// runs out of five, with both calls returning nil. Nothing in the suite saw it,
+// because the fork guard built its fork from two deliberate `Put` calls and
+// asserted only that retrieval then failed — which cannot tell a contained
+// refusal from a catastrophic one.
+//
+// O_EXCL makes the exclusion a property of the filesystem rather than a check
+// this code must remember to perform under concurrency, which is the same
+// mechanism and the same argument `Put` already uses to refuse overwriting a
+// version file. It needs no release, and that is why it is preferred to a lock:
+// a lock must be released, so a crash between claim and write strands one, and
+// every rule for breaking a stale lock is a guess about whether the holder is
+// alive. This file records a fact that does not expire — that predecessor now
+// has a successor.
+//
+// The claim is never read by retrieval. `tips` still derives the current
+// version by walking supersession, so this is a write-side exclusion and not a
+// second source of truth: a claim file that retrieval trusted would be the
+// `current` pointer ADR-0027 rejected, and it could disagree with the chain.
+func (s *Store) claimSupersession(sealed Record) error {
+	if sealed.Supersedes == "" {
+		return nil
+	}
+	path := filepath.Join(s.dir, sealed.Supersedes+claimExt)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if !os.IsExist(err) {
+			return fmt.Errorf("claim memory version %s for supersession: %w", sealed.Supersedes, err)
+		}
+		held, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read supersession claim on memory version %s: %w",
+				sealed.Supersedes, readErr)
+		}
+		// The identical successor is the benign collision and must stay
+		// successful: version IDs are content-addressed, so re-applying the
+		// same correction produces the same version, and Put is idempotent by
+		// design. Refusing here would break re-Put and every retry above it.
+		if strings.TrimSpace(string(held)) == sealed.VersionID {
+			return nil
+		}
+		return fmt.Errorf("memory version %s is already superseded by %s, so %s cannot also "+
+			"supersede it: one predecessor has one successor, because two would make both "+
+			"current with no rule able to say which correction the user meant. Re-read the "+
+			"current version and decide whether this correction still applies to it -- it is "+
+			"not retried automatically, because replaying it onto a version its author never "+
+			"saw would silently overwrite the correction that won",
+			sealed.Supersedes, strings.TrimSpace(string(held)), sealed.VersionID)
+	}
+	if _, err := f.Write([]byte(sealed.VersionID + "\n")); err != nil {
+		f.Close()
+		return fmt.Errorf("write supersession claim on memory version %s: %w", sealed.Supersedes, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("sync supersession claim on memory version %s: %w", sealed.Supersedes, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close supersession claim on memory version %s: %w", sealed.Supersedes, err)
+	}
+	// The claim is durable before the version that depends on it is written.
+	// Reversed, a crash could leave a version file whose predecessor was never
+	// claimed, and the next writer would fork the chain against it.
+	return fsdurability.SyncDirectory(s.dir)
 }
 
 // verifyExisting handles the O_EXCL collision: a file already carries this
@@ -288,55 +382,144 @@ func (s *Store) Versions() ([]Record, error) {
 }
 
 // tip resolves the current version of one record by walking supersession.
+//
+// It fails for a forked record and only for a forked record. Before ADR-0028
+// it failed whenever ANY record in the store was forked, because tips()
+// returned one error for the whole set — which made Correct, Delete and
+// Promote unavailable store-wide. Those are the three verbs that could repair a
+// fork, so one damaged record permanently disabled the repair of every healthy
+// one. Measured with a probe, not supposed.
 func (s *Store) tip(recordID string) (Record, error) {
 	versions, err := s.Versions()
 	if err != nil {
 		return Record{}, err
 	}
-	tips, err := tips(versions)
-	if err != nil {
-		return Record{}, err
-	}
-	for _, t := range tips {
+	live, forked := tips(versions)
+	for _, t := range live {
 		if t.RecordID == recordID {
 			return t, nil
 		}
 	}
+	if fork, bad := forked[recordID]; bad {
+		return Record{}, fork.err()
+	}
 	return Record{}, fmt.Errorf("%w: %q", ErrNotFound, recordID)
 }
 
-// tips reduces a set of versions to the current version of each record.
+// Fork describes one record whose supersession chain has more than one current
+// version, which makes the record unreadable until an operator resolves it.
+type Fork struct {
+	RecordID string `json:"record_id"`
+	// Predecessor is the version two successors both claim.
+	Predecessor string `json:"predecessor"`
+	// Successors are the competing versions, sorted for a stable message.
+	Successors []string `json:"successors"`
+}
+
+// err renders the refusal a caller sees when it touches a forked record.
+func (f Fork) err() error {
+	return fmt.Errorf("memory record %q has a forked supersession chain: versions %s both "+
+		"supersede %s, so two versions are current and no rule here can say which correction "+
+		"the user intended. Resolve it by inspecting the competing versions; a tiebreak on "+
+		"file order, digest or mtime would be deterministic and unrelated to what was meant",
+		f.RecordID, strings.Join(f.Successors, " and "), f.Predecessor)
+}
+
+// Forks reports every record whose chain has forked, for an operator resolving
+// one.
+//
+// This is the reason containment can exclude a record without losing it. A
+// record dropped from retrieval with no trace anywhere is indistinguishable
+// from a record that was never written, and silent loss is the failure this
+// whole store exists to prevent. Version IDs are disclosed here — an explicit
+// local inspection verb — rather than in a retrieval error, which before
+// ADR-0028 carried them across the tenant boundary to whoever happened to call
+// Retrieve next.
+func (s *Store) Forks() ([]Fork, error) {
+	versions, err := s.Versions()
+	if err != nil {
+		return nil, err
+	}
+	_, forked := tips(versions)
+	out := make([]Fork, 0, len(forked))
+	for _, f := range forked {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RecordID < out[j].RecordID })
+	return out, nil
+}
+
+// tips reduces a set of versions to the current version of each healthy record,
+// and separately reports the records it could not resolve.
 //
 // A version is current when nothing supersedes it. Derived from the chain on
 // every read rather than tracked by a flag, for the reason the package comment
 // gives: a flag is a cache, and a cache that disagrees with the chain would let
 // a superseded version be presented while the correction sat on disk — the exact
 // failure the exit evidence names.
-func tips(versions []Record) ([]Record, error) {
-	superseded := make(map[string]string, len(versions))
-	byID := make(map[string]Record, len(versions))
+//
+// # A fork is contained to its own record, not raised for the whole store
+//
+// Two versions superseding the same predecessor is still refused rather than
+// resolved by a tiebreak (ADR-0027): every available tiebreak — file order,
+// digest order, mtime — would pick a winner deterministically while having no
+// relationship to which correction the user meant. What changed in ADR-0028 is
+// the blast radius. This function used to return an error for the whole set, so
+// Retrieve failed before authorization ran and one corrupt record in one tenant
+// denied memory to every tenant in the store — the mirror image of the argument
+// ADR-0027 makes for authorizing before ranking, and one it did not make.
+//
+// So the split is two return values rather than a result and an error. Healthy
+// records resolve; forked records are excluded from the live set and handed
+// back by identity, so a caller can refuse the one record without refusing the
+// store, and can say which record is affected instead of leaking version IDs
+// across a scope boundary in an error string.
+func tips(versions []Record) ([]Record, map[string]Fork) {
+	successors := make(map[string][]string, len(versions))
 	for _, v := range versions {
-		byID[v.VersionID] = v
 		if v.Supersedes == "" {
 			continue
 		}
-		// Two versions superseding the same predecessor is a forked chain: two
-		// versions are current and nothing can say which. Refused rather than
-		// resolved by a tiebreak, because every available tiebreak — file
-		// order, digest order, mtime — would pick a winner deterministically
-		// while having no relationship to which correction the user meant.
-		if prior, dup := superseded[v.Supersedes]; dup {
-			return nil, fmt.Errorf("memory versions %s and %s both supersede %s: the "+
-				"supersession chain has forked, so two versions are current and no rule here "+
-				"can say which correction the user intended", prior, v.VersionID, v.Supersedes)
-		}
-		superseded[v.Supersedes] = v.VersionID
+		successors[v.Supersedes] = append(successors[v.Supersedes], v.VersionID)
 	}
+
+	// A predecessor with more than one successor condemns its whole record.
+	// Keyed by record rather than by version because exclusion is per record:
+	// the question a caller asks is "may I present this record", and with two
+	// current versions the answer is no regardless of which one it found.
+	forked := make(map[string]Fork)
+	byVersion := make(map[string]Record, len(versions))
+	for _, v := range versions {
+		byVersion[v.VersionID] = v
+	}
+	for predecessor, claimants := range successors {
+		if len(claimants) < 2 {
+			continue
+		}
+		recordID := predecessor
+		if r, known := byVersion[predecessor]; known {
+			recordID = r.RecordID
+		} else if r, known := byVersion[claimants[0]]; known {
+			// The predecessor's own file may be absent in an imported store
+			// that carried only the competing successors. The record ID is
+			// still recoverable from a claimant, and naming the record is the
+			// whole point of the containment.
+			recordID = r.RecordID
+		}
+		sorted := append([]string(nil), claimants...)
+		sort.Strings(sorted)
+		forked[recordID] = Fork{RecordID: recordID, Predecessor: predecessor, Successors: sorted}
+	}
+
 	var out []Record
 	for _, v := range versions {
-		if _, dead := superseded[v.VersionID]; !dead {
-			out = append(out, v)
+		if _, bad := forked[v.RecordID]; bad {
+			continue
 		}
+		if len(successors[v.VersionID]) > 0 {
+			continue
+		}
+		out = append(out, v)
 	}
 	// Sorted by record then version so that retrieval and inspection see one
 	// stable order: a store whose output depends on directory iteration order
@@ -349,5 +532,5 @@ func tips(versions []Record) ([]Record, error) {
 		}
 		return out[i].VersionID < out[j].VersionID
 	})
-	return out, nil
+	return out, forked
 }
