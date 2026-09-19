@@ -37,6 +37,7 @@ has to decide which — not ignore the contradiction.
 | [0025](0025-every-assembler-uses-the-memory-channel.md) | Every assembler uses the memory channel, not just the durable one | accepted |
 | [0026](0026-the-roadmap-cites-every-enabling-decision.md) | The roadmap cites every decision that claims to enable it | accepted |
 | [0027](0027-memory-records-are-a-store-outside-every-run.md) | Governed memory is a store outside every run, and retrieval is authorized before it is ranked | accepted |
+| [0028](0028-supersession-is-claimed-exclusively-and-a-fork-is-contained.md) | Superseding a version claims it exclusively, and a fork that still arrives is contained to its own record | accepted |
 
 ## Format
 

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/michiTrader/arxi/internal/contextprep"
@@ -505,25 +508,332 @@ func TestIdenticalRePutIsANoOp(t *testing.T) {
 	}
 }
 
-// TestAForkedSupersessionChainIsRefused covers the case where two corrections
-// race. Picking a winner by file order would be deterministic and unrelated to
-// which correction the user meant.
+// importFork writes two competing successors of one record straight to disk,
+// bypassing Put.
+//
+// It has to bypass Put, because ADR-0028 made Put refuse the second one: a
+// predecessor can be claimed by exactly one successor. The remaining way a
+// fork reaches a store is the way ADR-0027 anticipated when it chose tombstones
+// over unlinking — bytes arriving from a replica, a backup or a synced
+// directory, where the competing versions were produced elsewhere and no claim
+// travelled with them. That is what this writes, so the containment tests
+// exercise the case that is still reachable rather than one the store now
+// prevents.
+func importFork(t *testing.T, store *memorystore.Store, recordID string, scope memorystore.Scope,
+	predecessor string, bodies ...string) []string {
+	t.Helper()
+	var ids []string
+	for _, body := range bodies {
+		sealed, err := memorystore.Record{RecordID: recordID, Supersedes: predecessor,
+			Scope: scope, Kind: memorystore.Approved, Body: body, Origin: "replica"}.Seal()
+		if err != nil {
+			t.Fatalf("seal imported version %q: %v", body, err)
+		}
+		encoded, err := json.MarshalIndent(sealed, "", "  ")
+		if err != nil {
+			t.Fatalf("encode imported version %q: %v", body, err)
+		}
+		path := filepath.Join(store.Dir(), sealed.VersionID+".json")
+		if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
+			t.Fatalf("write imported version %q: %v", body, err)
+		}
+		ids = append(ids, sealed.VersionID)
+	}
+	return ids
+}
+
+// TestAForkedSupersessionChainIsRefused keeps ADR-0027's rule enforceable: a
+// record with two current versions is never presented. Picking a winner by file
+// order would be deterministic and unrelated to which correction the user meant.
+//
+// It asserts absence from the returned records rather than an error from
+// Retrieve. Under ADR-0028 the error is gone on purpose — it was raised for the
+// whole store, so it also refused every healthy record belonging to every other
+// principal. The guarantee being protected was always "this record is not
+// presented", and an error was only ever one way to achieve it.
 func TestAForkedSupersessionChainIsRefused(t *testing.T) {
 	store := open(t)
 	first, err := store.Approve("fact", user("ana"), "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	for _, body := range []string{"correction one", "correction two"} {
-		if _, err := store.Put(memorystore.Record{RecordID: "fact", Supersedes: first.VersionID,
-			Scope: user("ana"), Kind: memorystore.Approved, Body: body, Origin: "ana"}); err != nil {
-			t.Fatalf("put %q: %v", body, err)
+	importFork(t, store, "fact", user("ana"), first.VersionID, "correction one", "correction two")
+
+	got, evidence, err := store.Retrieve(memorystore.Query{Scopes: []memorystore.Scope{user("ana")}})
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	for _, r := range got {
+		if r.RecordID == "fact" {
+			t.Fatalf("a forked record was presented as version %q with body %q: two versions are "+
+				"current, so the store picked one by file order -- a rule with no relationship "+
+				"to which correction the user intended", r.VersionID, r.Body)
 		}
 	}
-	if _, _, err := store.Retrieve(memorystore.Query{Scopes: []memorystore.Scope{user("ana")}}); err == nil {
-		t.Fatal("a forked supersession chain was retrieved without complaint: two versions are " +
-			"current, so the store silently picked one by file order -- a rule with no " +
-			"relationship to which correction the user intended")
+	// Withheld and said so. A record excluded with no trace is
+	// indistinguishable from one that was never written, which would present a
+	// correction that lost a race as memory the user never saved.
+	if len(evidence.Forked) != 1 || evidence.Forked[0] != "fact" {
+		t.Fatalf("retrieval evidence reports forked records %v, want [fact]: a record withheld "+
+			"without evidence looks exactly like a record nobody ever stored, and silent loss "+
+			"is the failure this store exists to prevent", evidence.Forked)
+	}
+}
+
+// TestAForkedRecordDoesNotDenyRetrievalToOtherRecords is the blast-radius half
+// of ADR-0028, and it is the defect that record was written about.
+//
+// tips() used to return one error for the whole set, so Retrieve failed before
+// authorization ran. One corrupt record in one tenant denied memory to every
+// tenant in the store, and the refusal named version IDs belonging to a record
+// the caller was not authorized to see -- across the tenant boundary ADR-0027
+// calls the one boundary no retrieval crosses.
+func TestAForkedRecordDoesNotDenyRetrievalToOtherRecords(t *testing.T) {
+	store := open(t)
+	acme := memorystore.Scope{Principal: memorystore.Tenant, ID: "acme"}
+	globex := memorystore.Scope{Principal: memorystore.Tenant, ID: "globex"}
+
+	broken, err := store.Approve("shared-fact", acme, "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := store.Approve("unrelated", globex, "globex deploys on Fridays", "bo"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	forkIDs := importFork(t, store, "shared-fact", acme, broken.VersionID, "A", "B")
+
+	got, evidence, err := store.Retrieve(memorystore.Query{Scopes: []memorystore.Scope{globex}})
+	if err != nil {
+		t.Fatalf("a fork in tenant:acme denied retrieval to tenant:globex: %v\n"+
+			"  consequence: one damaged record is a denial of service for every other "+
+			"principal in the store, and the message discloses version IDs across the tenant "+
+			"boundary. Authorization must precede ranking; a store-wide failure precedes "+
+			"authorization, which is that same argument violated from the other side.", err)
+	}
+	if len(got) != 1 || got[0].RecordID != "unrelated" {
+		t.Fatalf("tenant:globex retrieved %d records %v, want its own single healthy record: "+
+			"a fork in another tenant must not remove a caller's own memory", len(got), got)
+	}
+	// The other tenant's fork is not this caller's evidence, and naming it
+	// would disclose the existence of a record it cannot read.
+	if len(evidence.Forked) != 0 {
+		t.Fatalf("retrieval for tenant:globex reported forked records %v belonging to another "+
+			"tenant: that discloses the existence of records this caller is not authorized "+
+			"for, which is the leak authorization-before-ranking exists to prevent",
+			evidence.Forked)
+	}
+
+	// The operator's view does carry the version IDs, because resolving a fork
+	// is impossible without them.
+	forks, err := store.Forks()
+	if err != nil {
+		t.Fatalf("forks: %v", err)
+	}
+	if len(forks) != 1 || forks[0].RecordID != "shared-fact" {
+		t.Fatalf("Forks() reported %v, want one entry for shared-fact: containment excludes the "+
+			"record from retrieval, so this is the only place an operator can learn it needs "+
+			"resolving -- without it the exclusion is silent loss", forks)
+	}
+	sort.Strings(forkIDs)
+	if !reflect.DeepEqual(forks[0].Successors, forkIDs) {
+		t.Fatalf("Forks() named successors %v, want %v: an operator resolves a fork by comparing "+
+			"the competing versions, which requires both identities", forks[0].Successors, forkIDs)
+	}
+}
+
+// TestAForkedRecordDoesNotDisableRepairOfHealthyRecords is the permanence half.
+//
+// Correct, Delete and Promote all resolve the current version through tip(),
+// which called tips(), which is the function a fork made fail. So the three
+// verbs that could repair a fork were the three a fork disabled, store-wide,
+// and a probe confirmed no API call could clear it. Phase 7 promises
+// "inspection, correction, supersession, export and deletion controls"; four of
+// the five were gone after one fork.
+func TestAForkedRecordDoesNotDisableRepairOfHealthyRecords(t *testing.T) {
+	store := open(t)
+	broken, err := store.Approve("broken", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if _, err := store.Approve("healthy", user("ana"), "deploys land on Tuesdays", "ana"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	importFork(t, store, "broken", user("ana"), broken.VersionID, "A", "B")
+
+	if _, err := store.Correct("healthy", "deploys land on Wednesdays", "ana"); err != nil {
+		t.Fatalf("correcting a healthy record failed while another record was forked: %v\n"+
+			"  consequence: one damaged record permanently disables correction of every other "+
+			"record, including the corrections that would repair the damage.", err)
+	}
+	if _, err := store.Delete("healthy", "ana"); err != nil {
+		t.Fatalf("deleting a healthy record failed while another record was forked: %v\n"+
+			"  consequence: deletion is a Phase 7 control and a user right. A fork in an "+
+			"unrelated record must not be able to withhold it.", err)
+	}
+
+	// The forked record itself stays unrepairable through Correct, and
+	// deliberately: both verbs need a single current version to supersede, and
+	// inventing one is the tiebreak ADR-0027 rejected. The refusal must name
+	// the record so the operator knows where to look.
+	_, err = store.Correct("broken", "reconciled", "ana")
+	if err == nil {
+		t.Fatal("correcting a forked record succeeded: Correct supersedes the current version, " +
+			"and with two current versions it must have silently chosen one -- the tiebreak " +
+			"ADR-0027 refused because no available rule relates to what the user meant")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("the refusal for a forked record does not name it: %v\n"+
+			"  consequence: the operator is told something is forked and not which record, so "+
+			"Forks() is the only way to find out and the message wasted the chance to say.", err)
+	}
+}
+
+// TestConcurrentCorrectionsCannotForkTheChain runs the race that produced
+// ADR-0028.
+//
+// Correct reads the current tip and then writes a version superseding it. Two
+// callers read the same tip and both write. Before the supersession claim both
+// returned nil and the store was left with two current versions -- unreadable,
+// and unrepairable through its own API. This raced to that state in three runs
+// out of five.
+//
+// ADR-0027 states that being read and written by many runs is the store's whole
+// point, and cites exactly that as why version IDs are content-addressed rather
+// than allocated from a counter. The concurrency the ID scheme was chosen to
+// support was the concurrency that destroyed the store.
+func TestConcurrentCorrectionsCannotForkTheChain(t *testing.T) {
+	store := open(t)
+	if _, err := store.Approve("fact", user("ana"), "original", "ana"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, body := range []string{"correction A", "correction B"} {
+		wg.Add(1)
+		go func(i int, body string) {
+			defer wg.Done()
+			_, errs[i] = store.Correct("fact", body, "ana")
+		}(i, body)
+	}
+	wg.Wait()
+
+	// Both may succeed only if they serialized -- the loser then re-read a tip
+	// the winner had already written, which is a chain, not a fork. What must
+	// never happen is a fork, so the store's readability is the assertion.
+	got, evidence, err := store.Retrieve(memorystore.Query{Scopes: []memorystore.Scope{user("ana")}})
+	if err != nil {
+		t.Fatalf("two concurrent corrections left the store unreadable: %v\n"+
+			"  consequence: both callers were told their correction succeeded, and the record "+
+			"is now unrecoverable through this store's own API -- Correct, Delete and Promote "+
+			"all resolve a tip and a forked record has two.", err)
+	}
+	if len(evidence.Forked) != 0 {
+		t.Fatalf("two concurrent corrections forked record(s) %v: one predecessor must have one "+
+			"successor, and the loser must be refused rather than both being accepted",
+			evidence.Forked)
+	}
+	if len(got) != 1 {
+		t.Fatalf("after two concurrent corrections the store holds %d current versions of one "+
+			"record, want 1: more than one means the chain forked", len(got))
+	}
+	if errs[0] != nil && errs[1] != nil {
+		t.Fatalf("both concurrent corrections were refused (%v / %v): one of two racing writers "+
+			"must win, or a correction is lost whenever two arrive together", errs[0], errs[1])
+	}
+}
+
+// TestASupersededVersionCannotBeClaimedTwice pins the refusal itself, apart
+// from the race that motivates it.
+//
+// The race test above can pass by serializing, so on a lucky scheduler it never
+// exercises the refusal at all. This one takes the claim deterministically and
+// asserts the second writer is told what to do about it, and that nothing was
+// written -- a refusal that leaves the losing version on disk would have forked
+// the chain while reporting failure.
+func TestASupersededVersionCannotBeClaimedTwice(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("fact", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	winner, err := store.Correct("fact", "correction one", "ana")
+	if err != nil {
+		t.Fatalf("correct: %v", err)
+	}
+
+	loser := memorystore.Record{RecordID: "fact", Supersedes: first.VersionID, Scope: user("ana"),
+		Kind: memorystore.Approved, Body: "correction two", Origin: "ana"}
+	_, err = store.Put(loser)
+	if err == nil {
+		t.Fatal("a second version superseding the same predecessor was accepted: one predecessor " +
+			"with two successors makes both current, and no rule here can say which correction " +
+			"the user intended")
+	}
+	// The loser has to be told to re-read, because a correction is a human
+	// assertion about content: replaying it onto a version its author never
+	// saw would silently overwrite the correction that won.
+	if !strings.Contains(err.Error(), "Re-read") {
+		t.Fatalf("the refusal does not tell the caller to re-read the current version: %v\n"+
+			"  consequence: the obvious response to a rejected write is to retry it, and a "+
+			"blind retry here reapplies a correction against a predecessor that is no longer "+
+			"current -- overwriting the winner with stale intent.", err)
+	}
+
+	versions, err := store.Versions()
+	if err != nil {
+		t.Fatalf("versions: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("the store holds %d versions after a refused supersession, want 2: the refusal "+
+			"must leave nothing behind, or it persists the losing version and forks the chain "+
+			"while reporting failure", len(versions))
+	}
+	got, _, err := store.Retrieve(memorystore.Query{Scopes: []memorystore.Scope{user("ana")}})
+	if err != nil {
+		t.Fatalf("retrieve after a refused supersession: %v", err)
+	}
+	if len(got) != 1 || got[0].VersionID != winner.VersionID {
+		t.Fatalf("after a refused supersession the current version is %v, want the winner %q: "+
+			"the refusal must not disturb the correction that succeeded", got, winner.VersionID)
+	}
+}
+
+// TestReapplyingAnIdenticalCorrectionIsIdempotent pins the benign collision, so
+// the claim cannot later be tightened into something that breaks re-Put.
+//
+// Version IDs are content-addressed, so the same correction produces the same
+// version. Refusing that would make every retry above this store fail, and
+// ADR-0027 relies on re-Put of identical content being a no-op.
+func TestReapplyingAnIdenticalCorrectionIsIdempotent(t *testing.T) {
+	store := open(t)
+	first, err := store.Approve("fact", user("ana"), "original", "ana")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	correction := memorystore.Record{RecordID: "fact", Supersedes: first.VersionID,
+		Scope: user("ana"), Kind: memorystore.Approved, Body: "corrected", Origin: "ana"}
+
+	one, err := store.Put(correction)
+	if err != nil {
+		t.Fatalf("first correction: %v", err)
+	}
+	two, err := store.Put(correction)
+	if err != nil {
+		t.Fatalf("re-applying an identical correction was refused: %v\n"+
+			"  consequence: version IDs are content-addressed, so a retry produces the same "+
+			"version. Refusing it makes every retry path above this store fail on success.", err)
+	}
+	if one.VersionID != two.VersionID {
+		t.Fatalf("identical corrections produced versions %q and %q", one.VersionID, two.VersionID)
+	}
+	versions, err := store.Versions()
+	if err != nil {
+		t.Fatalf("versions: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("the store holds %d versions after applying one correction twice, want 2",
+			len(versions))
 	}
 }
 

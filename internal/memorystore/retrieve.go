@@ -41,6 +41,13 @@ type Retrieval struct {
 	Considered int         `json:"considered"`
 	Authorized int         `json:"authorized"`
 	Selections []Selection `json:"selections"`
+	// Forked names the caller's own records that were withheld because their
+	// supersession chain has more than one current version. Reported rather
+	// than dropped silently: a record excluded with no trace looks exactly
+	// like a record that was never written, so a correction that lost a race
+	// would present as memory the user never saved. Record IDs only -- the
+	// competing version IDs are an operator concern and live on Store.Forks.
+	Forked []string `json:"forked,omitempty"`
 }
 
 // Selection records one returned record and why it ranked where it did.
@@ -97,12 +104,16 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 	if err != nil {
 		return nil, Retrieval{}, err
 	}
-	live, err := tips(versions)
-	if err != nil {
-		return nil, Retrieval{}, err
-	}
+	// A forked record is excluded, and the store is still read. Before
+	// ADR-0028 a single fork made this function return an error, so one
+	// damaged record in one tenant denied memory to every tenant -- and the
+	// error text named version IDs across the tenant boundary ADR-0027 calls
+	// the one boundary no retrieval crosses. Authorization must precede
+	// ranking; a store-wide failure precedes authorization, which is that same
+	// argument violated from the other side.
+	live, forked := tips(versions)
 	evidence := Retrieval{Schema: Schema, RetrievalVersion: RetrievalVersion,
-		Scopes: names, Selections: []Selection{}}
+		Scopes: names, Selections: []Selection{}, Forked: []string{}}
 
 	var kept []Record
 	for _, r := range live {
@@ -126,6 +137,32 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 			continue
 		}
 		kept = append(kept, r)
+	}
+
+	// A forked record the caller owns is named, so a correction that lost a
+	// race is visibly withheld rather than silently absent -- indistinguishable
+	// otherwise from a record nobody ever wrote, which is the silent loss this
+	// store exists to prevent.
+	//
+	// Scoped to the caller's own records for the same reason authorization
+	// precedes ranking: a fork in another tenant is not this caller's evidence,
+	// and naming it here would disclose the existence of records the caller is
+	// not authorized for. An operator reads the whole set from Store.Forks.
+	// Record IDs only; the competing version IDs stay in Forks, which is a
+	// local inspection verb rather than a value committed into an artifact.
+	if len(forked) > 0 {
+		scopeOf := make(map[string]Scope, len(forked))
+		for _, v := range versions {
+			if _, bad := forked[v.RecordID]; bad {
+				scopeOf[v.RecordID] = v.Scope
+			}
+		}
+		for recordID := range forked {
+			if authorized[scopeOf[recordID].String()] {
+				evidence.Forked = append(evidence.Forked, recordID)
+			}
+		}
+		sort.Strings(evidence.Forked)
 	}
 
 	// Ranking. There is no semantic ranker yet and this deliberately does not
