@@ -342,9 +342,28 @@ fails too — the vacuity that direction left open. The frozen per-field counts 
 removed rather than corrected, because a hand-kept count drifts again on the next
 record.
 
-Temporal validity, ranking and deletion lineage remain
-undecided and still need their own record (item 7 below). The store itself does
-not exist.
+A ninth prerequisite is settled, and it is the first that touches the record
+rather than the receipt or the documents around it. Every prerequisite before it
+concerned what memory *presented* (the channel, the receipt, its version
+identity, its authority) or the reliability of this plan; none touched the
+stored thing a receipt names a version of. ADR-0028 settles the hardest part of
+that record — its temporal validity — ahead of the rest, for the reason ADR-0020
+settled the channel first: it is the shape most expensive to change once records
+are committed against it. Validity is bitemporal (a valid-time axis for when the
+fact holds in the world, a decision-time axis for when the store believed it)
+and its decision axis is append-only, so a correction closes the old version's
+belief interval and appends a new one rather than mutating it. That is exactly
+what makes "stale versions stop appearing after correction" and "contradictions
+preserve temporal history" both true at once — a single timestamp cannot satisfy
+both, because one axis cannot both hide a version from the present and keep it in
+the past. `internal/memory` holds the contract as a pure leaf, guarded like
+`internal/job`, so the temporal judgment never reads a clock and an as-of query
+cannot answer differently on replay.
+
+Ranking and deletion lineage remain
+undecided and still need their own record (item 7 below), as do the record's
+other attributes — provenance, evidence class, confidence, sensitivity, purpose,
+retention and lifecycle. The store itself does not exist.
 
 ## Phase 8 — First useful Asha vertical slice
 

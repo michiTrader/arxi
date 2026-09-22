@@ -37,6 +37,7 @@ has to decide which — not ignore the contradiction.
 | [0025](0025-every-assembler-uses-the-memory-channel.md) | Every assembler uses the memory channel, not just the durable one | accepted |
 | [0026](0026-the-roadmap-cites-every-enabling-decision.md) | The roadmap cites every decision that claims to enable it | accepted |
 | [0027](0027-the-header-vocabulary-is-derived-not-counted.md) | The ADR header vocabulary is derived from the corpus, not counted by hand | accepted |
+| [0028](0028-memory-validity-is-bitemporal-and-append-only.md) | Governed memory validity is bitemporal and append-only | accepted |
 
 ## Format
 
