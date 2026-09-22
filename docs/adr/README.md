@@ -40,6 +40,7 @@ has to decide which — not ignore the contradiction.
 | [0028](0028-supersession-is-claimed-exclusively-and-a-fork-is-contained.md) | Superseding a version claims it exclusively, and a fork that still arrives is contained to its own record | accepted |
 | [0029](0029-a-claim-is-released-when-the-write-it-guarded-fails.md) | A supersession claim is released when the write it guarded fails, and an unfulfilled one is visible and releasable | accepted |
 | [0030](0030-the-header-vocabulary-is-derived-not-counted.md) | The ADR header vocabulary is derived from the corpus, not counted by hand | accepted |
+| [0031](0031-a-record-with-two-roots-is-a-fork.md) | A record with two roots is a fork, not a silently chosen tip | accepted |
 
 ## Format
 
