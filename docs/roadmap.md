@@ -404,11 +404,22 @@ receipt, because it is a property of a presentation, not of a stored record. The
 `Version` does not yet carry a kind field — that is the record struct, the next
 step — so this is a relocation reviewable on its own.
 
+A thirteenth prerequisite is settled, composing the previous ones. ADR-0032 puts
+a governed authority kind on the stored `Version`, so identity (ADR-0021),
+authority (ADR-0023/0031) and validity (ADR-0028) now sit on one unit — the
+record struct the store holds and authorizes before it ranks. `Validate` refuses
+a kind that is not governed, which excludes frozen configuration memory: a
+blueprint field has no record identity, so it is presented from the blueprint and
+never stored as a version. `Supersede` propagates the kind, so a correction keeps
+a record's authority rather than laundering a candidate into an approved record;
+promotion is a separate Phase 10 operation, deliberately not expressible through a
+correction.
+
 Ranking remains undecided and still needs its own record (item 7 below), as do
-the record's other attributes — provenance, evidence class, confidence,
-sensitivity, purpose, retention and lifecycle — and the record struct that
-composes identity, authority and validity into the thing the store holds. The
-store itself does not exist.
+the record's remaining descriptive attributes — provenance, evidence class,
+confidence, sensitivity, purpose, retention and lifecycle — which are left off the
+version because several interact with ranking and committing their shape now would
+pre-decide it. The store itself does not exist.
 
 ## Phase 8 — First useful Asha vertical slice
 

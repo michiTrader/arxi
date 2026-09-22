@@ -41,6 +41,7 @@ has to decide which — not ignore the contradiction.
 | [0029](0029-supersession-is-an-operation-and-a-lineage-is-append-only.md) | Supersession is an operation, and a lineage is an append-only chain | accepted |
 | [0030](0030-deletion-is-a-terminal-retraction-not-a-supersession.md) | Deletion is a terminal retraction, distinct from supersession | accepted |
 | [0031](0031-authority-kind-is-a-pure-leaf-enumeration.md) | The authority kind is a pure-leaf enumeration the record and receipt share | accepted |
+| [0032](0032-a-stored-version-carries-a-governed-authority-kind.md) | A stored memory version carries a governed authority kind | accepted |
 
 ## Format
 
