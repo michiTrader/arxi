@@ -7,15 +7,17 @@ import "fmt"
 //
 // RecordID is stable across every version of the same fact; VersionID is unique
 // to this one. The pair is the identity ADR-0021 added to the presentation
-// receipt, here on the stored thing the receipt names a version of. This struct
-// deliberately carries no authority kind, provenance or evidence class yet: the
-// kind enumeration lives on the receipt in internal/contextprep, and pulling it
-// into this pure leaf is a package move worth its own decision, not a side
-// effect of settling lineage. Validity is the part settled by ADR-0028; this
-// file settles how two versions of one record chain.
+// receipt, here on the stored thing the receipt names a version of. Kind is the
+// authority the record carries (ADR-0031), and it must be a governed kind: a
+// stored version has a record identity, and frozen configuration memory has none
+// (ADR-0021/0023), so the frozen kind is never a stored version (ADR-0032). This
+// struct still carries no provenance, evidence class, confidence, sensitivity,
+// purpose, retention or lifecycle -- those interact with ranking and remain
+// undecided. Validity is settled by ADR-0028; the chain by ADR-0029/0030.
 type Version struct {
 	RecordID  string   `json:"record_id"`
 	VersionID string   `json:"version_id"`
+	Kind      Kind     `json:"kind"`
 	Validity  Validity `json:"validity"`
 
 	// Retracted marks this version's closure as a deletion rather than a handoff
@@ -41,6 +43,15 @@ func (v Version) Validate() error {
 	if v.VersionID == "" {
 		return fmt.Errorf("memory version for record %q has no version_id: without it a correction "+
 			"cannot name the version it replaces, which is the identity ADR-0021 requires", v.RecordID)
+	}
+	if err := v.Kind.Validate(); err != nil {
+		return fmt.Errorf("memory version %q of record %q: %w", v.VersionID, v.RecordID, err)
+	}
+	if !v.Kind.Governed() {
+		return fmt.Errorf("memory version %q of record %q carries kind %q, which is not a governed "+
+			"record kind: a stored version has a record identity, and frozen configuration memory has "+
+			"none, so it is presented from a blueprint and never stored as a version", v.VersionID,
+			v.RecordID, string(v.Kind))
 	}
 	if v.Retracted && v.Validity.Current() {
 		return fmt.Errorf("memory version %q of record %q is marked retracted but its belief interval is "+
@@ -147,6 +158,7 @@ func (v Version) Supersede(newVersionID, at, validFrom, validTo string) (Version
 	successor := Version{
 		RecordID:  v.RecordID,
 		VersionID: newVersionID,
+		Kind:      v.Kind,
 		Validity:  Validity{ValidFrom: validFrom, ValidTo: validTo, RecordedAt: at},
 	}
 	if err := closed.Validity.Validate(); err != nil {
