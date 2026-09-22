@@ -42,6 +42,7 @@ has to decide which — not ignore the contradiction.
 | [0030](0030-the-header-vocabulary-is-derived-not-counted.md) | The ADR header vocabulary is derived from the corpus, not counted by hand | accepted |
 | [0031](0031-a-record-with-two-roots-is-a-fork.md) | A record with two roots is a fork, not a silently chosen tip | accepted |
 | [0032](0032-a-forked-record-is-resolvable-by-an-operators-choice.md) | A forked record is resolvable by an operator's choice, not permanently contained | accepted |
+| [0033](0033-an-edge-is-contained-to-its-own-record.md) | A supersede or retire edge is contained to its own record | accepted |
 
 ## Format
 
