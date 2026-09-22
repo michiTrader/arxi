@@ -145,6 +145,36 @@ func TestWorkspaceModelIsPureAndIndependent(t *testing.T) {
 	}
 }
 
+// TestMemoryModelIsPureAndIndependent keeps governed memory a pure leaf.
+//
+// internal/memory holds the temporal contract a Phase 7 store, its retrieval and
+// its deletion lineage build on. It may represent instants with time.Time and
+// parse the RFC3339 strings the rest of the system stores, exactly as
+// internal/job does for lease judgments, but it must never acquire an instant or
+// perform I/O. If LiveAt read the clock, a version excluded from an as-of query
+// during the live run could be included during replay, and "stale versions stop
+// appearing after correction" would hold on one fold and fail on the other.
+// Storage, indexing and deletion propagation belong to later adapter packages.
+func TestMemoryModelIsPureAndIndependent(t *testing.T) {
+	permitted := map[string]bool{"time": true}
+	for _, p := range ownClosure(t, mod+"internal/memory") {
+		for _, imp := range p.Imports {
+			if permitted[imp] {
+				continue
+			}
+			if why, bad := forbidden[imp]; bad {
+				t.Errorf("%s imports %q.\n  why this is wrong: %s. Bitemporal placement must be a function of the record and the explicitly supplied query instants, or an as-of query can disagree with itself between the original fold and replay.\n  what to do: pass the instant into internal/memory and perform clocks, storage, indexing and deletion in an adapter.", p.ImportPath, imp, why)
+			}
+		}
+	}
+
+	for _, d := range list(t, mod+"internal/memory").Deps {
+		if strings.HasPrefix(d, mod) {
+			t.Errorf("internal/memory depends on %s.\n  why this is wrong: the governed-memory contract is a pure leaf shared by the store, retrieval and deletion lineage; importing one of those layers would make the temporal judgment depend on the adapter using it.\n  what to do: keep records and validation in internal/memory and let the caller join them to runtime adapters.", d)
+		}
+	}
+}
+
 // TestBlueprintDependsOnlyOnTheKernel keeps blueprint loading a leaf.
 //
 // The temptation as the run loop lands will be to have the loader open the log
