@@ -390,10 +390,25 @@ indexes, summaries, caches and unused prepared contexts is a store concern that
 needs the store to exist, and the lineage rule here is the invariant those paths
 must preserve.
 
+A twelfth prerequisite is settled, and it is the relocation ADR-0029 and ADR-0030
+each flagged and deferred. Authority was enumerated (ADR-0023) but the
+enumeration lived on the presentation receipt in `internal/contextprep`, the only
+thing that carried a kind. A stored version needs its own authority — the store
+authorizes before it ranks — and copying the enumeration into the pure leaf would
+have created two tables that drift, the exact failure ADR-0023 forbids. ADR-0031
+moves the enumeration to `internal/memory` as `memory.Kind`, and the receipt now
+delegates its `Governed`, `Presentable` and unknown-kind refusal to it, so the
+record and the receipt read one vocabulary. The record-layer rule refuses only an
+unknown kind; the rule that a candidate is never *presented* stays with the
+receipt, because it is a property of a presentation, not of a stored record. The
+`Version` does not yet carry a kind field — that is the record struct, the next
+step — so this is a relocation reviewable on its own.
+
 Ranking remains undecided and still needs its own record (item 7 below), as do
 the record's other attributes — provenance, evidence class, confidence,
-sensitivity, purpose, retention and lifecycle, and the authority kind that today
-lives on the receipt rather than the record. The store itself does not exist.
+sensitivity, purpose, retention and lifecycle — and the record struct that
+composes identity, authority and validity into the thing the store holds. The
+store itself does not exist.
 
 ## Phase 8 — First useful Asha vertical slice
 
