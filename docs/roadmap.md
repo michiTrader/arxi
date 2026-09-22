@@ -494,6 +494,17 @@ argument, and the retired heads stay on disk so a receipt naming one still
 resolves. This is the "supersession" control Phase 7's exit evidence promises,
 made reachable for a record a fork had frozen.
 
+Probing that new edge in turn found the hole ADR-0033 closes. `Retires` removes a
+head, and nothing checked that its targets belonged to the record declaring them:
+a version of one record naming another record's head — in `Retires` or in the
+pre-existing `Supersedes` — silently removed that head, leaving the victim with
+zero current versions, unreadable, with no fork and no tombstone, and the victim
+could be in another tenant. That is the cross-scope leakage the exit evidence
+tests from the other direction, arriving as deletion rather than disclosure.
+ADR-0033 honors an edge only within one record: a foreign edge is inert, the
+target keeps its head, and a genuinely forked carrier surfaces through the
+visible fork path instead of taking an unrelated record down silently.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
