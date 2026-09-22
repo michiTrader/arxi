@@ -429,6 +429,22 @@ Like the descriptive attributes, `Scope` is not yet attached to the `Version`; t
 authorization primitive is what needed deciding, and wiring it onto the record
 belongs with the store.
 
+A fifteenth prerequisite is settled: the retrieval audit trail. The record
+contract satisfies the exit evidence about correction and leakage, but a second
+clause — "retrieval receipts record exact selected versions and excerpts,
+ranking/index versions and reasons" — had nowhere to live, because the only
+receipt was `internal/contextprep`'s, which records what was *presented to a
+model*, not what a *retrieval selected from the store*. ADR-0034 adds
+`memory.RetrievalReceipt` and `Selection`: the retrieval-side companion to the
+presentation receipt. `Validate` refuses a receipt that cannot account for what
+it selected — a tenant-less principal, no ranking version, a selection missing its
+record or version or reason, or the same version counted twice — so "every
+influence identifies its source and version" is executable on the retrieval path.
+An empty receipt is valid: a retrieval that matched nothing, including one refused
+across a tenant, proves nothing influenced the turn, which is the leakage evidence
+itself. `RankingVersion` is opaque here, so the receipt has a field to record a
+ranking decision in without a schema change when ranking is decided.
+
 Ranking remains undecided and still needs its own record (item 7 below), as do
 the record's remaining descriptive attributes — provenance, evidence class,
 confidence, sensitivity, purpose, retention and lifecycle — which are left off the

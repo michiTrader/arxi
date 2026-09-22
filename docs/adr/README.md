@@ -43,6 +43,7 @@ has to decide which — not ignore the contradiction.
 | [0031](0031-authority-kind-is-a-pure-leaf-enumeration.md) | The authority kind is a pure-leaf enumeration the record and receipt share | accepted |
 | [0032](0032-a-stored-version-carries-a-governed-authority-kind.md) | A stored memory version carries a governed authority kind | accepted |
 | [0033](0033-memory-authorization-is-a-scope-match-tenant-fails-closed.md) | Memory authorization is a scope match, and the tenant fails closed | accepted |
+| [0034](0034-a-retrieval-receipt-names-every-influence-by-version.md) | A retrieval receipt names every influence by version and reason | accepted |
 
 ## Format
 
