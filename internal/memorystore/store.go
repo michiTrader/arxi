@@ -816,13 +816,29 @@ func (s *Store) ReleaseClaim(predecessor string) error {
 // than in two predicates that could disagree about whether a retired version
 // still counts.
 func headsByRecord(versions []Record) map[string][]Record {
+	recordOf := make(map[string]string, len(versions))
+	for _, v := range versions {
+		recordOf[v.VersionID] = v.RecordID
+	}
 	superseded := make(map[string]bool, len(versions))
 	retired := make(map[string]bool)
 	for _, v := range versions {
+		// An edge is honored only within one record (ADR-0033). A supersede or
+		// retire whose target belongs to a different record is ignored, so an
+		// imported, replicated or corrupt version cannot remove another record's
+		// head -- and cannot reach across a scope boundary to do it. Without this
+		// check a version of one record naming another record's head in Supersedes
+		// or Retires silently dropped that head, leaving the victim with zero
+		// current versions: unreadable, with no fork and no tombstone, which is
+		// exactly the silent loss ADR-0031 and ADR-0028 name. The target keeps its
+		// head; the version carrying the foreign edge stays a head of its own
+		// record, where a second head is reported as a fork rather than swallowed.
 		for _, r := range v.Retires {
-			retired[r] = true
+			if recordOf[r] == v.RecordID {
+				retired[r] = true
+			}
 		}
-		if v.Supersedes != "" {
+		if v.Supersedes != "" && recordOf[v.Supersedes] == v.RecordID {
 			superseded[v.Supersedes] = true
 		}
 	}
