@@ -3,6 +3,8 @@ package contextprep
 import (
 	"strings"
 	"testing"
+
+	"github.com/michiTrader/arxi/internal/memory"
 )
 
 // ADR-0023 enumerates memory authority. These tests exist because a throwaway
@@ -40,10 +42,11 @@ func TestEachEnumeratedKindReportsItsAuthority(t *testing.T) {
 		})
 	}
 
-	// Every enumerated kind must be reachable through the table the predicates
-	// read, or a constant could exist that Validate refuses as unknown.
+	// Every enumerated kind must be known to the pure-leaf enumeration the
+	// predicates now read (ADR-0031), or a constant could exist that Validate
+	// refuses as unknown.
 	for _, kind := range []string{KindFrozenContextMemory, KindApprovedMemoryRecord, KindProposedMemoryCandidate} {
-		if _, known := memoryKindPresentable[kind]; !known {
+		if !memory.Kind(kind).Known() {
 			t.Errorf("kind %q is declared as a constant but absent from the enumeration, so "+
 				"Validate would refuse it as unknown", kind)
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/michiTrader/arxi/internal/compaction"
 	"github.com/michiTrader/arxi/internal/kernel"
+	"github.com/michiTrader/arxi/internal/memory"
 	"github.com/michiTrader/arxi/internal/transcript"
 	"github.com/michiTrader/arxi/internal/turn"
 )
@@ -79,55 +80,30 @@ type MemoryReceipt struct {
 	VersionID string `json:"version_id,omitempty"`
 }
 
-// The enumerated memory receipt kinds. ADR-0023 enumerates authority instead of
-// inferring it: a kind outside this set is not authority, it is invalid.
+// The enumerated memory kinds now live in internal/memory (ADR-0031). These are
+// the string values a receipt's Kind field carries, kept as aliases so the wire
+// field stays a plain string while the single enumeration lives in the pure leaf
+// the store reads too. Two copies of the enumeration would drift, which is the
+// failure ADR-0023 names.
 const (
-	// KindFrozenContextMemory marks a receipt for ContextSpec.Memory, the
-	// static prose Phase 5 carries on a frozen blueprint. It has no record
-	// identity, because a configuration field is not a record.
-	KindFrozenContextMemory = "frozen_context_memory"
-	// KindApprovedMemoryRecord marks a stored record supplied or explicitly
-	// approved by a user, operator or import.
-	KindApprovedMemoryRecord = "approved_memory_record"
-	// KindProposedMemoryCandidate marks model-generated material. It may be
-	// stored, inspected and promoted, and it is never presented: the roadmap
-	// requires that model material "may propose candidates but cannot create
-	// active memory", and a candidate that can be presented is not a candidate.
-	KindProposedMemoryCandidate = "proposed_memory_candidate"
+	KindFrozenContextMemory     = string(memory.KindFrozenContextMemory)
+	KindApprovedMemoryRecord    = string(memory.KindApprovedMemoryRecord)
+	KindProposedMemoryCandidate = string(memory.KindProposedMemoryCandidate)
 )
-
-// memoryKindPresentable maps every enumerated kind to whether a receipt of that
-// kind may appear in a prepared context.
-//
-// A map rather than a switch so that Validate's unknown-kind refusal and
-// Presentable's answer come from one table: two lists would let a kind be
-// valid and un-presentable by omission rather than by decision.
-var memoryKindPresentable = map[string]bool{
-	KindFrozenContextMemory:     true,
-	KindApprovedMemoryRecord:    true,
-	KindProposedMemoryCandidate: false,
-}
 
 // Governed reports whether the receipt describes a stored memory record rather
 // than frozen configuration prose. Governed records must name their version.
-//
-// Derived from the enumeration, not from `!= KindFrozenContextMemory`. The
-// negation form was a blocklist with one entry, so a typo'd kind reported true
-// and validated as authority -- measured, not supposed. ADR-0020 had already
-// rejected a blocklist for memory content; this is the same shape on the kind
-// field.
+// The judgment is the pure leaf's (memory.Kind.Governed), so the receipt and the
+// stored record cannot disagree about what counts as a governed record.
 func (r MemoryReceipt) Governed() bool {
-	_, known := memoryKindPresentable[r.Kind]
-	return known && r.Kind != KindFrozenContextMemory
+	return memory.Kind(r.Kind).Governed()
 }
 
 // Presentable reports whether the receipt may appear in a prepared context.
-//
-// False for an unknown kind, which is the inverted failure direction ADR-0023
-// decided: material nobody enumerated gets no authority rather than authority
-// by default.
+// False for an unknown kind (ADR-0023), and answered by the same enumeration the
+// store uses (ADR-0031).
 func (r MemoryReceipt) Presentable() bool {
-	return memoryKindPresentable[r.Kind]
+	return memory.Kind(r.Kind).Presentable()
 }
 
 // Validate refuses a receipt that advertises more identity than it carries, or
@@ -149,7 +125,7 @@ func (r MemoryReceipt) Validate() error {
 	if r.Kind == "" {
 		return fmt.Errorf("memory receipt has no kind: a receipt must say what it is evidence of")
 	}
-	if _, known := memoryKindPresentable[r.Kind]; !known {
+	if !memory.Kind(r.Kind).Known() {
 		return fmt.Errorf("memory receipt has unknown kind %q: authority is enumerated, so an "+
 			"unrecognized kind fails closed rather than inheriting the authority of a record "+
 			"somebody approved", r.Kind)
