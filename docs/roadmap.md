@@ -360,10 +360,25 @@ the past. `internal/memory` holds the contract as a pure leaf, guarded like
 `internal/job`, so the temporal judgment never reads a clock and an as-of query
 cannot answer differently on replay.
 
+A tenth prerequisite is settled, and it is what made the ninth enforceable.
+ADR-0028 proved its tiling property on two hand-built validities whose bounds
+happened to align — the same "assertion with no subject" shape ADR-0025
+recorded, because nothing in the package actually *produced* a correction, so
+nothing guaranteed a real one lines the bounds up. ADR-0029 makes supersession an
+operation: `Version.Supersede` closes the predecessor and opens the successor at
+the same instant, so the belief axis tiles by construction and no call site can
+introduce a gap or an overlap. It also gives the stored version the `RecordID` and
+`VersionID` ADR-0021 put on the receipt, and adds `ValidateLineage`, which refuses
+any chain that is not append-only and contiguous. A lineage may end closed — a
+fully retracted fact — which is the tombstone shape the deletion decision will
+build on, so the validator pins the chain without deciding what a closed tail
+means for a query.
+
 Ranking and deletion lineage remain
 undecided and still need their own record (item 7 below), as do the record's
 other attributes — provenance, evidence class, confidence, sensitivity, purpose,
-retention and lifecycle. The store itself does not exist.
+retention and lifecycle, and the authority kind that today lives on the receipt
+rather than the record. The store itself does not exist.
 
 ## Phase 8 — First useful Asha vertical slice
 
