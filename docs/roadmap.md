@@ -463,6 +463,21 @@ created so it cannot steal an in-flight one, and adds `Claims()` and
 `ReleaseClaim()` so the residue of a crash is diagnosable and repairable instead
 of permanent and silent.
 
+Probing ADR-0028's fork detector in turn found the fork it could not see, and
+ADR-0031 corrects it. ADR-0028 defined a fork as two versions superseding one
+predecessor and counted successors per predecessor to find it. Two `Approve`
+calls for one record produce two versions that supersede *nothing* — two roots
+that share no predecessor — so the count never rose and both were reported
+current: retrieval returned two versions of one record and `tip` chose between
+them by version-ID order, the silent loss the store exists to prevent, reached
+through the gap in the fork test rather than the race the claim covers. ADR-0031
+rephrases detection against the invariant it always meant — one current version
+per record, and any record with more is forked, however the extra arose — which
+subsumes the multi-successor case and catches the multi-root one. A root write
+over a record that already has a different version is also refused at the source,
+with `Correct` named as the verb that changes a record without forking it, while
+an imported or concurrent root fork is still contained at read.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
