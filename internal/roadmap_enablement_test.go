@@ -58,8 +58,16 @@ func adrHeaderBlock(body string) string {
 // new field requires editing this set, which is the intended trade: the edit is
 // a deliberate decision recorded in one place, whereas the silence it replaces
 // was undetectable.
-// The set is the measured vocabulary of all 25 records, not a guess: Status and
-// Affects appear in every one, "Depends on" in 16, Enables in 6 and Origin in 2.
+//
+// The set is meant to be the measured vocabulary of the corpus, and
+// TestHeaderVocabularyMatchesTheCorpus derives that vocabulary on every run and
+// asserts this map equals it exactly. Frozen per-field counts are deliberately
+// not written here: an earlier version of this comment stated "all 25 records
+// ... Depends on in 16, Enables in 6" and every figure was wrong the moment it
+// was typed, because the corpus already held 26 records and the author counted
+// it without the record stating the count (ADR-0027). A count kept by hand
+// drifts precisely because nothing fails when it does, so it is derived below
+// rather than narrated here.
 var adrHeaderVocabulary = map[string]bool{
 	"Status":     true,
 	"Affects":    true,
@@ -194,6 +202,80 @@ func TestEveryEnablingDecisionIsCitedByThePhaseItEnables(t *testing.T) {
 				"  Remedy: state in Phase %s's status what the decision settled, or remove the "+
 				"\"Enables: Phase %s\" header if it no longer does.",
 				phase, strings.Join(missing, ", "), phase, phase)
+		}
+	}
+}
+
+// TestHeaderVocabularyMatchesTheCorpus derives the header field vocabulary from
+// the ADR corpus on every run and asserts adrHeaderVocabulary equals it exactly,
+// in both directions.
+//
+// This is the fourth instance of one shape, found by measuring the third.
+// ADR-0024 found a guard with no caller; ADR-0025 an assertion with no subject;
+// ADR-0026 a narration with no source; this is a count with no derivation.
+// ADR-0026 introduced adrHeaderVocabulary and justified it in prose as "the
+// measured vocabulary of all 25 records -- Depends on in 16, Enables in 6" while
+// the corpus held 26 records with those fields appearing 17 and 7 times. The
+// author counted the corpus without the record stating the count: the same
+// off-by-one that TestEveryDocumentStatingTheADRCountAgreesWithTheCorpus was
+// written to catch for the total, reproduced one field-set deeper and left
+// unchecked.
+//
+// The existing citation test already fails closed on a corpus field the map does
+// not list, which pins map >= corpus. The missing direction is corpus >= map: a
+// key the map lists that no ADR uses makes "the measured vocabulary" false with
+// nothing failing, exactly the vacuity ADR-0026 warned about one level up.
+// Exact equality pins both, so the map is a checked projection of the corpus
+// rather than a list kept in step with it by hand.
+func TestHeaderVocabularyMatchesTheCorpus(t *testing.T) {
+	entries, err := os.ReadDir("../docs/adr")
+	if err != nil {
+		t.Fatalf("cannot read the ADR directory: %v: the corpus is this test's only source of truth", err)
+	}
+
+	observed := map[string]int{}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		if adrFilename.FindStringSubmatch(entry.Name()) == nil {
+			continue // README.md and anything else not numbered.
+		}
+		body, err := os.ReadFile(filepath.Join("../docs/adr", entry.Name()))
+		if err != nil {
+			t.Fatalf("cannot read ADR %s: %v", entry.Name(), err)
+		}
+		for _, match := range headerField.FindAllStringSubmatch(adrHeaderBlock(string(body)), -1) {
+			observed[match[1]]++
+		}
+	}
+
+	if len(observed) == 0 {
+		// Fail rather than pass vacuously: with no fields observed, the equality
+		// below would hold only if the map were empty too, and an empty
+		// vocabulary makes the citation test's fail-closed guard match nothing.
+		t.Fatal("no header fields found in any ADR: the corpus lost its header blocks or the " +
+			"heading format changed, so this test compares two empty sets and stops guarding the " +
+			"vocabulary. Remedy: re-derive headerField and firstSection from the format the ADRs now use")
+	}
+
+	for field, count := range observed {
+		if !adrHeaderVocabulary[field] {
+			t.Errorf("ADRs use header field %q (%d times) and adrHeaderVocabulary does not list it.\n"+
+				"  Consequence: the citation test reads an unlisted field as an unknown one and fails "+
+				"closed, so a legitimate field blocks the suite until it is enumerated.\n"+
+				"  Remedy: add %q to adrHeaderVocabulary as a deliberate decision, per ADR-0027.",
+				field, count, field)
+		}
+	}
+	for field := range adrHeaderVocabulary {
+		if observed[field] == 0 {
+			t.Errorf("adrHeaderVocabulary lists header field %q and no ADR uses it.\n"+
+				"  Consequence: the map claims to be the measured vocabulary of the corpus while "+
+				"carrying a field the corpus does not contain, so \"the measured vocabulary\" is "+
+				"false with nothing failing -- the vacuity ADR-0026 warned about, one level up.\n"+
+				"  Remedy: remove %q from adrHeaderVocabulary, or add the ADR field it was added for.",
+				field, field)
 		}
 	}
 }
