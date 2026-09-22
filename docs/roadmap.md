@@ -445,10 +445,27 @@ across a tenant, proves nothing influenced the turn, which is the leakage eviden
 itself. `RankingVersion` is opaque here, so the receipt has a field to record a
 ranking decision in without a schema change when ranking is decided.
 
+A sixteenth prerequisite is settled, and it composes the parts into the unit a
+store holds. The pieces were built separately — identity, authority and validity
+on a version, the correction/deletion chain as a lineage, scope authorization,
+the retrieval receipt — and two things were left open that pointed at the same
+missing type: where scope lives (deferred by ADR-0022/0032/0033 as "with the
+store"), and what composes authorization with bitemporal selection in the order
+Phase 7 states. ADR-0035 adds `memory.Record`: a scope over an append-only
+lineage. Scope sits on the aggregate, because a correction does not move a record
+to another tenant. `Record.VisibleTo(principal, decisionAsOf, validAt)`
+authorizes first and only then selects the version in force, so an out-of-scope
+principal sees nothing (empty, not an error) and the bitemporal behavior — current
+version to a present query, superseded to a historical one, nothing to a present
+query on a retracted record — is proven through the composed primitive, not just
+on raw validity. It returns the version in force, not a ranked list: ranking
+orders records against a query and stays undecided; this answers the prior
+question ranking presupposes.
+
 Ranking remains undecided and still needs its own record (item 7 below), as do
 the record's remaining descriptive attributes — provenance, evidence class,
 confidence, sensitivity, purpose, retention and lifecycle — which are left off the
-version because several interact with ranking and committing their shape now would
+record because several interact with ranking and committing their shape now would
 pre-decide it. The store itself does not exist.
 
 ## Phase 8 — First useful Asha vertical slice
