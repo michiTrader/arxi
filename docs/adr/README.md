@@ -39,6 +39,7 @@ has to decide which — not ignore the contradiction.
 | [0027](0027-the-header-vocabulary-is-derived-not-counted.md) | The ADR header vocabulary is derived from the corpus, not counted by hand | accepted |
 | [0028](0028-memory-validity-is-bitemporal-and-append-only.md) | Governed memory validity is bitemporal and append-only | accepted |
 | [0029](0029-supersession-is-an-operation-and-a-lineage-is-append-only.md) | Supersession is an operation, and a lineage is an append-only chain | accepted |
+| [0030](0030-deletion-is-a-terminal-retraction-not-a-supersession.md) | Deletion is a terminal retraction, distinct from supersession | accepted |
 
 ## Format
 

@@ -374,11 +374,26 @@ fully retracted fact — which is the tombstone shape the deletion decision will
 build on, so the validator pins the chain without deciding what a closed tail
 means for a query.
 
-Ranking and deletion lineage remain
-undecided and still need their own record (item 7 below), as do the record's
-other attributes — provenance, evidence class, confidence, sensitivity, purpose,
-retention and lifecycle, and the authority kind that today lives on the receipt
-rather than the record. The store itself does not exist.
+An eleventh prerequisite is settled, and it closes the meaning ADR-0029 left
+open. A supersession and a deletion produce the same bytes — both close the
+current version's belief interval — so a closed tail was indistinguishable from a
+correction awaiting its successor, and nothing could forbid appending a
+contiguous successor after a deletion. That is the resurrection this phase's exit
+evidence rules out, passing every check. ADR-0030 makes deletion a distinct
+terminal operation: `Version.Retract` closes the belief and marks the closure
+terminal, opening no successor, and both `Supersede` and `ValidateLineage` refuse
+any version that follows a retraction. The temporal semantics need no new query
+logic — a retracted version is closed, so the present sees nothing and a
+historical as-of query still sees it, deletion closing the interval rather than
+erasing it. This decides deletion within one record's lineage; propagation across
+indexes, summaries, caches and unused prepared contexts is a store concern that
+needs the store to exist, and the lineage rule here is the invariant those paths
+must preserve.
+
+Ranking remains undecided and still needs its own record (item 7 below), as do
+the record's other attributes — provenance, evidence class, confidence,
+sensitivity, purpose, retention and lifecycle, and the authority kind that today
+lives on the receipt rather than the record. The store itself does not exist.
 
 ## Phase 8 — First useful Asha vertical slice
 
