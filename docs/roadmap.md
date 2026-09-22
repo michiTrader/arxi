@@ -478,6 +478,22 @@ over a record that already has a different version is also refused at the source
 with `Correct` named as the verb that changes a record without forking it, while
 an imported or concurrent root fork is still contained at read.
 
+Probing that containment in turn found what ADR-0028 and ADR-0031 secured but did
+not complete, and ADR-0032 corrects it. A fork was contained and visible but had
+no way back: `Correct`, `Delete` and `Promote` all resolve through `tip`, which
+refuses a forked record, and superseding a losing head by hand is a net-zero
+operation on the head count — a one-parent supersession turns one head into a
+non-head and adds a new one — so the fork was permanent, and `Fork.err` told the
+operator to "supersede the ones that are wrong", a remedy a probe proved
+impossible. ADR-0032 adds `Resolve(recordID, keepVersionID, origin)`: it appends
+one version that supersedes the head the operator keeps and names every other
+head in a new `Retires` field, which the single head definition treats as no
+longer current, dropping the count to one. The store never picks the survivor —
+that is the fact ADR-0027 and ADR-0031 refused to guess — so it is a required
+argument, and the retired heads stay on disk so a receipt naming one still
+resolves. This is the "supersession" control Phase 7's exit evidence promises,
+made reachable for a record a fork had frozen.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
