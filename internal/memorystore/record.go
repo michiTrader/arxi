@@ -62,6 +62,16 @@ type Record struct {
 	// is what lets retrieval prove it returned a tip rather than trusting a
 	// flag on the record.
 	Supersedes string `json:"supersedes,omitempty"`
+	// Retires names the other current versions this one supersedes at once, and
+	// it exists for exactly one operation: resolving a fork. Supersession is
+	// one-parent by design, and a one-parent append can never reduce a record's
+	// current-version count -- it turns one head into a non-head and adds a new
+	// head, a net change of zero. So no chain of Corrects can bring a forked
+	// record back to a single current version, which is why Resolve names the
+	// losing heads here and tips() treats a retired version as not current.
+	// Empty for every write that is not a fork resolution, so it never touches
+	// the identity of an ordinary version.
+	Retires []string `json:"retires,omitempty"`
 
 	Scope Scope  `json:"scope"`
 	Kind  string `json:"kind"`
@@ -96,15 +106,16 @@ type Record struct {
 // it here on purpose, and an accidentally-included field would change every
 // existing version ID, invalidating every receipt already committed.
 type identity struct {
-	RecordID   string `json:"record_id"`
-	Supersedes string `json:"supersedes,omitempty"`
-	Scope      Scope  `json:"scope"`
-	Kind       string `json:"kind"`
-	Body       string `json:"body"`
-	Origin     string `json:"origin"`
-	CreatedRun string `json:"created_run,omitempty"`
-	CreatedSeq int64  `json:"created_seq,omitempty"`
-	Deleted    bool   `json:"deleted,omitempty"`
+	RecordID   string   `json:"record_id"`
+	Supersedes string   `json:"supersedes,omitempty"`
+	Retires    []string `json:"retires,omitempty"`
+	Scope      Scope    `json:"scope"`
+	Kind       string   `json:"kind"`
+	Body       string   `json:"body"`
+	Origin     string   `json:"origin"`
+	CreatedRun string   `json:"created_run,omitempty"`
+	CreatedSeq int64    `json:"created_seq,omitempty"`
+	Deleted    bool     `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
@@ -118,9 +129,9 @@ type identity struct {
 // resolve to that earlier version, which is honest: it is the same assertion.
 func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
-		RecordID: r.RecordID, Supersedes: r.Supersedes, Scope: r.Scope, Kind: r.Kind,
-		Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq,
-		Deleted: r.Deleted,
+		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
+		Kind: r.Kind, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun,
+		CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
