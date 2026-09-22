@@ -477,6 +477,90 @@ func (s *Store) Delete(recordID, origin string) (Record, error) {
 		Kind: tip.Kind, Origin: origin, Deleted: true})
 }
 
+// Resolve heals a forked record by keeping one current version the operator
+// chose and retiring the rest.
+//
+// # Why a verb exists at all, and why superseding by hand cannot replace it
+//
+// ADR-0028 and ADR-0031 made a fork contained and visible: retrieval excludes
+// it, Forks names it, tip refuses it. What neither provided was a way back to a
+// single current version, and the refusal message told the operator to
+// "supersede the ones that are wrong" — advice a probe proved false. A
+// supersession has one parent, so appending one turns a single head into a
+// non-head and adds a single new head: the number of current versions is
+// unchanged. No sequence of Corrects can bring a two-headed record to one head,
+// and Correct, Delete and Promote all resolve through tip and so refuse a forked
+// record outright. The fork was permanent, and the remediation named a remedy
+// the API did not have.
+//
+// Resolve is the missing edge. It appends one version that supersedes the head
+// the operator keeps and names every other head in Retires, which headsByRecord
+// treats as no longer current. One append, many heads retired: the head count
+// drops to one and the record is readable again.
+//
+// # Why the operator names the survivor, and the store never picks
+//
+// The version to keep is exactly the fact ADR-0027 and ADR-0031 refused to
+// guess. A tiebreak on version ID, mtime or file order is deterministic and
+// unrelated to which correction the user meant, and picking one silently is the
+// loss this store exists to prevent. So the survivor is a required argument: the
+// store retires the losers the operator did not choose and keeps the body of the
+// one they did, but it never decides which that is.
+//
+// Two operators resolving the same fork toward different survivors concurrently
+// each supersede a different head, so both writes land and the record re-forks —
+// contained at read exactly as two concurrent first writes are (ADR-0031). The
+// supersession claim serializes the common case, two resolutions toward the same
+// survivor: the second finds the survivor already claimed and is refused.
+func (s *Store) Resolve(recordID, keepVersionID, origin string) (Record, error) {
+	versions, err := s.Versions()
+	if err != nil {
+		return Record{}, err
+	}
+	heads := headsByRecord(versions)[recordID]
+	if len(heads) <= 1 {
+		// Not forked. Distinguish the two harmless cases so the message tells the
+		// operator which one they hit rather than a bare "cannot resolve".
+		if len(heads) == 1 {
+			return Record{}, fmt.Errorf("memory record %q is not forked: it has one current version "+
+				"%s, so there is nothing to resolve. Use Correct to change a healthy record",
+				recordID, heads[0].VersionID)
+		}
+		return Record{}, fmt.Errorf("%w: %q, so there is no fork to resolve", ErrNotFound, recordID)
+	}
+
+	var keep Record
+	found := false
+	others := make([]string, 0, len(heads)-1)
+	for _, h := range heads {
+		if h.VersionID == keepVersionID {
+			keep = h
+			found = true
+			continue
+		}
+		others = append(others, h.VersionID)
+	}
+	if !found {
+		ids := make([]string, 0, len(heads))
+		for _, h := range heads {
+			ids = append(ids, h.VersionID)
+		}
+		sort.Strings(ids)
+		return Record{}, fmt.Errorf("memory version %q is not one of the current versions of record "+
+			"%q (%s): Resolve keeps a version that is actually competing and retires the others, so "+
+			"the survivor must be one of the heads. A version that was already superseded is not a "+
+			"candidate to keep", keepVersionID, recordID, strings.Join(ids, ", "))
+	}
+	sort.Strings(others)
+
+	// The survivor's body, scope, kind and deletion state are carried forward
+	// verbatim: Resolve chooses which version wins, not what it says. Keeping a
+	// tombstone is allowed — an operator may resolve a fork by deciding the record
+	// is deleted — so Deleted is copied rather than forced false.
+	return s.Put(Record{RecordID: recordID, Supersedes: keep.VersionID, Retires: others,
+		Scope: keep.Scope, Kind: keep.Kind, Body: keep.Body, Deleted: keep.Deleted, Origin: origin})
+}
+
 // Versions returns every stored version, in no meaningful order.
 func (s *Store) Versions() ([]Record, error) {
 	entries, err := os.ReadDir(s.dir)
@@ -564,16 +648,19 @@ func (f Fork) err() error {
 	if f.Predecessor != "" {
 		return fmt.Errorf("memory record %q has a forked supersession chain: versions %s both "+
 			"supersede %s, so two versions are current and no rule here can say which correction "+
-			"the user intended. Resolve it by inspecting the competing versions; a tiebreak on "+
-			"file order, digest or mtime would be deterministic and unrelated to what was meant",
-			f.RecordID, strings.Join(f.Successors, " and "), f.Predecessor)
+			"the user intended. Inspect the competing versions and call Resolve(%q, <the version "+
+			"to keep>, origin) to retire the rest; a tiebreak on file order, digest or mtime would "+
+			"be deterministic and unrelated to what was meant",
+			f.RecordID, strings.Join(f.Successors, " and "), f.Predecessor, f.RecordID)
 	}
 	return fmt.Errorf("memory record %q has %d current versions (%s) that supersede nothing, so it "+
 		"forked at its root: more than one first version was created for the record without one "+
 		"superseding the other, and no rule here can say which is current. This is what two "+
-		"Approve or Propose calls for one record produce. Resolve it by inspecting the competing "+
-		"versions and superseding the ones that are wrong",
-		f.RecordID, len(f.Successors), strings.Join(f.Successors, " and "))
+		"Approve or Propose calls for one record produce. Inspect the competing versions and call "+
+		"Resolve(%q, <the version to keep>, origin) to retire the rest; superseding one by hand "+
+		"cannot heal it, because a one-parent supersession leaves the number of current versions "+
+		"unchanged",
+		f.RecordID, len(f.Successors), strings.Join(f.Successors, " and "), f.RecordID)
 }
 
 // Forks reports every record whose chain has forked, for an operator resolving
@@ -716,14 +803,46 @@ func (s *Store) ReleaseClaim(predecessor string) error {
 	return fsdurability.SyncDirectory(s.dir)
 }
 
+// headsByRecord groups the current versions of each record.
+//
+// A version is current — a head — when nothing supersedes it and no resolution
+// retired it. The two conditions are separate because they close different
+// gaps. `Supersedes` is the one-parent correction edge; `Retires` is the
+// multi-head edge a fork resolution writes, and it exists because a one-parent
+// supersession can never reduce a record's head count: it turns one head into a
+// non-head and adds a new head, net zero, so no chain of Corrects heals a fork.
+// Both tips (for detection) and Resolve (for the heads it must retire) read the
+// heads from here, so the definition of "current" lives in one place rather
+// than in two predicates that could disagree about whether a retired version
+// still counts.
+func headsByRecord(versions []Record) map[string][]Record {
+	superseded := make(map[string]bool, len(versions))
+	retired := make(map[string]bool)
+	for _, v := range versions {
+		for _, r := range v.Retires {
+			retired[r] = true
+		}
+		if v.Supersedes != "" {
+			superseded[v.Supersedes] = true
+		}
+	}
+	out := make(map[string][]Record)
+	for _, v := range versions {
+		if !superseded[v.VersionID] && !retired[v.VersionID] {
+			out[v.RecordID] = append(out[v.RecordID], v)
+		}
+	}
+	return out
+}
+
 // tips reduces a set of versions to the current version of each healthy record,
 // and separately reports the records it could not resolve.
 //
-// A version is current when nothing supersedes it. Derived from the chain on
-// every read rather than tracked by a flag, for the reason the package comment
-// gives: a flag is a cache, and a cache that disagrees with the chain would let
-// a superseded version be presented while the correction sat on disk — the exact
-// failure the exit evidence names.
+// A version is current when nothing supersedes it and no resolution retired it.
+// Derived from the chain on every read rather than tracked by a flag, for the
+// reason the package comment gives: a flag is a cache, and a cache that
+// disagrees with the chain would let a superseded version be presented while the
+// correction sat on disk — the exact failure the exit evidence names.
 //
 // # The invariant is one current version per record, not one successor per predecessor
 //
@@ -740,10 +859,9 @@ func (s *Store) ReleaseClaim(predecessor string) error {
 // than through a race the claim mechanism covers.
 //
 // So the detection is phrased against the invariant directly: group the current
-// versions (those nothing supersedes) by record, and any record holding two or
-// more is forked. This subsumes the multi-successor case — two successors of one
-// predecessor are both current — and catches the multi-root case the successor
-// count could not see.
+// versions by record, and any record holding two or more is forked. This
+// subsumes the multi-successor case — two successors of one predecessor are both
+// current — and catches the multi-root case the successor count could not see.
 //
 // # A fork is contained to its own record, not raised for the whole store
 //
@@ -753,26 +871,11 @@ func (s *Store) ReleaseClaim(predecessor string) error {
 // meant. Contained per record rather than for the whole store (ADR-0028): the
 // two return values let a caller refuse the one record without refusing the
 // store, and name which record is affected instead of leaking version IDs across
-// a scope boundary in an error string.
+// a scope boundary in an error string. Resolving it is an operator act (ADR-0032)
+// rather than a rule here, for the same reason: which version to keep is a fact
+// the store does not hold.
 func tips(versions []Record) ([]Record, map[string]Fork) {
-	successors := make(map[string][]string, len(versions))
-	for _, v := range versions {
-		if v.Supersedes == "" {
-			continue
-		}
-		successors[v.Supersedes] = append(successors[v.Supersedes], v.VersionID)
-	}
-
-	// Current versions are those nothing supersedes, grouped by record. The
-	// invariant is one per record; anything else is a fork, whether the extra
-	// current versions share a predecessor (a supersession fork) or share none
-	// (a root fork).
-	currentByRecord := make(map[string][]Record)
-	for _, v := range versions {
-		if len(successors[v.VersionID]) == 0 {
-			currentByRecord[v.RecordID] = append(currentByRecord[v.RecordID], v)
-		}
-	}
+	currentByRecord := headsByRecord(versions)
 
 	forked := make(map[string]Fork)
 	var out []Record
