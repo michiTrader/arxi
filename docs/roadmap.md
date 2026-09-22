@@ -415,6 +415,20 @@ a record's authority rather than laundering a candidate into an approved record;
 promotion is a separate Phase 10 operation, deliberately not expressible through a
 correction.
 
+A fourteenth prerequisite is settled: the authorization that runs before ranking.
+ADR-0022 fixed the scope vocabulary and declined to add a type, since a scope with
+no store to authorize would be a field nothing fails on. ADR-0033 adds the type
+together with the operation that gives it teeth — `Scope` and
+`record.AuthorizedFor(principal)` — so it is a primitive, not decoration. The
+tenant fails closed: a record with no tenant is visible to nobody, and the tenant
+must match exactly, which is ADR-0022's named asymmetry made executable. Every
+other axis narrows only when the record sets it, so a record scoped to a user or
+project is invisible to a different one (the leakage exit evidence, in ADR-0022's
+vocabulary) while a tenant-wide record is visible to any principal in the tenant.
+Like the descriptive attributes, `Scope` is not yet attached to the `Version`; the
+authorization primitive is what needed deciding, and wiring it onto the record
+belongs with the store.
+
 Ranking remains undecided and still needs its own record (item 7 below), as do
 the record's remaining descriptive attributes — provenance, evidence class,
 confidence, sensitivity, purpose, retention and lifecycle — which are left off the
