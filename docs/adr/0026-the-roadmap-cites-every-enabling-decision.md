@@ -153,6 +153,8 @@ Scoping that scan was itself measured, not assumed: applied to whole documents
 it matched prose bullets such as ADR-0017's "- Existing runs are unaffected:"
 and reported a dozen false violations. A check that noisy gets weakened, so it
 reads only the block above the first `## ` heading. The enumerated set is the
-measured vocabulary of all 25 records — `Status` and `Affects` in every one,
-`Depends on` in 16, `Enables` in 6, `Origin` in 2 — rather than the four fields
-this author expected to find.
+measured vocabulary of the corpus — `Status`, `Affects`, `Depends on`, `Enables`
+and `Origin` — rather than the four fields this author expected to find. The
+per-field frequencies this sentence originally froze were wrong by one the
+moment they were written and are now derived on every run instead of narrated
+here; see ADR-0027 and `TestHeaderVocabularyMatchesTheCorpus`.

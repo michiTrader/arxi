@@ -329,6 +329,19 @@ exists, never what it says. ADR-0026 derives the pairs from the corpus on every
 run and fails when a phase omits a decision that claimed it, so the citation
 cannot silently age again.
 
+An eighth prerequisite is settled, and like the seventh it is about the
+reliability of this section rather than the store. ADR-0026 added the citation
+check by enumerating the ADR header vocabulary, and justified that set in prose
+as "the measured vocabulary of all 25 records — `Depends on` in 16, `Enables`
+in 6". Measured, the corpus held 26 records with those fields appearing 17 and 7
+times: the counts described the corpus without the record stating them, the same
+off-by-one the total-count check already guards, one field-set deeper. ADR-0027
+derives the vocabulary from the corpus on every run and asserts the map equals it
+exactly in both directions, so a field the map lists that no record uses now
+fails too — the vacuity that direction left open. The frozen per-field counts are
+removed rather than corrected, because a hand-kept count drifts again on the next
+record.
+
 Temporal validity, ranking and deletion lineage remain
 undecided and still need their own record (item 7 below). The store itself does
 not exist.
