@@ -141,16 +141,110 @@ func TestValidateLineageRejectsAnEmptyChain(t *testing.T) {
 	}
 }
 
-// TestValidateLineageAcceptsAFullyRetractedChain records that a lineage may end
-// closed, with no current version. This is the tombstone shape a later
-// deletion-lineage decision will build on; this test pins only that the chain
-// validator does not require a current tail, because deletion semantics are
-// undecided (roadmap item 7).
-func TestValidateLineageAcceptsAFullyRetractedChain(t *testing.T) {
+// TestValidateLineageAcceptsAClosedMidCorrectionTail records that a lineage may
+// end on a closed, non-retracted version -- a correction whose successor has not
+// been appended yet. That tail is distinct from a retraction, which is why the
+// resurrection rule keys on the Retracted marker and not on closure alone.
+func TestValidateLineageAcceptsAClosedMidCorrectionTail(t *testing.T) {
 	v1 := Version{RecordID: "rec-1", VersionID: "ver-1", Validity: Validity{ValidFrom: t1, RecordedAt: t1, SupersededAt: t2}}
 	if err := ValidateLineage([]Version{v1}); err != nil {
-		t.Fatalf("a single fully-retracted version was rejected as a lineage: %v: a fact recorded and "+
-			"then retracted is a legitimate history, and forbidding it here would decide deletion "+
-			"semantics that remain open", err)
+		t.Fatalf("a single closed non-retracted version was rejected as a lineage: %v: a fact whose "+
+			"correction has not yet been appended is a legitimate in-progress history", err)
+	}
+}
+
+// TestRetractProducesATerminalTombstoneThatPreservesHistory is the deletion
+// scenario Phase 7 names: after retraction the present belief is nothing, and
+// the history before it is untouched.
+func TestRetractProducesATerminalTombstoneThatPreservesHistory(t *testing.T) {
+	v1 := Version{RecordID: "rec-1", VersionID: "ver-1", Validity: Validity{ValidFrom: t1, RecordedAt: t1}}
+	tomb, err := v1.Retract(t2)
+	if err != nil {
+		t.Fatalf("retracting a current version failed: %v: deletion is a required operation of a governed store", err)
+	}
+	if !tomb.Retracted || tomb.Validity.SupersededAt != t2 || tomb.Validity.Current() {
+		t.Fatalf("retract did not produce a closed terminal tombstone (retracted=%v superseded_at=%q current=%v): "+
+			"a deletion closes the belief at the deletion instant and marks the closure terminal",
+			tomb.Retracted, tomb.Validity.SupersededAt, tomb.Validity.Current())
+	}
+	if v1.Retracted || v1.Validity.SupersededAt != "" {
+		t.Fatal("Retract mutated the receiver: a deletion appends a tombstone; the live version's bytes are untouched")
+	}
+	// Present belief is nothing; history before the deletion is preserved.
+	if live, err := tomb.Validity.LiveAt(t3, t3); err != nil || live {
+		t.Fatalf("the deleted record is still live as-of now (live=%v err=%v): a retraction that does not "+
+			"remove the record from the present is not a deletion", live, err)
+	}
+	if live, err := tomb.Validity.LiveAt(t1, t3); err != nil || !live {
+		t.Fatalf("the deleted record is not visible as-of before its deletion (live=%v err=%v): deletion "+
+			"closes the belief interval, it does not erase the history, or an audit of what was believed "+
+			"becomes impossible", live, err)
+	}
+	if err := ValidateLineage([]Version{tomb}); err != nil {
+		t.Fatalf("a single retracted version is not a valid lineage: %v", err)
+	}
+}
+
+func TestRetractRefusesAnAlreadyClosedVersion(t *testing.T) {
+	closed := Version{RecordID: "rec-1", VersionID: "ver-1", Validity: Validity{ValidFrom: t1, RecordedAt: t1, SupersededAt: t2}}
+	if _, err := closed.Retract(t3); err == nil {
+		t.Fatal("retracting an already-closed version was allowed: only the current version can be " +
+			"deleted, and retracting a closed one would rewrite a belief interval the history already fixed")
+	}
+}
+
+// TestSupersedeRefusesARetractedVersion is the resurrection guard at the
+// operation: a deleted record cannot be corrected back into existence.
+func TestSupersedeRefusesARetractedVersion(t *testing.T) {
+	v1 := Version{RecordID: "rec-1", VersionID: "ver-1", Validity: Validity{ValidFrom: t1, RecordedAt: t1}}
+	tomb, err := v1.Retract(t2)
+	if err != nil {
+		t.Fatalf("retract failed: %v", err)
+	}
+	if _, _, err := tomb.Supersede("ver-2", t3, t1, ""); err == nil {
+		t.Fatal("superseding a retracted version was allowed: a deletion is terminal, and appending a " +
+			"successor to it resurrects a deleted record")
+	}
+}
+
+// TestValidateLineageRefusesResurrectionAfterRetraction is the resurrection
+// guard at the chain: even a hand-built successor recorded exactly at the
+// deletion instant is refused, because the predecessor was retracted, not
+// superseded.
+func TestValidateLineageRefusesResurrectionAfterRetraction(t *testing.T) {
+	tomb := Version{RecordID: "rec-1", VersionID: "ver-1", Retracted: true, Validity: Validity{ValidFrom: t1, RecordedAt: t1, SupersededAt: t2}}
+	successor := Version{RecordID: "rec-1", VersionID: "ver-2", Validity: Validity{ValidFrom: t1, RecordedAt: t2}}
+	if err := ValidateLineage([]Version{tomb, successor}); err == nil {
+		t.Fatal("a chain with a version after a retraction validated: a retraction is terminal, so a " +
+			"contiguous successor is a resurrection the deletion evidence forbids -- and it is indistinguishable " +
+			"from a supersession without the terminal marker, which is why the marker exists")
+	}
+}
+
+// TestValidateLineageAcceptsACorrectionThenRetraction is the mixed history: a
+// fact corrected once and then deleted. The middle version is a normal
+// supersession; only the last is terminal.
+func TestValidateLineageAcceptsACorrectionThenRetraction(t *testing.T) {
+	v1 := Version{RecordID: "rec-1", VersionID: "ver-1", Validity: Validity{ValidFrom: t1, RecordedAt: t1}}
+	v1c, v2, err := v1.Supersede("ver-2", t2, t1, "")
+	if err != nil {
+		t.Fatalf("correction failed: %v", err)
+	}
+	tomb, err := v2.Retract(t3)
+	if err != nil {
+		t.Fatalf("retraction failed: %v", err)
+	}
+	if err := ValidateLineage([]Version{v1c, tomb}); err != nil {
+		t.Fatalf("a correction-then-retraction history was rejected: %v: a fact that was fixed and later "+
+			"deleted is a legitimate append-only history", err)
+	}
+}
+
+func TestValidateRefusesARetractedButStillCurrentVersion(t *testing.T) {
+	bad := Version{RecordID: "rec-1", VersionID: "ver-1", Retracted: true, Validity: Validity{ValidFrom: t1, RecordedAt: t1}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("a retracted version with an open belief interval validated: a retraction closes the " +
+			"belief at the deletion instant, so a retracted-but-current version would report the deleted " +
+			"fact as the present answer")
 	}
 }

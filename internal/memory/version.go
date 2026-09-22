@@ -17,6 +17,14 @@ type Version struct {
 	RecordID  string   `json:"record_id"`
 	VersionID string   `json:"version_id"`
 	Validity  Validity `json:"validity"`
+
+	// Retracted marks this version's closure as a deletion rather than a handoff
+	// to a successor. Without it a retracted tail and a mid-correction tail are
+	// the same bytes -- both closed, both last -- so nothing could forbid
+	// appending a successor after a deletion, which is the resurrection the
+	// roadmap's deletion evidence rules out. A retracted version is terminal: it
+	// is closed at the deletion instant and no version may follow it (ADR-0030).
+	Retracted bool `json:"retracted,omitempty"`
 }
 
 // Validate refuses a version missing either identity or carrying an ill-formed
@@ -34,7 +42,50 @@ func (v Version) Validate() error {
 		return fmt.Errorf("memory version for record %q has no version_id: without it a correction "+
 			"cannot name the version it replaces, which is the identity ADR-0021 requires", v.RecordID)
 	}
+	if v.Retracted && v.Validity.Current() {
+		return fmt.Errorf("memory version %q of record %q is marked retracted but its belief interval is "+
+			"still open: a retraction closes the belief at the deletion instant, so a retracted version "+
+			"that is still current would report the deleted fact as the present answer", v.VersionID, v.RecordID)
+	}
 	return nil
+}
+
+// Retract deletes this version, returning the closed, terminal tombstone. Unlike
+// Supersede it opens no successor: the present belief after a retraction is
+// nothing. It is a distinct operation because the chain shape alone cannot tell a
+// deletion from a supersession -- both close the belief interval -- and only an
+// explicit terminal marker lets ValidateLineage refuse a version appended after
+// a deletion, which is the resurrection the deletion evidence forbids. History is
+// untouched: an as-of query before the deletion instant still sees this version,
+// exactly as it does after a supersession.
+func (v Version) Retract(at string) (Version, error) {
+	if err := v.Validate(); err != nil {
+		return Version{}, fmt.Errorf("cannot retract an invalid version: %w", err)
+	}
+	if err := v.Validity.Validate(); err != nil {
+		return Version{}, fmt.Errorf("cannot retract a version with invalid validity: %w", err)
+	}
+	if !v.Validity.Current() {
+		return Version{}, fmt.Errorf("memory version %q of record %q is already closed at %q: only the "+
+			"current version can be retracted, and retracting a closed one would rewrite a belief "+
+			"interval the history already fixed", v.VersionID, v.RecordID, v.Validity.SupersededAt)
+	}
+	retractedAt, err := parseInstant("superseded_at", at)
+	if err != nil {
+		return Version{}, err
+	}
+	recordedAt, _ := parseInstant("recorded_at", v.Validity.RecordedAt) // parsed clean above
+	if retractedAt.Before(recordedAt) {
+		return Version{}, fmt.Errorf("retract of version %q instant %q precedes its recorded_at %q: a "+
+			"version cannot be deleted before it was recorded", v.VersionID, at, v.Validity.RecordedAt)
+	}
+	tombstone := v
+	tombstone.Validity.SupersededAt = at
+	tombstone.Retracted = true
+	if err := tombstone.Validate(); err != nil {
+		return Version{}, fmt.Errorf("retracting produced an invalid version: %w", err)
+	}
+	return tombstone, nil
 }
 
 // Supersede corrects this version, returning the closed predecessor and the new
@@ -57,6 +108,11 @@ func (v Version) Supersede(newVersionID, at, validFrom, validTo string) (Version
 	}
 	if err := v.Validity.Validate(); err != nil {
 		return Version{}, Version{}, fmt.Errorf("cannot supersede a version with invalid validity: %w", err)
+	}
+	if v.Retracted {
+		return Version{}, Version{}, fmt.Errorf("memory version %q of record %q was retracted at %q: a "+
+			"deletion is terminal, so appending a successor to it is a resurrection the deletion "+
+			"evidence forbids", v.VersionID, v.RecordID, v.Validity.SupersededAt)
 	}
 	if !v.Validity.Current() {
 		return Version{}, Version{}, fmt.Errorf("memory version %q of record %q is already superseded at "+
@@ -112,10 +168,10 @@ func (v Version) Supersede(newVersionID, at, validFrom, validTo string) (Version
 // every version but the last is closed, each closed interval ends exactly where
 // the next begins, and at most one version -- the last -- is current. A gap
 // would leave an instant with no belief; an overlap would leave one with two; a
-// non-last current version would be a fork. A lineage may end closed (a fully
-// retracted fact with no successor), which is the shape a later deletion-lineage
-// decision builds on -- this function pins the chain, not the meaning of a
-// closed tail, because deletion semantics remain undecided (roadmap item 7).
+// non-last current version would be a fork. A lineage may end closed: either a
+// mid-correction tail awaiting its successor, or a version explicitly Retracted
+// (ADR-0030). A retracted version is terminal, so a version recorded after one
+// is a resurrection of a deleted record and is refused here.
 //
 // The slice is taken in recorded order rather than sorted: the caller holds the
 // history, and re-sorting here would hide a chain that was stored out of order,
@@ -148,6 +204,11 @@ func ValidateLineage(versions []Version) error {
 	}
 	for i := 0; i < len(versions)-1; i++ {
 		cur, next := versions[i], versions[i+1]
+		if cur.Retracted {
+			return fmt.Errorf("version %q of record %q is retracted but is followed by version %q: a "+
+				"retraction is terminal, so a version recorded after it is a resurrection of a deleted "+
+				"record, which the deletion evidence forbids", cur.VersionID, recordID, next.VersionID)
+		}
 		if cur.Validity.Current() {
 			return fmt.Errorf("version %q of record %q is not the last in the lineage yet is still current: "+
 				"a non-final current version is a fork, and the history then has two answers to what was "+
