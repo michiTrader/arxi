@@ -505,6 +505,17 @@ ADR-0033 honors an edge only within one record: a foreign edge is inert, the
 target keeps its head, and a genuinely forked carrier surfaces through the
 visible fork path instead of taking an unrelated record down silently.
 
+Probing that same-record edge once more — for a self-retire or a retire cycle
+that would leave a record with zero heads — found the case unconstructable rather
+than unhandled, which ADR-0034 records. A version ID is content-addressed over
+`Retires` and `Supersedes`, so a version can never name its own ID: an attempted
+self-edge targets a version not in the store, ADR-0033 leaves it inert, and a
+mutual-retire cycle surfaces as a visible fork instead of a silent freeze. No
+runtime guard is added, because the content address forbids the edge; ADR-0034
+pins the one assumption that clearance rests on — the edge fields are part of the
+identity — with a test that fails the moment a field leaves it, so the safety
+cannot be silently withdrawn by a digest "simplification".
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
