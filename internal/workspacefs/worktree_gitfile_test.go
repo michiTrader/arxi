@@ -107,7 +107,12 @@ func TestWorktreeGitFileIsWritableAndRedirectsTheCommonDir(t *testing.T) {
 	if listErr != nil {
 		t.Fatalf("listing worktrees: %v", listErr)
 	}
-	if !strings.Contains(listing, root) {
+	// `git worktree list` prints paths with forward slashes on every platform,
+	// while root carries the OS separator (backslash on Windows). Comparing them
+	// raw would fail on Windows for a formatting reason alone, hiding whether the
+	// worktree is actually still registered -- normalize both to slashes so the
+	// assertion tests registration, not the separator convention.
+	if !strings.Contains(filepath.ToSlash(listing), filepath.ToSlash(root)) {
 		t.Fatalf("worktree list = %q, want it to still contain %q: this assertion records that a "+
 			"refused release leaves operator-visible state behind; if cleanup now happens, the "+
 			"writer decision can promise something stronger and this pin should say so", listing, root)
