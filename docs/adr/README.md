@@ -52,6 +52,7 @@ has to decide which — not ignore the contradiction.
 | [0040](0040-close-before-rename-is-derived.md) | The atomic-rename publish closes the temp before renaming it, a derived family invariant | accepted |
 | [0041](0041-temp-cleanup-is-derived.md) | The atomic-rename publish defers removing its temp, a derived family invariant | accepted |
 | [0042](0042-a-record-carries-a-sensitivity-authorized-before-ranking.md) | A memory record carries a sensitivity, authorized before it is ranked | accepted |
+| [0043](0043-a-record-is-approved-for-a-purpose-authorized-before-ranking.md) | A memory record is approved for a purpose, authorized before it is ranked | accepted |
 
 ## Format
 

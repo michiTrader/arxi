@@ -535,14 +535,32 @@ scoped but over-classified, handed to an under-cleared caller — which is the
 leakage the exit evidence already tests, arriving through clearance rather than
 through scope.
 
+ADR-0043 adds the second dimension, purpose, the same way, and it is the second
+worked example of a distinct authorization *relation*. Sensitivity is ranked, so
+a clearance authorizes it against a ceiling; purpose has no order — `operate`,
+`personalize` and `recommend` are incomparable uses — so it is authorized by set
+membership, the shape scope already uses: a record is approved for one purpose,
+a query holds the set of purposes it is authorized to serve, and `Retrieve`
+withholds a record whose purpose is not in that set, in the same pre-ranking step
+that filters by scope and clearance. `Validate` refuses a record that names no
+purpose rather than defaulting it, because treating an unstated use as any use is
+purpose creep by construction, and unlike sensitivity there is no least-privilege
+member a default could safely pick. The purpose is part of the content-addressed
+version identity (ADR-0034), so a re-purposing is a new version a receipt can
+name; and an empty authorized set in a query authorizes nothing — the fail-closed
+floor of an unranked dimension, mirroring the empty scope set rather than the
+public floor an empty clearance falls back to. It was chosen second because its
+omission is also a disclosure: a record the user approved for one use, surfaced
+under another, is the leakage the exit evidence tests, arriving through purpose.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
 Asha, so wiring it now would mean inventing a principal from whatever the run
 happens to know — the class of guess ADR-0022 exists to stop. **Temporal
-validity, evidence class, confidence, purpose and retention are not
-implemented** and still need their own record (item 7 below, less the
-sensitivity ADR-0042 settled); adding them as struct fields with nothing
+validity, evidence class, confidence and retention are not implemented** and
+still need their own record (item 7 below, less the sensitivity and purpose
+ADR-0042 and ADR-0043 settled); adding them as struct fields with nothing
 authorizing them would be the "field nothing fails on" defect this corpus has
 now recorded four times.
 
