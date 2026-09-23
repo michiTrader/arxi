@@ -83,6 +83,11 @@ type Store struct {
 
 var removeFile = os.Remove
 
+// readFile is the seam readPendingFile retries over. It exists so the Windows
+// sharing-violation retry can be exercised deterministically without racing a
+// real remover, mirroring the removeFile seam.
+var readFile = os.ReadFile
+
 // Open acquires the run directory for writing and validates the existing log.
 //
 // Validation is not optional bookkeeping. Open is the only moment where damage
@@ -808,7 +813,7 @@ func (s *Store) rollbackPending() error {
 }
 
 func readPendingMarker(dir string) (pendingMarker, bool, error) {
-	body, err := os.ReadFile(filepath.Join(dir, pendingFileName))
+	body, err := readPendingFile(filepath.Join(dir, pendingFileName))
 	if errors.Is(err, os.ErrNotExist) {
 		return pendingMarker{}, false, nil
 	}
