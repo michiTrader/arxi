@@ -24,8 +24,8 @@ import (
 // that a stored record is data the owner writes, never a program and never a
 // file some other local account may rewrite.
 const (
-	modeOwnerReadWrite = 0o600
-	modeAnyExecute     = 0o111
+	modeOwnerReadWrite  = 0o600
+	modeAnyExecute      = 0o111
 	modeGroupOtherWrite = 0o022
 )
 
@@ -273,4 +273,3 @@ func load() error {
 			"empty set. Remedy: re-derive analyzeFileModes from the form the stores now use.")
 	}
 }
-
