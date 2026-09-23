@@ -14,11 +14,14 @@ import (
 
 // DefaultDir is where memory lives, relative to the working directory.
 //
-// Beside runs/ rather than in $HOME, for the reason rolestore, trigstore,
-// modelstore and agentstore all give: a store in $HOME would let memory written
+// Beside runs/ rather than in $HOME: a store in $HOME would let memory written
 // while working in one repository influence an agent's answers in the next one,
 // silently. Cross-run recall is the feature; cross-repository recall is a
-// leakage the user never asked for.
+// leakage the user never asked for. trigstore/store.go argues the same trade-off
+// for triggers; the other stores state the location without the reasoning, so
+// the project-local property is held across the whole family by a derived test
+// (internal/store_locality_test.go) rather than trusted store by store — see
+// ADR-0035 for why the guarantee is pinned rather than restated in each comment.
 const DefaultDir = "memory"
 
 // ext is the suffix that makes a file a memory version.
