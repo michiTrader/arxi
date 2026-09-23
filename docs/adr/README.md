@@ -48,6 +48,7 @@ has to decide which — not ignore the contradiction.
 | [0036](0036-temp-suffix-guard-is-derived-from-the-write.md) | The temp-suffix atomicity guard is derived from the write, not a hand-built name | accepted |
 | [0037](0037-durability-order-is-a-derived-family-invariant.md) | The file-before-directory fsync order is a derived family invariant, not a per-store comment | accepted |
 | [0038](0038-store-file-mode-is-derived.md) | The published file-mode integrity floor is a derived family invariant, not a per-store comment | accepted |
+| [0039](0039-rename-target-dir-is-derived.md) | The atomic-rename publish writes its temp into the destination's directory, a derived family invariant | accepted |
 
 ## Format
 
