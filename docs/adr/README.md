@@ -50,6 +50,7 @@ has to decide which — not ignore the contradiction.
 | [0038](0038-store-file-mode-is-derived.md) | The published file-mode integrity floor is a derived family invariant, not a per-store comment | accepted |
 | [0039](0039-rename-target-dir-is-derived.md) | The atomic-rename publish writes its temp into the destination's directory, a derived family invariant | accepted |
 | [0040](0040-close-before-rename-is-derived.md) | The atomic-rename publish closes the temp before renaming it, a derived family invariant | accepted |
+| [0041](0041-temp-cleanup-is-derived.md) | The atomic-rename publish defers removing its temp, a derived family invariant | accepted |
 
 ## Format
 
