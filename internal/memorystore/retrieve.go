@@ -20,6 +20,12 @@ type Query struct {
 	// Scopes is the authorization set. A record is visible only if its scope
 	// appears here exactly — same principal, same ID.
 	Scopes []Scope
+	// Clearance is the highest sensitivity the caller may receive. A record
+	// whose level outranks it is withheld in the authorization step, before
+	// ranking, on the same reasoning ADR-0027 gives for scope. Empty is the
+	// public floor: a caller that names no clearance receives only material that
+	// needs none, which is the fail-closed default rather than a wildcard.
+	Clearance Sensitivity
 	// Limit caps the returned records. Zero means no cap.
 	Limit int
 }
@@ -34,10 +40,19 @@ type Retrieval struct {
 	Schema           string   `json:"schema"`
 	RetrievalVersion string   `json:"retrieval_version"`
 	Scopes           []string `json:"authorized_scopes"`
+	// Clearance is the sensitivity ceiling the retrieval was authorized under,
+	// resolved to the public floor when the query named none. Recorded so an
+	// audit can answer not only which records were presented but under what
+	// clearance, the "every influence identifies its source" requirement widened
+	// to the level that influence was cleared at.
+	Clearance string `json:"clearance"`
 	// Considered is how many live versions existed before authorization,
 	// Authorized how many survived it. The pair is the leakage measurement:
 	// a cross-tenant test asserts Authorized is zero, and Considered proves
 	// the records were actually present to be leaked rather than absent.
+	// Authorization is scope and clearance together, so a record in the caller's
+	// scope but above its clearance is considered and not authorized -- the same
+	// contained-refusal witness as a cross-scope record, one dimension over.
 	Considered int         `json:"considered"`
 	Authorized int         `json:"authorized"`
 	Selections []Selection `json:"selections"`
@@ -52,10 +67,11 @@ type Retrieval struct {
 
 // Selection records one returned record and why it ranked where it did.
 type Selection struct {
-	RecordID  string `json:"record_id"`
-	VersionID string `json:"version_id"`
-	Scope     string `json:"scope"`
-	Reason    string `json:"reason"`
+	RecordID    string `json:"record_id"`
+	VersionID   string `json:"version_id"`
+	Scope       string `json:"scope"`
+	Sensitivity string `json:"sensitivity"`
+	Reason      string `json:"reason"`
 }
 
 // Retrieve returns the live, authorized, presentable records for a query,
@@ -89,6 +105,21 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 			return nil, Retrieval{}, err
 		}
 	}
+	// A named clearance must be a level the vocabulary knows; an empty one is the
+	// public floor and needs no validation. An unknown clearance is refused
+	// rather than treated as the floor, because silently narrowing a caller's
+	// clearance to public because it was misspelled would present a different set
+	// than intended with no error to say so -- the closed-vocabulary rule the
+	// record's own level obeys, applied to the query.
+	effectiveClearance := q.Clearance
+	if effectiveClearance == "" {
+		effectiveClearance = Public
+	} else if _, known := q.Clearance.Rank(); !known {
+		return nil, Retrieval{}, fmt.Errorf("memory query clearance %q is not one of %s: an "+
+			"unrecognized clearance is refused rather than narrowed to the floor, because a "+
+			"misspelled clearance would silently present a different set than intended",
+			q.Clearance, sensitivityVocabulary())
+	}
 	authorized := make(map[string]bool, len(q.Scopes))
 	names := make([]string, 0, len(q.Scopes))
 	for _, scope := range q.Scopes {
@@ -113,7 +144,8 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 	// argument violated from the other side.
 	live, forked := tips(versions)
 	evidence := Retrieval{Schema: Schema, RetrievalVersion: RetrievalVersion,
-		Scopes: names, Selections: []Selection{}, Forked: []string{}}
+		Scopes: names, Clearance: string(effectiveClearance),
+		Selections: []Selection{}, Forked: []string{}}
 
 	var kept []Record
 	for _, r := range live {
@@ -125,6 +157,17 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		}
 		evidence.Considered++
 		if !authorized[r.Scope.String()] {
+			continue
+		}
+		// Clearance is the second authorization dimension (ADR-0042), checked in
+		// the same step as scope and before ranking. A record above the caller's
+		// clearance is withheld exactly as one outside its scope is, and for the
+		// same reason ADR-0027 gives: a ranker that scored it would already have
+		// treated disallowed material as a candidate. It is filtered before
+		// Authorized++ because a record the caller may not receive is not
+		// authorized, so the Considered/Authorized pair measures a clearance leak
+		// the same way it measures a scope one.
+		if !effectiveClearance.admits(r.Sensitivity) {
 			continue
 		}
 		evidence.Authorized++
@@ -187,6 +230,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		rank, _ := r.Scope.Principal.Specificity()
 		evidence.Selections = append(evidence.Selections, Selection{
 			RecordID: r.RecordID, VersionID: r.VersionID, Scope: r.Scope.String(),
+			Sensitivity: string(r.Sensitivity),
 			Reason: fmt.Sprintf("scope specificity %d (%s), no semantic ranking in %s",
 				rank, r.Scope.Principal, RetrievalVersion),
 		})

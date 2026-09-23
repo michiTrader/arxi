@@ -75,7 +75,13 @@ type Record struct {
 
 	Scope Scope  `json:"scope"`
 	Kind  string `json:"kind"`
-	Body  string `json:"body"`
+	// Sensitivity is the classification retrieval authorizes on beside the
+	// scope. It is required (ADR-0042): an unclassified record's level is
+	// unknown, and treating unknown as public is the fail-open direction. Set
+	// once at creation and carried forward by every correction, like the scope,
+	// because a correction that dropped it would silently declassify the record.
+	Sensitivity Sensitivity `json:"sensitivity"`
+	Body        string      `json:"body"`
 
 	// Origin records who or what produced this version: an authenticated
 	// principal, an import name, or the run that proposed it. The exit
@@ -106,16 +112,17 @@ type Record struct {
 // it here on purpose, and an accidentally-included field would change every
 // existing version ID, invalidating every receipt already committed.
 type identity struct {
-	RecordID   string   `json:"record_id"`
-	Supersedes string   `json:"supersedes,omitempty"`
-	Retires    []string `json:"retires,omitempty"`
-	Scope      Scope    `json:"scope"`
-	Kind       string   `json:"kind"`
-	Body       string   `json:"body"`
-	Origin     string   `json:"origin"`
-	CreatedRun string   `json:"created_run,omitempty"`
-	CreatedSeq int64    `json:"created_seq,omitempty"`
-	Deleted    bool     `json:"deleted,omitempty"`
+	RecordID    string      `json:"record_id"`
+	Supersedes  string      `json:"supersedes,omitempty"`
+	Retires     []string    `json:"retires,omitempty"`
+	Scope       Scope       `json:"scope"`
+	Kind        string      `json:"kind"`
+	Sensitivity Sensitivity `json:"sensitivity"`
+	Body        string      `json:"body"`
+	Origin      string      `json:"origin"`
+	CreatedRun  string      `json:"created_run,omitempty"`
+	CreatedSeq  int64       `json:"created_seq,omitempty"`
+	Deleted     bool        `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
@@ -130,8 +137,8 @@ type identity struct {
 func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
 		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
-		Kind: r.Kind, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun,
-		CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
+		Kind: r.Kind, Sensitivity: r.Sensitivity, Body: r.Body, Origin: r.Origin,
+		CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
@@ -170,6 +177,12 @@ func (r Record) Validate() error {
 		return fmt.Errorf("memory record has unknown kind %q: authority is enumerated, so an "+
 			"unrecognized kind fails closed rather than inheriting the authority of a record "+
 			"somebody approved", r.Kind)
+	}
+	// Sensitivity is validated for every record, tombstone included: a deletion
+	// carries the tip's level forward, and a tombstone with no level would be a
+	// record whose classification became unknown at the moment it was removed.
+	if err := r.Sensitivity.Validate(); err != nil {
+		return err
 	}
 	// A tombstone carries no body by design, so the body check is scoped to
 	// live versions. Requiring a body on a deletion would force callers to
