@@ -43,6 +43,7 @@ has to decide which — not ignore the contradiction.
 | [0031](0031-a-record-with-two-roots-is-a-fork.md) | A record with two roots is a fork, not a silently chosen tip | accepted |
 | [0032](0032-a-forked-record-is-resolvable-by-an-operators-choice.md) | A forked record is resolvable by an operator's choice, not permanently contained | accepted |
 | [0033](0033-an-edge-is-contained-to-its-own-record.md) | A supersede or retire edge is contained to its own record | accepted |
+| [0034](0034-a-degenerate-edge-is-unconstructable.md) | A degenerate self- or cyclic edge is unconstructable, not merely unhandled | accepted |
 
 ## Format
 
