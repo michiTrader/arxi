@@ -285,7 +285,7 @@ var adrNumberWord = map[int]string{
 	27: "Twenty-seven", 28: "Twenty-eight", 29: "Twenty-nine", 30: "Thirty",
 	31: "Thirty-one", 32: "Thirty-two", 33: "Thirty-three", 34: "Thirty-four",
 	35: "Thirty-five", 36: "Thirty-six", 37: "Thirty-seven",
-	38: "Thirty-eight",
+	38: "Thirty-eight", 39: "Thirty-nine",
 }
 
 // TestEveryDocumentStatingTheADRCountAgreesWithTheCorpus holds the prose count
