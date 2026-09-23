@@ -15,10 +15,10 @@ import (
 // held the record. The secret record must be present and refused, not absent.
 func TestARecordOverTheCallersClearanceIsWithheld(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("vault", user("ana"), memorystore.Secret, "the signing key is in the HSM", "operator"); err != nil {
+	if _, err := store.Approve("vault", user("ana"), memorystore.Secret, memorystore.Operate, "the signing key is in the HSM", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, evidence, err := store.Retrieve(memorystore.Query{
+	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate},
 		Scopes: []memorystore.Scope{user("ana")}, Clearance: memorystore.Public})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
@@ -56,11 +56,11 @@ func TestClearanceAdmitsAtOrBelowItself(t *testing.T) {
 		"s": memorystore.Secret,
 	}
 	for id, level := range levels {
-		if _, err := store.Approve(id, user("ana"), level, "body of "+id, "operator"); err != nil {
+		if _, err := store.Approve(id, user("ana"), level, memorystore.Operate, "body of "+id, "operator"); err != nil {
 			t.Fatalf("approve %s: %v", id, err)
 		}
 	}
-	got, _, err := store.Retrieve(memorystore.Query{
+	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate},
 		Scopes: []memorystore.Scope{user("ana")}, Clearance: memorystore.Confidential})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
@@ -87,7 +87,7 @@ func TestClearanceAdmitsAtOrBelowItself(t *testing.T) {
 // defaulted to public, and an unrecognized level gets no standing.
 func TestAnUnclassifiedOrUnknownRecordIsRefusedAtValidate(t *testing.T) {
 	store := open(t)
-	_, err := store.Approve("unclassified", user("ana"), "", "a fact nobody classified", "operator")
+	_, err := store.Approve("unclassified", user("ana"), "", memorystore.Operate, "a fact nobody classified", "operator")
 	if err == nil {
 		t.Fatal("a record with no sensitivity was stored: an unclassified level is unknown, and " +
 			"treating unknown as public would disclose the material most likely to have been " +
@@ -97,7 +97,7 @@ func TestAnUnclassifiedOrUnknownRecordIsRefusedAtValidate(t *testing.T) {
 		t.Fatalf("the refusal of an unclassified record does not name the field or the remedy: "+
 			"%v\nit must tell the caller to classify the record, not report a bare invalid", err)
 	}
-	_, err = store.Approve("garbage", user("ana"), memorystore.Sensitivity("top-secret"), "body", "operator")
+	_, err = store.Approve("garbage", user("ana"), memorystore.Sensitivity("top-secret"), memorystore.Operate, "body", "operator")
 	if err == nil {
 		t.Fatal("a record with an unrecognized sensitivity was stored: the vocabulary is closed " +
 			"precisely so a level nobody enumerated gets no standing rather than the standing of " +
@@ -113,10 +113,10 @@ func TestAnUnclassifiedOrUnknownRecordIsRefusedAtValidate(t *testing.T) {
 // than intended with no error to say so.
 func TestAnUnknownClearanceIsRefused(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("fact", user("ana"), memorystore.Public, "a public fact", "operator"); err != nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "a public fact", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	_, _, err := store.Retrieve(memorystore.Query{
+	_, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate},
 		Scopes: []memorystore.Scope{user("ana")}, Clearance: memorystore.Sensitivity("cosmic")})
 	if err == nil {
 		t.Fatal("a query naming an unrecognized clearance was answered: a misspelled clearance was " +
@@ -135,7 +135,7 @@ func TestAnUnknownClearanceIsRefused(t *testing.T) {
 // this test failing.
 func TestSensitivityIsPartOfTheVersionIdentity(t *testing.T) {
 	base := memorystore.Record{RecordID: "r", Scope: user("ana"), Kind: memorystore.Approved,
-		Body: "the same body", Origin: "operator"}
+		Purpose: memorystore.Operate, Body: "the same body", Origin: "operator"}
 	internal := base
 	internal.Sensitivity = memorystore.Internal
 	confidential := base
@@ -163,7 +163,7 @@ func TestSensitivityIsPartOfTheVersionIdentity(t *testing.T) {
 // carried forward by every derived verb, like the scope.
 func TestCorrectionCarriesSensitivityForward(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("fact", user("ana"), memorystore.Confidential, "the original", "operator"); err != nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Confidential, memorystore.Operate, "the original", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	corrected, err := store.Correct("fact", "the amended fact", "ana")
@@ -177,7 +177,7 @@ func TestCorrectionCarriesSensitivityForward(t *testing.T) {
 	}
 	// The declassification would be observable at retrieval: an internal
 	// clearance must still not see the corrected confidential record.
-	got, _, err := store.Retrieve(memorystore.Query{
+	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate},
 		Scopes: []memorystore.Scope{user("ana")}, Clearance: memorystore.Internal})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)

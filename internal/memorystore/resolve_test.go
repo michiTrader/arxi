@@ -15,12 +15,12 @@ func TestResolveHealsARootFork(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	keep, err := s.Approve("r1", sc, Public, "body A", "op")
+	keep, err := s.Approve("r1", sc, Public, Operate, "body A", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A competing root arrives out of band, the case the write guard cannot stop.
-	loser := writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Body: "body B", Origin: "import"})
+	loser := writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, Body: "body B", Origin: "import"})
 
 	if _, err := s.Resolve("r1", keep.VersionID, "op"); err != nil {
 		t.Fatalf("Resolve refused to heal a root fork: %v: a contained fork with no way back to one "+
@@ -73,7 +73,7 @@ func TestResolveHealsASupersessionFork(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, "original", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, "original", "op"); err != nil {
 		t.Fatal(err)
 	}
 	winner, err := s.Correct("r1", "the correction that wins", "op")
@@ -83,7 +83,7 @@ func TestResolveHealsASupersessionFork(t *testing.T) {
 	// A second successor of the same predecessor arrives out of band, the fork
 	// the claim mechanism prevents sequentially but a replica can still deliver.
 	writeRawVersion(t, s, Record{RecordID: "r1", Supersedes: winner.Supersedes, Scope: sc,
-		Kind: Approved, Sensitivity: Public, Body: "the branch that loses", Origin: "import"})
+		Kind: Approved, Sensitivity: Public, Purpose: Operate, Body: "the branch that loses", Origin: "import"})
 
 	if _, err := s.Resolve("r1", winner.VersionID, "op"); err != nil {
 		t.Fatalf("Resolve refused a supersession fork: %v", err)
@@ -107,10 +107,10 @@ func TestResolveRefusesAVersionThatIsNotAHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, "body A", "op"); err != nil {
 		t.Fatal(err)
 	}
-	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Body: "body B", Origin: "import"})
+	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, Body: "body B", Origin: "import"})
 
 	if _, err := s.Resolve("r1", "mv-doesnotexist", "op"); err == nil {
 		t.Fatal("Resolve accepted a survivor that is not a current head: keeping a version that is not " +
@@ -127,7 +127,7 @@ func TestResolveRefusesAHealthyRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	head, err := s.Approve("r1", sc, Public, "body A", "op")
+	head, err := s.Approve("r1", sc, Public, Operate, "body A", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,11 +160,11 @@ func TestResolvingAnAlreadyResolvedForkIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	keep, err := s.Approve("r1", sc, Public, "body A", "op")
+	keep, err := s.Approve("r1", sc, Public, Operate, "body A", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Body: "body B", Origin: "import"})
+	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, Body: "body B", Origin: "import"})
 
 	if _, err := s.Resolve("r1", keep.VersionID, "op"); err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestResolveKeepingATombstoneLeavesRecordDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, "body A", "op"); err != nil {
 		t.Fatal(err)
 	}
 	tomb, err := s.Delete("r1", "op")
@@ -192,7 +192,7 @@ func TestResolveKeepingATombstoneLeavesRecordDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A competing live root arrives out of band, forking the (now deleted) record.
-	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Body: "resurrected body", Origin: "import"})
+	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, Body: "resurrected body", Origin: "import"})
 
 	if _, err := s.Resolve("r1", tomb.VersionID, "op"); err != nil {
 		t.Fatalf("Resolve refused to keep a tombstone: %v: an operator must be able to resolve a fork by "+
@@ -206,7 +206,7 @@ func TestResolveKeepingATombstoneLeavesRecordDeleted(t *testing.T) {
 		t.Fatal("resolving toward the tombstone left the record live: keeping the deletion must keep the " +
 			"record deleted, or the fork became a resurrection the deletion guarantee forbids")
 	}
-	recs, _, err := s.Retrieve(Query{Scopes: []Scope{sc}})
+	recs, _, err := s.Retrieve(Query{Purposes: []Purpose{Operate}, Scopes: []Scope{sc}})
 	if err != nil {
 		t.Fatal(err)
 	}
