@@ -46,6 +46,7 @@ has to decide which — not ignore the contradiction.
 | [0034](0034-a-degenerate-edge-is-unconstructable.md) | A degenerate self- or cyclic edge is unconstructable, not merely unhandled | accepted |
 | [0035](0035-store-locality-is-a-derived-family-invariant.md) | A store's project-local locality is a derived family invariant, not a per-store claim | accepted |
 | [0036](0036-temp-suffix-guard-is-derived-from-the-write.md) | The temp-suffix atomicity guard is derived from the write, not a hand-built name | accepted |
+| [0037](0037-durability-order-is-a-derived-family-invariant.md) | The file-before-directory fsync order is a derived family invariant, not a per-store comment | accepted |
 
 ## Format
 
