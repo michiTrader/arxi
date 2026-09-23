@@ -516,15 +516,35 @@ pins the one assumption that clearance rests on — the edge fields are part of 
 identity — with a test that fails the moment a field leaves it, so the safety
 cannot be silently withdrawn by a digest "simplification".
 
+Item 7's record vocabulary is no longer entirely deferred: ADR-0042 adds the
+first of its dimensions, sensitivity, and adds it the way the scope dimension was
+added — as an authorization applied before ranking, not a struct field. A record
+carries a level from a closed ranked vocabulary (`public`, `internal`,
+`confidential`, `secret`); `Validate` refuses a record that names none rather
+than defaulting it to `public`, because the level most often left unset is the
+sensitive one and a default of `public` would disclose exactly the records that
+most needed a classification; and `Retrieve` withholds a record whose level
+outranks the query's clearance in the same step that already filters by scope,
+before the ranker sees it, on ADR-0027's own argument that a score computed over
+disallowed material has already treated it as a candidate. The level is part of
+the content-addressed version identity (ADR-0034), so a reclassification is a new
+version a receipt can name rather than an in-place edit, and the existing
+digest-immutability guard covers it with no new check. It was chosen first among
+the item-7 dimensions because its omission is a disclosure — a record correctly
+scoped but over-classified, handed to an under-cleared caller — which is the
+leakage the exit evidence already tests, arriving through clearance rather than
+through scope.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
 Asha, so wiring it now would mean inventing a principal from whatever the run
 happens to know — the class of guess ADR-0022 exists to stop. **Temporal
-validity, evidence class, confidence, sensitivity, purpose and retention are not
-implemented** and still need their own record (item 7 below); adding them as
-struct fields with nothing authorizing them would be the "field nothing fails
-on" defect this corpus has now recorded four times.
+validity, evidence class, confidence, purpose and retention are not
+implemented** and still need their own record (item 7 below, less the
+sensitivity ADR-0042 settled); adding them as struct fields with nothing
+authorizing them would be the "field nothing fails on" defect this corpus has
+now recorded four times.
 
 ## Phase 8 — First useful Asha vertical slice
 
