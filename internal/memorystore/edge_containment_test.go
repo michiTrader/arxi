@@ -17,11 +17,11 @@ func TestARetireCannotRemoveAnotherRecordsHead(t *testing.T) {
 	victimScope := Scope{Principal: Tenant, ID: "acme"}
 	attackerScope := Scope{Principal: User, ID: "u1"}
 
-	victim, err := s.Approve("victim", victimScope, Public, Operate, Stated, Medium, Permanent, "important tenant memory", "op")
+	victim, err := s.Approve("victim", victimScope, Public, Operate, Stated, Medium, Permanent, Validity{}, "important tenant memory", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Approve("attacker", attackerScope, Public, Operate, Stated, Medium, Permanent, "attacker body", "op"); err != nil {
+	if _, err := s.Approve("attacker", attackerScope, Public, Operate, Stated, Medium, Permanent, Validity{}, "attacker body", "op"); err != nil {
 		t.Fatal(err)
 	}
 	// An imported/replicated/corrupt version of a different record names the
@@ -60,7 +60,7 @@ func TestASupersedeCannotRemoveAnotherRecordsHead(t *testing.T) {
 	victimScope := Scope{Principal: Tenant, ID: "acme"}
 	attackerScope := Scope{Principal: User, ID: "u1"}
 
-	victim, err := s.Approve("victim", victimScope, Public, Operate, Stated, Medium, Permanent, "important tenant memory", "op")
+	victim, err := s.Approve("victim", victimScope, Public, Operate, Stated, Medium, Permanent, Validity{}, "important tenant memory", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestSameRecordEdgesStillApplyAfterContainment(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "original", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "original", "op"); err != nil {
 		t.Fatal(err)
 	}
 	corrected, err := s.Correct("r1", "corrected", "op")
