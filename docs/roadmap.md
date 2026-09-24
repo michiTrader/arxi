@@ -645,6 +645,22 @@ content-addressed version identity (ADR-0034), so a re-dating is a new version a
 receipt can name rather than an in-place edit that could narrow a window a receipt
 was issued under.
 
+Probing ADR-0047's own carry-forward claim found the gap ADR-0048 closes, and it is
+the failure shape this file keeps recording: a claim verified once and generalised
+to a whole capability. ADR-0047's Decision says all four derived verbs carry the
+window forward — `Correct`, `Delete`, `Promote`, `Resolve` — and its verification
+listed one guard, over `Correct` alone. The three unguarded verbs were not merely
+untested: removing the valid-time carry-forward from `Delete`, from `Promote`, or
+from `Resolve`, each in isolation, left the whole suite green. The reason is that
+valid time is the one identity dimension whose empty value is *legal* — `Validity{}`
+is the timeless record ADR-0047 admits on purpose — so a dropped window passes
+`Validate`, where the other six dimensions are caught incidentally because an empty
+one of them is refused at the write. `Promote` and `Resolve` append retrievable
+records, so a dropped window is the stale-fact disclosure the headline test prevents,
+one verb over; `Delete` appends a tombstone, so its dropped window is a lineage loss.
+ADR-0048 adds a guard per verb and records the asymmetry, so the other dimensions are
+not each given a redundant test asserting what `Validate` already enforces.
+
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
