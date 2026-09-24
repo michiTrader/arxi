@@ -105,7 +105,17 @@ type Record struct {
 	// correction that dropped it would silently restate how much to trust the
 	// record -- and unlike them it never withholds a record, it only orders it.
 	Confidence Confidence `json:"confidence"`
-	Body       string     `json:"body"`
+	// Retention is the lifecycle policy the record is kept under, the first
+	// dimension that feeds neither authorization nor ranking but expiry
+	// (ADR-0046). It is required: an unstated retention is no lifecycle decision,
+	// and defaulting it would either hoard a record meant to be transient or expire
+	// one meant to be kept. Set once at creation and carried forward by every
+	// correction, like the five dimensions above, because a correction that dropped
+	// it would silently re-tier the record -- and unlike the authorization
+	// dimensions it never withholds a record and unlike confidence it never orders
+	// one; it only decides whether an automated sweep may expire it.
+	Retention Retention `json:"retention"`
+	Body      string    `json:"body"`
 
 	// Origin records who or what produced this version: an authenticated
 	// principal, an import name, or the run that proposed it. The exit
@@ -150,11 +160,19 @@ type identity struct {
 	// was ranked. It never authorizes, but it is still identity -- two records
 	// alike in everything but confidence are two different assertions about trust.
 	Confidence Confidence `json:"confidence"`
-	Body       string     `json:"body"`
-	Origin     string     `json:"origin"`
-	CreatedRun string     `json:"created_run,omitempty"`
-	CreatedSeq int64      `json:"created_seq,omitempty"`
-	Deleted    bool       `json:"deleted,omitempty"`
+	// Retention is part of the identity for the same reason the dimensions above
+	// are (ADR-0034): a re-tiering is a new version a receipt can name, not an
+	// in-place edit. It matters more here than elsewhere, because if retention
+	// could be edited in place a permanent record a receipt named could be flipped
+	// to ephemeral and tombstoned by the next sweep, expiring a version somebody
+	// was told would be kept. Making it identity forces a re-tier to be a visible
+	// new version.
+	Retention  Retention `json:"retention"`
+	Body       string    `json:"body"`
+	Origin     string    `json:"origin"`
+	CreatedRun string    `json:"created_run,omitempty"`
+	CreatedSeq int64     `json:"created_seq,omitempty"`
+	Deleted    bool      `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
@@ -170,7 +188,7 @@ func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
 		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
 		Kind: r.Kind, Sensitivity: r.Sensitivity, Purpose: r.Purpose, EvidenceClass: r.EvidenceClass,
-		Confidence: r.Confidence, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
+		Confidence: r.Confidence, Retention: r.Retention, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
@@ -237,6 +255,16 @@ func (r Record) Validate() error {
 	// though it never authorizes, because a record that cannot be ranked honestly
 	// is exactly the field-nothing-fails-on defect ADR-0045 refuses to add.
 	if err := r.Confidence.Validate(); err != nil {
+		return err
+	}
+	// Retention is validated for every record, tombstone included, for the same
+	// reason as the five dimensions above: a deletion carries the tip's retention
+	// forward, and a tombstone with no retention would be a record whose lifecycle
+	// became unknown at the moment it was removed. It is required here even though
+	// it neither authorizes nor ranks, because a record no sweep can decide whether
+	// to expire is exactly the field-nothing-fails-on defect ADR-0046 refuses to
+	// add.
+	if err := r.Retention.Validate(); err != nil {
 		return err
 	}
 	// A tombstone carries no body by design, so the body check is scoped to
