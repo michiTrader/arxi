@@ -69,7 +69,7 @@ func TestMemoryWrittenInOneRunIsPresentedInTheNext(t *testing.T) {
 		t.Fatalf("first run carried %d memory receipts with an empty store", len(before.MemoryReceipts))
 	}
 
-	if _, err := store.Approve("deploy-window", scopes[0], memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", scopes[0], memorystore.Public, memorystore.Operate, memorystore.Stated, memorystore.Medium, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestRecalledMemoryArrivesOnTheMemoryChannel(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	scope := memorystore.Scope{Principal: memorystore.User, ID: "ana"}
-	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, memorystore.Medium, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	artifact := prepareFor(t, store, "run-1", []memorystore.Scope{scope})
@@ -214,7 +214,7 @@ func TestRecallIsScopedPerUserAcrossRuns(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	ana := memorystore.Scope{Principal: memorystore.User, ID: "ana"}
-	if _, err := store.Approve("salary", ana, memorystore.Public, memorystore.Operate, memorystore.Stated, "ana negotiated a raise in March", "ana"); err != nil {
+	if _, err := store.Approve("salary", ana, memorystore.Public, memorystore.Operate, memorystore.Stated, memorystore.Medium, "ana negotiated a raise in March", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	bruno := memorystore.Scope{Principal: memorystore.User, ID: "bruno"}
@@ -237,7 +237,7 @@ func TestCorrectionReachesTheNextRun(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	scope := memorystore.Scope{Principal: memorystore.User, ID: "ana"}
-	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, memorystore.Medium, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Correct("deploy-window", "deploys land on Thursdays", "ana"); err != nil {
@@ -262,7 +262,7 @@ func TestDeletionReachesTheNextRun(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	scope := memorystore.Scope{Principal: memorystore.User, ID: "ana"}
-	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, memorystore.Medium, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Delete("deploy-window", "ana"); err != nil {
@@ -287,7 +287,7 @@ func TestFrozenAndRetrievedMemoryCoexist(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	scope := memorystore.Scope{Principal: memorystore.User, ID: "ana"}
-	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", scope, memorystore.Public, memorystore.Operate, memorystore.Stated, memorystore.Medium, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	records, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{scope}})
