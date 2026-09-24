@@ -282,9 +282,10 @@ and unused prepared contexts without resurrection.
 
 **Status:** partially implemented, and not exited. The store, retrieval and
 deletion lineage exist in `internal/memorystore` (ADR-0027) and the eight
-prerequisites below are settled. What remains is listed as the two deliberate
-gaps at the end of this section plus item 7's record vocabulary, so this phase
-must not be read as either finished or unstarted.
+prerequisites below are settled, as is item 7's record vocabulary (ADR-0042
+through ADR-0047). What remains is the single deliberate gap at the end of this
+section — retrieval is not wired into `internal/exec` — so this phase must not be
+read as either finished or unstarted.
 
 This line said "not started; the store, retrieval and deletion lineage do not
 exist" for a full turn after ADR-0027 shipped all three, while the narration
@@ -618,19 +619,41 @@ policy the caller times: `Expire` takes no as-of instant — the store decides w
 may expire and the caller decides when. Expiry is a tombstone, not an unlink, so an
 expired record inherits the deletion lineage's no-resurrection guarantee.
 
-One gap remains open and two are deliberate rather than pending. **Retrieval is
-not wired into `internal/exec`**: which principals a run is authorized for is an
-identity question, and the boundary above assigns identity, authentication and
-consent to Asha, so wiring it now would mean inventing a principal from whatever
-the run happens to know — the class of guess ADR-0022 exists to stop. **Valid time
-is not implemented** and still needs its own record (item 7 below, less the
-sensitivity, purpose, evidence class, confidence and retention that ADR-0042
-through ADR-0046 settled); adding it as a struct field with nothing failing on it
-would be the "field nothing fails on" defect this corpus keeps recording. Valid
-time is the last authorizing dimension, left for its own record because it is
-bitemporal and its as-of instant is a clock this store does not read — the one
-clock constraint retention sidestepped by being a policy the caller times, which
-valid time cannot do because an as-of query is a clock read by nature.
+ADR-0047 adds valid time, the fifth and last authorizing dimension and the store's
+second time axis: the version chain records transaction time — when the store came
+to believe a thing — and this records when the thing is true in the world, which
+the chain cannot, so carrying both makes the store bitemporal. A record carries a
+half-open interval `[From, To)` of canonical UTC instants, and `Retrieve` withholds
+a record whose interval does not contain the query's `AsOf` instant, in the same
+pre-ranking step that filters by scope, clearance, purpose and evidence class — so
+its witness is a leakage test: remove the filter and a fact true only in 2025 is
+presented as current in 2026. The load-bearing move is that the store reads no
+clock — the as-of instant is carried on the query, supplied by the caller, exactly
+as the reducer receives the clock as an event rather than calling `time.Now()`. The
+one clock read an as-of query needs by nature happens in the caller, and the store
+only compares canonical strings, which sort chronologically because every instant
+is the one fixed-width UTC spelling. An empty as-of is the timeless floor rather
+than a wildcard, mirroring the clearance floor: a caller naming no as-of sees only
+records that declared no window. Both bounds are optional and an empty bound is a
+stated claim ("no known end") rather than an unknown to refuse — requiring a `To`
+would force a writer to invent an expiry nobody knows, the fabrication the
+confidence and retention records already refuse — so `Validate` refuses only a
+non-canonical instant or an interval no instant falls inside, and the guard that
+keeps valid time from being decoration is the as-of filter, which fails on a bounded
+record rather than a rule that every record be bounded. The interval is part of the
+content-addressed version identity (ADR-0034), so a re-dating is a new version a
+receipt can name rather than an in-place edit that could narrow a window a receipt
+was issued under.
+
+One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
+into `internal/exec`**: which principals a run is authorized for is an identity
+question, and the boundary above assigns identity, authentication and consent to
+Asha, so wiring it now would mean inventing a principal from whatever the run
+happens to know — the class of guess ADR-0022 exists to stop. Item 7's record
+vocabulary is otherwise complete: ADR-0042 through ADR-0047 settled sensitivity,
+purpose, evidence class, confidence, retention and valid time, the store is
+bitemporal, and what is left of Phase 7 is that one wiring, not another dimension.
+
 
 ## Phase 8 — First useful Asha vertical slice
 
