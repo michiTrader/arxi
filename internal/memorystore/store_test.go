@@ -37,15 +37,15 @@ func user(id string) memorystore.Scope {
 // records must be present and refused, not absent.
 func TestCrossScopeRetrievalReturnsZeroRecords(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Approve("secret", memorystore.Scope{Principal: memorystore.Project, ID: "atlas"},
-		memorystore.Public, memorystore.Operate, "the atlas key rotates monthly", "operator"); err != nil {
+		memorystore.Public, memorystore.Operate, memorystore.Stated, "the atlas key rotates monthly", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("bruno")}})
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("bruno")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -75,10 +75,10 @@ func TestCrossScopeRetrievalReturnsZeroRecords(t *testing.T) {
 func TestScopeMatchIsExactNotHierarchical(t *testing.T) {
 	store := open(t)
 	secret := memorystore.Scope{Principal: memorystore.Project, ID: "arxi-secret"}
-	if _, err := store.Approve("key", secret, memorystore.Public, memorystore.Operate, "the signing key lives in vault", "operator"); err != nil {
+	if _, err := store.Approve("key", secret, memorystore.Public, memorystore.Operate, memorystore.Stated, "the signing key lives in vault", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
 		{Principal: memorystore.Project, ID: "arxi"}}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
@@ -94,7 +94,7 @@ func TestScopeMatchIsExactNotHierarchical(t *testing.T) {
 // "stale versions stop appearing after correction".
 func TestCorrectionStopsTheStaleVersionFromAppearing(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana")
+	first, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestCorrectionStopsTheStaleVersionFromAppearing(t *testing.T) {
 			"link the two versions are independent records and nothing is stale",
 			second.Supersedes, first.VersionID)
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestCorrectionStopsTheStaleVersionFromAppearing(t *testing.T) {
 // in the data saying it was deleted.
 func TestDeletionLeavesATombstoneRatherThanRemovingFiles(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	tomb, err := store.Delete("deploy-window", "ana")
@@ -146,7 +146,7 @@ func TestDeletionLeavesATombstoneRatherThanRemovingFiles(t *testing.T) {
 		t.Fatal("delete produced a version that is not marked deleted: the tombstone is the only " +
 			"thing that tells another replica the record is gone")
 	}
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestDeletionLeavesATombstoneRatherThanRemovingFiles(t *testing.T) {
 // correction would otherwise open.
 func TestCorrectingATombstoneIsRefused(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("gone", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana"); err != nil {
+	if _, err := store.Approve("gone", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Delete("gone", "ana"); err != nil {
@@ -192,7 +192,7 @@ func TestCorrectingATombstoneIsRefused(t *testing.T) {
 // memory".
 func TestCandidatesAreStoredAndNeverRetrieved(t *testing.T) {
 	store := open(t)
-	candidate, err := store.Propose("guess", user("ana"), memorystore.Public, memorystore.Operate, "ana probably prefers dark mode",
+	candidate, err := store.Propose("guess", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana probably prefers dark mode",
 		"agent:coder", "run-1", 12)
 	if err != nil {
 		t.Fatalf("propose: %v", err)
@@ -202,7 +202,7 @@ func TestCandidatesAreStoredAndNeverRetrieved(t *testing.T) {
 			"memory is the containment failure the phase names first", candidate.Kind,
 			memorystore.Candidate)
 	}
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestCandidatesAreStoredAndNeverRetrieved(t *testing.T) {
 // path from proposed to active memory.
 func TestPromotionSupersedesTheCandidateAndKeepsIt(t *testing.T) {
 	store := open(t)
-	candidate, err := store.Propose("pref", user("ana"), memorystore.Public, memorystore.Operate, "ana prefers dark mode",
+	candidate, err := store.Propose("pref", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana prefers dark mode",
 		"agent:coder", "run-1", 12)
 	if err != nil {
 		t.Fatalf("propose: %v", err)
@@ -243,7 +243,7 @@ func TestPromotionSupersedesTheCandidateAndKeepsIt(t *testing.T) {
 			"the origin of an approved record would attribute the approval to the proposer",
 			promoted.Origin)
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestPromotionSupersedesTheCandidateAndKeepsIt(t *testing.T) {
 // TestPromotingAnApprovedRecordIsRefused keeps promotion meaning one transition.
 func TestPromotingAnApprovedRecordIsRefused(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana"); err != nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Promote("fact", "operator"); err == nil {
@@ -283,11 +283,11 @@ func TestPromotingAnApprovedRecordIsRefused(t *testing.T) {
 // store cannot satisfy a weaker rule than the barrier enforces.
 func TestRetrievedRecordsProduceGovernedReceipts(t *testing.T) {
 	store := open(t)
-	stored, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana")
+	stored, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -322,14 +322,14 @@ func TestRetrievedRecordsProduceGovernedReceipts(t *testing.T) {
 func TestRankingPrefersTheMoreSpecificScope(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("style", memorystore.Scope{Principal: memorystore.Tenant, ID: "acme"},
-		memorystore.Public, memorystore.Operate, "tenant standard is tabs", "operator"); err != nil {
+		memorystore.Public, memorystore.Operate, memorystore.Stated, "tenant standard is tabs", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Approve("style-run", memorystore.Scope{Principal: memorystore.Run, ID: "r1"},
-		memorystore.Public, memorystore.Operate, "this run agreed on spaces", "ana"); err != nil {
+		memorystore.Public, memorystore.Operate, memorystore.Stated, "this run agreed on spaces", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
 		{Principal: memorystore.Tenant, ID: "acme"}, {Principal: memorystore.Run, ID: "r1"}}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
@@ -364,16 +364,16 @@ func TestRankingPrefersTheMoreSpecificScope(t *testing.T) {
 func TestRetrievalIsDeterministic(t *testing.T) {
 	store := open(t)
 	for _, id := range []string{"c", "a", "b", "d", "e"} {
-		if _, err := store.Approve(id, user("ana"), memorystore.Public, memorystore.Operate, "body "+id, "ana"); err != nil {
+		if _, err := store.Approve(id, user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "body "+id, "ana"); err != nil {
 			t.Fatalf("approve %s: %v", id, err)
 		}
 	}
-	first, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	first, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
 	for i := 0; i < 8; i++ {
-		again, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+		again, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 		if err != nil {
 			t.Fatalf("retrieve: %v", err)
 		}
@@ -393,11 +393,11 @@ func TestRetrievalIsDeterministic(t *testing.T) {
 func TestVersionIDIsContentAddressed(t *testing.T) {
 	a := open(t)
 	b := open(t)
-	one, err := a.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana")
+	one, err := a.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	two, err := b.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana")
+	two, err := b.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestVersionIDIsContentAddressed(t *testing.T) {
 // issued receipt depends on.
 func TestAModifiedVersionFileIsRefused(t *testing.T) {
 	store := open(t)
-	stored, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana")
+	stored, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestAModifiedVersionFileIsRefused(t *testing.T) {
 // had no witness.
 func TestRewritingATamperedVersionIsRefused(t *testing.T) {
 	store := open(t)
-	stored, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana")
+	stored, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestRewritingATamperedVersionIsRefused(t *testing.T) {
 		t.Fatalf("tamper: %v", err)
 	}
 	// Writing the same record again collides on the content-addressed name.
-	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana"); err == nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana"); err == nil {
 		t.Fatal("re-storing a record over a tampered version file succeeded: the caller receives " +
 			"a receipt naming a version whose stored content is something else entirely, and " +
 			"every later audit reads the forged body as the presented one")
@@ -486,11 +486,11 @@ func TestRewritingATamperedVersionIsRefused(t *testing.T) {
 // is expected, and failing it would make every idempotent retry an error.
 func TestIdenticalRePutIsANoOp(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	second, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "ana works in CET", "ana")
+	second, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "ana works in CET", "ana")
 	if err != nil {
 		t.Fatalf("re-storing byte-identical content was refused: %v\ncontent addressing makes "+
 			"this the expected collision, so failing it turns every retry after a crash into "+
@@ -525,7 +525,7 @@ func importFork(t *testing.T, store *memorystore.Store, recordID string, scope m
 	var ids []string
 	for _, body := range bodies {
 		sealed, err := memorystore.Record{RecordID: recordID, Supersedes: predecessor,
-			Scope: scope, Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate,
+			Scope: scope, Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated,
 			Body: body, Origin: "replica"}.Seal()
 		if err != nil {
 			t.Fatalf("seal imported version %q: %v", body, err)
@@ -554,13 +554,13 @@ func importFork(t *testing.T, store *memorystore.Store, recordID string, scope m
 // presented", and an error was only ever one way to achieve it.
 func TestAForkedSupersessionChainIsRefused(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	importFork(t, store, "fact", user("ana"), first.VersionID, "correction one", "correction two")
 
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -594,16 +594,16 @@ func TestAForkedRecordDoesNotDenyRetrievalToOtherRecords(t *testing.T) {
 	acme := memorystore.Scope{Principal: memorystore.Tenant, ID: "acme"}
 	globex := memorystore.Scope{Principal: memorystore.Tenant, ID: "globex"}
 
-	broken, err := store.Approve("shared-fact", acme, memorystore.Public, memorystore.Operate, "original", "ana")
+	broken, err := store.Approve("shared-fact", acme, memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	if _, err := store.Approve("unrelated", globex, memorystore.Public, memorystore.Operate, "globex deploys on Fridays", "bo"); err != nil {
+	if _, err := store.Approve("unrelated", globex, memorystore.Public, memorystore.Operate, memorystore.Stated, "globex deploys on Fridays", "bo"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	forkIDs := importFork(t, store, "shared-fact", acme, broken.VersionID, "A", "B")
 
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{globex}})
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{globex}})
 	if err != nil {
 		t.Fatalf("a fork in tenant:acme denied retrieval to tenant:globex: %v\n"+
 			"  consequence: one damaged record is a denial of service for every other "+
@@ -652,11 +652,11 @@ func TestAForkedRecordDoesNotDenyRetrievalToOtherRecords(t *testing.T) {
 // the five were gone after one fork.
 func TestAForkedRecordDoesNotDisableRepairOfHealthyRecords(t *testing.T) {
 	store := open(t)
-	broken, err := store.Approve("broken", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	broken, err := store.Approve("broken", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	if _, err := store.Approve("healthy", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("healthy", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	importFork(t, store, "broken", user("ana"), broken.VersionID, "A", "B")
@@ -704,7 +704,7 @@ func TestAForkedRecordDoesNotDisableRepairOfHealthyRecords(t *testing.T) {
 // support was the concurrency that destroyed the store.
 func TestConcurrentCorrectionsCannotForkTheChain(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana"); err != nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
@@ -722,7 +722,7 @@ func TestConcurrentCorrectionsCannotForkTheChain(t *testing.T) {
 	// Both may succeed only if they serialized -- the loser then re-read a tip
 	// the winner had already written, which is a chain, not a fork. What must
 	// never happen is a fork, so the store's readability is the assertion.
-	got, evidence, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("two concurrent corrections left the store unreadable: %v\n"+
 			"  consequence: both callers were told their correction succeeded, and the record "+
@@ -754,7 +754,7 @@ func TestConcurrentCorrectionsCannotForkTheChain(t *testing.T) {
 // the chain while reporting failure.
 func TestASupersededVersionCannotBeClaimedTwice(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestASupersededVersionCannotBeClaimedTwice(t *testing.T) {
 	}
 
 	loser := memorystore.Record{RecordID: "fact", Supersedes: first.VersionID, Scope: user("ana"),
-		Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, Body: "correction two", Origin: "ana"}
+		Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated, Body: "correction two", Origin: "ana"}
 	_, err = store.Put(loser)
 	if err == nil {
 		t.Fatal("a second version superseding the same predecessor was accepted: one predecessor " +
@@ -790,7 +790,7 @@ func TestASupersededVersionCannotBeClaimedTwice(t *testing.T) {
 			"must leave nothing behind, or it persists the losing version and forks the chain "+
 			"while reporting failure", len(versions))
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve after a refused supersession: %v", err)
 	}
@@ -808,12 +808,12 @@ func TestASupersededVersionCannotBeClaimedTwice(t *testing.T) {
 // ADR-0027 relies on re-Put of identical content being a no-op.
 func TestReapplyingAnIdenticalCorrectionIsIdempotent(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	correction := memorystore.Record{RecordID: "fact", Supersedes: first.VersionID,
-		Scope: user("ana"), Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate,
+		Scope: user("ana"), Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated,
 		Body: "corrected", Origin: "ana"}
 
 	one, err := store.Put(correction)
@@ -844,7 +844,7 @@ func TestReapplyingAnIdenticalCorrectionIsIdempotent(t *testing.T) {
 // against a stale copy will type it.
 func TestSubjectIsRefusedAsAPrincipal(t *testing.T) {
 	store := open(t)
-	_, err := store.Approve("fact", memorystore.Scope{Principal: "subject", ID: "coder"}, memorystore.Public, memorystore.Operate, "body", "ana")
+	_, err := store.Approve("fact", memorystore.Scope{Principal: "subject", ID: "coder"}, memorystore.Public, memorystore.Operate, memorystore.Stated, "body", "ana")
 	if err == nil {
 		t.Fatal("a record scoped to `subject` was stored: `subject` already denotes the subject " +
 			"agent in five committed artifact schemas, so this record's scope reads as a user " +
@@ -880,12 +880,12 @@ func TestSubjectIsRefusedAsAPrincipal(t *testing.T) {
 func TestAnUnknownPrincipalGetsNoStanding(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", memorystore.Scope{Principal: "organisation", ID: "acme"},
-		memorystore.Public, memorystore.Operate, "body", "ana"); err == nil {
+		memorystore.Public, memorystore.Operate, memorystore.Stated, "body", "ana"); err == nil {
 		t.Fatal("a record scoped to an unenumerated principal was stored: the vocabulary is " +
 			"closed precisely so material nobody enumerated gets no standing, rather than the " +
 			"standing of whichever real principal it sorts beside")
 	}
-	if _, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
+	if _, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
 		{Principal: "organisation", ID: "acme"}}}); err == nil {
 		t.Fatal("a query for an unenumerated principal was answered: an unknown principal must " +
 			"fail rather than authorize nothing silently, because a caller that believes it " +
@@ -897,14 +897,14 @@ func TestAnUnknownPrincipalGetsNoStanding(t *testing.T) {
 // "any holder in this dimension".
 func TestABareScopeIsNotAWildcard(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("fact", memorystore.Scope{Principal: memorystore.User}, memorystore.Public, memorystore.Operate, "body", "ana"); err == nil {
+	if _, err := store.Approve("fact", memorystore.Scope{Principal: memorystore.User}, memorystore.Public, memorystore.Operate, memorystore.Stated, "body", "ana"); err == nil {
 		t.Fatal("a record scoped to `user` with no id was stored: the bare principal names a " +
 			"dimension rather than a holder, and a store that accepts it authorizes every user")
 	}
-	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "body", "ana"); err != nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "body", "ana"); err != nil {
 		t.Fatalf("approve with a valid scope: %v", err)
 	}
-	if _, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
+	if _, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{
 		{Principal: memorystore.User}}}); err == nil {
 		t.Fatal("a query scoped to `user` with no id was answered: had it matched, one caller " +
 			"would read every user's memory")
@@ -918,7 +918,7 @@ func TestABareScopeIsNotAWildcard(t *testing.T) {
 func TestFrozenConfigurationMemoryCannotBeStored(t *testing.T) {
 	store := open(t)
 	_, err := store.Put(memorystore.Record{RecordID: "from-blueprint", Scope: user("ana"),
-		Kind: contextprep.KindFrozenContextMemory, Sensitivity: memorystore.Public, Purpose: memorystore.Operate,
+		Kind: contextprep.KindFrozenContextMemory, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated,
 		Body: "You remember the deploy window", Origin: "operator"})
 	if err == nil {
 		t.Fatal("frozen configuration memory was stored as a governed record: it would receive a " +
@@ -931,11 +931,11 @@ func TestFrozenConfigurationMemoryCannotBeStored(t *testing.T) {
 // scoped to live versions.
 func TestAnEmptyBodyIsRefusedButATombstoneIsNot(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("empty", user("ana"), memorystore.Public, memorystore.Operate, "   ", "ana"); err == nil {
+	if _, err := store.Approve("empty", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "   ", "ana"); err == nil {
 		t.Fatal("a record with an empty body was stored: it would occupy the context window and " +
 			"a retrieval receipt while influencing nothing -- cost with no evidence of benefit")
 	}
-	if _, err := store.Approve("real", user("ana"), memorystore.Public, memorystore.Operate, "a real fact", "ana"); err != nil {
+	if _, err := store.Approve("real", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "a real fact", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Delete("real", "ana"); err != nil {
@@ -949,7 +949,7 @@ func TestAnEmptyBodyIsRefusedButATombstoneIsNot(t *testing.T) {
 // record belongs to, not who wrote it.
 func TestOriginIsRequired(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "a fact", ""); err == nil {
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "a fact", ""); err == nil {
 		t.Fatal("a record with no origin was stored: the exit evidence requires every influence " +
 			"to identify its source, and the scope names the holder rather than the author")
 	}
@@ -959,7 +959,7 @@ func TestOriginIsRequired(t *testing.T) {
 func TestASeqWithoutItsRunIsRefused(t *testing.T) {
 	store := open(t)
 	_, err := store.Put(memorystore.Record{RecordID: "fact", Scope: user("ana"),
-		Kind: memorystore.Candidate, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, Body: "a guess", Origin: "agent:coder", CreatedSeq: 12})
+		Kind: memorystore.Candidate, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated, Body: "a guess", Origin: "agent:coder", CreatedSeq: 12})
 	if err == nil {
 		t.Fatal("a record carrying created_seq with no created_run was stored: a sequence number " +
 			"is only meaningful inside one log, so it points at every run and none of them")
@@ -983,10 +983,10 @@ func TestMissingRecordIsDistinguishable(t *testing.T) {
 // the channel decision reached one of them only.
 func TestTextRendersOneBodyForEveryAssembler(t *testing.T) {
 	store := open(t)
-	if _, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana"); err != nil {
+	if _, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func obstructVersionWrite(t *testing.T, store *memorystore.Store, recordID, pred
 	scope memorystore.Scope, body, origin string) string {
 	t.Helper()
 	blocked, err := memorystore.Record{RecordID: recordID, Supersedes: predecessor, Scope: scope,
-		Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, Body: body, Origin: origin}.Seal()
+		Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated, Body: body, Origin: origin}.Seal()
 	if err != nil {
 		t.Fatalf("seal the version whose write is to be obstructed: %v", err)
 	}
@@ -1039,7 +1039,7 @@ func obstructVersionWrite(t *testing.T, store *memorystore.Store, recordID, pred
 // was entirely healthy.
 func TestAFailedWriteReleasesTheClaimItTook(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, "deploys land on Tuesdays", "ana")
+	first, err := store.Approve("deploy-window", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "deploys land on Tuesdays", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1083,7 +1083,7 @@ func TestAFailedWriteReleasesTheClaimItTook(t *testing.T) {
 // the "deletion propagates without resurrection" guarantee Phase 7 exits on.
 func TestAFailedWriteDoesNotFreezeDeletion(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("secret", user("ana"), memorystore.Public, memorystore.Operate, "the original", "ana")
+	first, err := store.Approve("secret", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "the original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1097,7 +1097,7 @@ func TestAFailedWriteDoesNotFreezeDeletion(t *testing.T) {
 			"memory to be deleted would be told no, because an unrelated write failed earlier "+
 			"-- and deletion is the one control Phase 7 requires to always work", err)
 	}
-	got, _, err := store.Retrieve(memorystore.Query{Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}, Purposes: []memorystore.Purpose{memorystore.Operate}, Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestAFailedWriteDoesNotFreezeDeletion(t *testing.T) {
 // same predecessor, recreating by hand the fork that ADR made unreachable.
 func TestAFulfilledClaimIsNeverReleased(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1163,7 +1163,7 @@ func TestAFulfilledClaimIsNeverReleased(t *testing.T) {
 // refused.
 func TestAnUnfulfilledClaimIsVisibleAndReleasable(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1257,7 +1257,7 @@ func TestReleasingAClaimThatIsNotHeldIsRefused(t *testing.T) {
 func TestTheRollbackDoesNotStealAnotherWritersClaim(t *testing.T) {
 	for attempt := 0; attempt < 10; attempt++ {
 		store := open(t)
-		first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+		first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 		if err != nil {
 			t.Fatalf("approve: %v", err)
 		}
@@ -1298,7 +1298,7 @@ func TestTheRollbackDoesNotStealAnotherWritersClaim(t *testing.T) {
 // correction to expose it.
 func TestAFailedWriteNeverReleasesAClaimItDidNotCreate(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1352,7 +1352,7 @@ func TestAFailedWriteNeverReleasesAClaimItDidNotCreate(t *testing.T) {
 // content is how a claim gets created for an already-present version.
 func TestAnIdempotentRePutKeepsTheClaimItCreated(t *testing.T) {
 	store := open(t)
-	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, "original", "ana")
+	first, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate, memorystore.Stated, "original", "ana")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -1360,7 +1360,7 @@ func TestAnIdempotentRePutKeepsTheClaimItCreated(t *testing.T) {
 	// A successor that arrived as bytes from a replica: version file present,
 	// no claim beside it.
 	sealed, err := memorystore.Record{RecordID: "fact", Supersedes: first.VersionID,
-		Scope: user("ana"), Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate,
+		Scope: user("ana"), Kind: memorystore.Approved, Sensitivity: memorystore.Public, Purpose: memorystore.Operate, EvidenceClass: memorystore.Stated,
 		Body: "imported correction", Origin: "replica"}.Seal()
 	if err != nil {
 		t.Fatalf("seal: %v", err)
