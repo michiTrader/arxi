@@ -41,6 +41,15 @@ type Query struct {
 	// to, and a caller that names no class accepts no evidence rather than all of
 	// it. This mirrors the scope and purpose rules, not the clearance floor.
 	EvidenceClasses []EvidenceClass
+	// There is deliberately no confidence field here. Confidence ranks the
+	// authorized set, it does not authorize (ADR-0045), so there is nothing for a
+	// query to match against: a caller does not ask for "records of at least
+	// medium confidence" the way it names the scopes, purposes and classes it is
+	// authorized for. A record of any confidence the caller is otherwise entitled
+	// to is returned; confidence only decides the order. Adding a query-side
+	// confidence floor here would turn a ranking dimension into an authorization
+	// one and withhold material the caller may see merely because the writer was
+	// unsure -- the exact confusion this dimension is the worked example against.
 	// Limit caps the returned records. Zero means no cap.
 	Limit int
 }
@@ -102,7 +111,13 @@ type Selection struct {
 	Sensitivity   string `json:"sensitivity"`
 	Purpose       string `json:"purpose"`
 	EvidenceClass string `json:"evidence_class"`
-	Reason        string `json:"reason"`
+	// Confidence is recorded because it is the first dimension that changed where
+	// a record ranked rather than whether it was authorized (ADR-0045). An audit
+	// reading the reason must be able to see that a record placed below another
+	// was placed there for its confidence and not withheld, which is the whole
+	// distinction between a ranking dimension and an authorization one.
+	Confidence string `json:"confidence"`
+	Reason     string `json:"reason"`
 }
 
 // Retrieve returns the live, authorized, presentable records for a query,
@@ -306,16 +321,31 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 
 	// Ranking. There is no semantic ranker yet and this deliberately does not
 	// pretend to be one: it orders by scope specificity, so what this run or
-	// this agent learned outranks what the tenant believes in general, and
-	// breaks ties by record ID for determinism. Calling it semantic would be
-	// the kind of unearned claim this project keeps finding in its own docs.
-	// The reason string on every selection says exactly which rule applied,
-	// which is what the exit evidence asks for.
+	// this agent learned outranks what the tenant believes in general, then by
+	// confidence, so a record its writer vouched for strongly outranks a weaker
+	// one at the same specificity, and breaks the remaining ties by record ID for
+	// determinism. Calling it semantic would be the kind of unearned claim this
+	// project keeps finding in its own docs. The reason string on every selection
+	// says exactly which rule applied, which is what the exit evidence asks for.
+	//
+	// Confidence enters here and nowhere else, and that is the load-bearing fact of
+	// ADR-0045: it is a ranking dimension, so its only mechanism is this comparator.
+	// An unknown confidence would already have been refused by Validate on the way
+	// in, so a kept record always carries a ranked one; ranks are read through the
+	// vocabulary rather than compared as strings, so "high" correctly outranks
+	// "low" instead of losing to it alphabetically. Remove the confidence clause and
+	// two records tied on specificity fall back to record-ID order, presenting a
+	// guess ahead of a vouched-for fact -- which is the reordering the guard catches.
 	sort.SliceStable(kept, func(i, j int) bool {
 		ri, _ := kept[i].Scope.Principal.Specificity()
 		rj, _ := kept[j].Scope.Principal.Specificity()
 		if ri != rj {
 			return ri > rj
+		}
+		ci, _ := kept[i].Confidence.Rank()
+		cj, _ := kept[j].Confidence.Rank()
+		if ci != cj {
+			return ci > cj
 		}
 		return kept[i].RecordID < kept[j].RecordID
 	})
@@ -327,9 +357,9 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		evidence.Selections = append(evidence.Selections, Selection{
 			RecordID: r.RecordID, VersionID: r.VersionID, Scope: r.Scope.String(),
 			Sensitivity: string(r.Sensitivity), Purpose: string(r.Purpose),
-			EvidenceClass: string(r.EvidenceClass),
-			Reason: fmt.Sprintf("scope specificity %d (%s), no semantic ranking in %s",
-				rank, r.Scope.Principal, RetrievalVersion),
+			EvidenceClass: string(r.EvidenceClass), Confidence: string(r.Confidence),
+			Reason: fmt.Sprintf("scope specificity %d (%s), confidence %s, no semantic ranking in %s",
+				rank, r.Scope.Principal, r.Confidence, RetrievalVersion),
 		})
 	}
 	return kept, evidence, nil
