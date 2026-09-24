@@ -34,6 +34,13 @@ type Query struct {
 	// scope rule (an empty scope set authorizes no holder) rather than the
 	// clearance rule (an empty clearance is the public floor).
 	Purposes []Purpose
+	// EvidenceClasses is the set of evidence kinds the caller will act on. A record
+	// is visible only if its class is in this set (ADR-0044). Empty authorizes
+	// nothing, the same fail-closed floor as the purpose set and for the same
+	// reason: evidence class is unranked, so there is no floor member to fall back
+	// to, and a caller that names no class accepts no evidence rather than all of
+	// it. This mirrors the scope and purpose rules, not the clearance floor.
+	EvidenceClasses []EvidenceClass
 	// Limit caps the returned records. Zero means no cap.
 	Limit int
 }
@@ -60,14 +67,21 @@ type Retrieval struct {
 	// authorized -- the "every influence identifies its source" requirement,
 	// widened once more (ADR-0043).
 	Purposes []string `json:"authorized_purposes"`
+	// EvidenceClasses is the set of evidence kinds the retrieval was authorized
+	// for, sorted. Recorded beside the purposes so an audit can answer not only
+	// which records were presented and for which use but on what kind of evidence
+	// each rested -- the "every influence identifies its source" requirement,
+	// widened once more (ADR-0044).
+	EvidenceClasses []string `json:"authorized_evidence_classes"`
 	// Considered is how many live versions existed before authorization,
 	// Authorized how many survived it. The pair is the leakage measurement:
 	// a cross-tenant test asserts Authorized is zero, and Considered proves
 	// the records were actually present to be leaked rather than absent.
-	// Authorization is scope, purpose and clearance together, so a record in the
-	// caller's scope but approved for a use the caller is not authorized for, or
-	// above its clearance, is considered and not authorized -- the same
-	// contained-refusal witness as a cross-scope record, one dimension over.
+	// Authorization is scope, purpose, evidence class and clearance together, so a
+	// record in the caller's scope but approved for a use the caller is not
+	// authorized for, backed by a class it does not accept, or above its
+	// clearance, is considered and not authorized -- the same contained-refusal
+	// witness as a cross-scope record, one dimension over.
 	Considered int         `json:"considered"`
 	Authorized int         `json:"authorized"`
 	Selections []Selection `json:"selections"`
@@ -82,12 +96,13 @@ type Retrieval struct {
 
 // Selection records one returned record and why it ranked where it did.
 type Selection struct {
-	RecordID    string `json:"record_id"`
-	VersionID   string `json:"version_id"`
-	Scope       string `json:"scope"`
-	Sensitivity string `json:"sensitivity"`
-	Purpose     string `json:"purpose"`
-	Reason      string `json:"reason"`
+	RecordID      string `json:"record_id"`
+	VersionID     string `json:"version_id"`
+	Scope         string `json:"scope"`
+	Sensitivity   string `json:"sensitivity"`
+	Purpose       string `json:"purpose"`
+	EvidenceClass string `json:"evidence_class"`
+	Reason        string `json:"reason"`
 }
 
 // Retrieve returns the live, authorized, presentable records for a query,
@@ -159,6 +174,28 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		purposeNames = append(purposeNames, string(p))
 	}
 	sort.Strings(purposeNames)
+	// The accepted evidence-class set is built and validated the same way as the
+	// purpose set, and for the same reasons: an unknown class is refused rather
+	// than dropped, because silently dropping a misspelled class would narrow what
+	// the caller accepts with no error to say so; the set is deduplicated; and an
+	// empty set is not an error but authorizes nothing, the fail-closed floor of
+	// an unranked dimension.
+	acceptedClasses := make(map[EvidenceClass]bool, len(q.EvidenceClasses))
+	classNames := make([]string, 0, len(q.EvidenceClasses))
+	for _, e := range q.EvidenceClasses {
+		if !e.Known() {
+			return nil, Retrieval{}, fmt.Errorf("memory query evidence class %q is not one of %s: an "+
+				"unrecognized class is refused rather than dropped from the accepted set, because a "+
+				"misspelled class would silently narrow what the caller accepts and present a different "+
+				"set than intended", e, evidenceClassVocabulary())
+		}
+		if acceptedClasses[e] {
+			continue
+		}
+		acceptedClasses[e] = true
+		classNames = append(classNames, string(e))
+	}
+	sort.Strings(classNames)
 	authorized := make(map[string]bool, len(q.Scopes))
 	names := make([]string, 0, len(q.Scopes))
 	for _, scope := range q.Scopes {
@@ -184,7 +221,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 	live, forked := tips(versions)
 	evidence := Retrieval{Schema: Schema, RetrievalVersion: RetrievalVersion,
 		Scopes: names, Clearance: string(effectiveClearance), Purposes: purposeNames,
-		Selections: []Selection{}, Forked: []string{}}
+		EvidenceClasses: classNames, Selections: []Selection{}, Forked: []string{}}
 
 	var kept []Record
 	for _, r := range live {
@@ -206,6 +243,16 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		// Membership, not a ceiling -- the record's purpose must be in the query's
 		// authorized set, and an empty set authorizes nothing.
 		if !authorizedPurposes[r.Purpose] {
+			continue
+		}
+		// Evidence class is the fourth authorization dimension (ADR-0044), checked
+		// in the same pre-ranking step as scope, purpose and clearance. A record
+		// backed by a class the caller does not accept is withheld exactly as one
+		// outside its scope is, and for the same reason: a ranker that scored it
+		// would already have treated disallowed material as a candidate. Membership,
+		// not a ceiling -- the record's class must be in the query's accepted set,
+		// and an empty set accepts nothing.
+		if !acceptedClasses[r.EvidenceClass] {
 			continue
 		}
 		// Clearance is the second authorization dimension (ADR-0042), checked in
@@ -280,6 +327,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		evidence.Selections = append(evidence.Selections, Selection{
 			RecordID: r.RecordID, VersionID: r.VersionID, Scope: r.Scope.String(),
 			Sensitivity: string(r.Sensitivity), Purpose: string(r.Purpose),
+			EvidenceClass: string(r.EvidenceClass),
 			Reason: fmt.Sprintf("scope specificity %d (%s), no semantic ranking in %s",
 				rank, r.Scope.Principal, RetrievalVersion),
 		})

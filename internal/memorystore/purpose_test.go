@@ -17,10 +17,10 @@ import (
 func TestARecordOutsideTheQueryPurposeIsWithheld(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("promo", user("ana"), memorystore.Public, memorystore.Recommend,
-		"suggest the premium plan", "operator"); err != nil {
+		memorystore.Stated, "suggest the premium plan", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, evidence, err := store.Retrieve(memorystore.Query{
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
 		Scopes:   []memorystore.Scope{user("ana")},
 		Purposes: []memorystore.Purpose{memorystore.Operate}})
 	if err != nil {
@@ -55,11 +55,11 @@ func TestAQueryAuthorizesOnlyItsDeclaredPurposes(t *testing.T) {
 		"re": memorystore.Recommend,
 	}
 	for id, use := range uses {
-		if _, err := store.Approve(id, user("ana"), memorystore.Public, use, "body of "+id, "operator"); err != nil {
+		if _, err := store.Approve(id, user("ana"), memorystore.Public, use, memorystore.Stated, "body of "+id, "operator"); err != nil {
 			t.Fatalf("approve %s: %v", id, err)
 		}
 	}
-	got, _, err := store.Retrieve(memorystore.Query{
+	got, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
 		Scopes:   []memorystore.Scope{user("ana")},
 		Purposes: []memorystore.Purpose{memorystore.Operate, memorystore.Personalize}})
 	if err != nil {
@@ -91,10 +91,10 @@ func TestAQueryAuthorizesOnlyItsDeclaredPurposes(t *testing.T) {
 func TestAQueryWithNoPurposeAuthorizesNothing(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		"deploys land on Tuesdays", "operator"); err != nil {
+		memorystore.Stated, "deploys land on Tuesdays", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	got, evidence, err := store.Retrieve(memorystore.Query{
+	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
 		Scopes: []memorystore.Scope{user("ana")}})
 	if err != nil {
 		t.Fatalf("retrieve: %v", err)
@@ -116,7 +116,7 @@ func TestAQueryWithNoPurposeAuthorizesNothing(t *testing.T) {
 // defaulted to a wildcard, and an unrecognized purpose gets no standing.
 func TestAnUnclassifiedOrUnknownPurposeIsRefusedAtValidate(t *testing.T) {
 	store := open(t)
-	_, err := store.Approve("unstated", user("ana"), memorystore.Public, "", "a fact approved for no stated use", "operator")
+	_, err := store.Approve("unstated", user("ana"), memorystore.Public, "", memorystore.Stated, "a fact approved for no stated use", "operator")
 	if err == nil {
 		t.Fatal("a record with no purpose was stored: an unstated use is unknown, and treating " +
 			"unknown as any purpose would surface the record for every use -- purpose creep by " +
@@ -127,7 +127,7 @@ func TestAnUnclassifiedOrUnknownPurposeIsRefusedAtValidate(t *testing.T) {
 			"must tell the caller to approve the record for a known use, not report a bare invalid", err)
 	}
 	_, err = store.Approve("garbage", user("ana"), memorystore.Public, memorystore.Purpose("marketing"),
-		"body", "operator")
+		memorystore.Stated, "body", "operator")
 	if err == nil {
 		t.Fatal("a record with an unrecognized purpose was stored: the vocabulary is closed precisely " +
 			"so a use nobody enumerated gets no standing rather than the standing of whatever it is " +
@@ -144,10 +144,10 @@ func TestAnUnclassifiedOrUnknownPurposeIsRefusedAtValidate(t *testing.T) {
 func TestAnUnknownQueryPurposeIsRefused(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		"a fact", "operator"); err != nil {
+		memorystore.Stated, "a fact", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	_, _, err := store.Retrieve(memorystore.Query{
+	_, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
 		Scopes:   []memorystore.Scope{user("ana")},
 		Purposes: []memorystore.Purpose{memorystore.Purpose("advertising")}})
 	if err == nil {
@@ -194,7 +194,7 @@ func TestPurposeIsPartOfTheVersionIdentity(t *testing.T) {
 func TestCorrectionCarriesPurposeForward(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("pref", user("ana"), memorystore.Public, memorystore.Personalize,
-		"prefers dark mode", "operator"); err != nil {
+		memorystore.Stated, "prefers dark mode", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	corrected, err := store.Correct("pref", "prefers dark mode and compact density", "ana")
@@ -209,7 +209,7 @@ func TestCorrectionCarriesPurposeForward(t *testing.T) {
 	// The re-purposing would be observable at retrieval: a query authorized only
 	// for operate must still not see the corrected personalize record, and one
 	// authorized for personalize must.
-	only, _, err := store.Retrieve(memorystore.Query{
+	only, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
 		Scopes:   []memorystore.Scope{user("ana")},
 		Purposes: []memorystore.Purpose{memorystore.Operate}})
 	if err != nil {
@@ -219,7 +219,7 @@ func TestCorrectionCarriesPurposeForward(t *testing.T) {
 		t.Fatalf("a query authorized for operate retrieved the corrected personalize record: the "+
 			"correction carried a different use forward, got %d records", len(only))
 	}
-	kept, _, err := store.Retrieve(memorystore.Query{
+	kept, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
 		Scopes:   []memorystore.Scope{user("ana")},
 		Purposes: []memorystore.Purpose{memorystore.Personalize}})
 	if err != nil {

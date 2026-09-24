@@ -89,7 +89,15 @@ type Record struct {
 	// correction, like the scope and the sensitivity, because a correction that
 	// dropped it would silently re-purpose the record.
 	Purpose Purpose `json:"purpose"`
-	Body    string  `json:"body"`
+	// EvidenceClass is the kind of evidence backing the record, the fourth
+	// dimension retrieval authorizes on beside the scope, the sensitivity and the
+	// purpose. It is required (ADR-0044): unstated evidence is unknown, and
+	// treating unknown as any class would surface an inference wherever an
+	// assertion was asked for. Set once at creation and carried forward by every
+	// correction, like the other three, because a correction that dropped it would
+	// silently reclassify what the record is evidence of.
+	EvidenceClass EvidenceClass `json:"evidence_class"`
+	Body          string        `json:"body"`
 
 	// Origin records who or what produced this version: an authenticated
 	// principal, an import name, or the run that proposed it. The exit
@@ -120,18 +128,19 @@ type Record struct {
 // it here on purpose, and an accidentally-included field would change every
 // existing version ID, invalidating every receipt already committed.
 type identity struct {
-	RecordID    string      `json:"record_id"`
-	Supersedes  string      `json:"supersedes,omitempty"`
-	Retires     []string    `json:"retires,omitempty"`
-	Scope       Scope       `json:"scope"`
-	Kind        string      `json:"kind"`
-	Sensitivity Sensitivity `json:"sensitivity"`
-	Purpose     Purpose     `json:"purpose"`
-	Body        string      `json:"body"`
-	Origin      string      `json:"origin"`
-	CreatedRun  string      `json:"created_run,omitempty"`
-	CreatedSeq  int64       `json:"created_seq,omitempty"`
-	Deleted     bool        `json:"deleted,omitempty"`
+	RecordID      string        `json:"record_id"`
+	Supersedes    string        `json:"supersedes,omitempty"`
+	Retires       []string      `json:"retires,omitempty"`
+	Scope         Scope         `json:"scope"`
+	Kind          string        `json:"kind"`
+	Sensitivity   Sensitivity   `json:"sensitivity"`
+	Purpose       Purpose       `json:"purpose"`
+	EvidenceClass EvidenceClass `json:"evidence_class"`
+	Body          string        `json:"body"`
+	Origin        string        `json:"origin"`
+	CreatedRun    string        `json:"created_run,omitempty"`
+	CreatedSeq    int64         `json:"created_seq,omitempty"`
+	Deleted       bool          `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
@@ -146,8 +155,8 @@ type identity struct {
 func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
 		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
-		Kind: r.Kind, Sensitivity: r.Sensitivity, Purpose: r.Purpose, Body: r.Body, Origin: r.Origin,
-		CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
+		Kind: r.Kind, Sensitivity: r.Sensitivity, Purpose: r.Purpose, EvidenceClass: r.EvidenceClass,
+		Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
@@ -198,6 +207,13 @@ func (r Record) Validate() error {
 	// and a tombstone with no purpose would be a record whose approved use became
 	// unknown at the moment it was removed.
 	if err := r.Purpose.Validate(); err != nil {
+		return err
+	}
+	// Evidence class is validated for every record, tombstone included, for the
+	// same reason as the sensitivity and the purpose: a deletion carries the tip's
+	// class forward, and a tombstone with no class would be a record whose backing
+	// evidence became unknown at the moment it was removed.
+	if err := r.EvidenceClass.Validate(); err != nil {
 		return err
 	}
 	// A tombstone carries no body by design, so the body check is scoped to
