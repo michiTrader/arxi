@@ -53,6 +53,7 @@ has to decide which — not ignore the contradiction.
 | [0041](0041-temp-cleanup-is-derived.md) | The atomic-rename publish defers removing its temp, a derived family invariant | accepted |
 | [0042](0042-a-record-carries-a-sensitivity-authorized-before-ranking.md) | A memory record carries a sensitivity, authorized before it is ranked | accepted |
 | [0043](0043-a-record-is-approved-for-a-purpose-authorized-before-ranking.md) | A memory record is approved for a purpose, authorized before it is ranked | accepted |
+| [0044](0044-a-record-carries-an-evidence-class-authorized-before-ranking.md) | A memory record carries an evidence class, authorized before it is ranked | accepted |
 
 ## Format
 

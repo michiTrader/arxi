@@ -553,16 +553,41 @@ public floor an empty clearance falls back to. It was chosen second because its
 omission is also a disclosure: a record the user approved for one use, surfaced
 under another, is the leakage the exit evidence tests, arriving through purpose.
 
+ADR-0044 adds the third dimension, evidence class, and it is the third worked
+example of the membership relation — but the first whose argument is *why it is
+not the ranked dimension it looks like*. A class describes what a record rests on
+(`stated` by a user, `observed` from execution, `imported` from an external
+source), and it is tempting to rank these by strength and authorize a floor the
+way sensitivity authorizes a ceiling. The domain forbids it: for a stated
+preference `stated` is authoritative and `observed` is the weaker guess, while for
+an external fact `imported` outranks what a user `stated` from memory — the order
+flips with the question, so any rank would be an order invented where the domain
+has none, the failure ADR-0023 and ADR-0043 name. So a record carries one class, a
+query holds the set of classes it accepts, and `Retrieve` withholds a record whose
+class is not accepted, in the same pre-ranking step that filters by scope,
+clearance and purpose. `Validate` refuses a record that names no class rather than
+defaulting it, because — as with purpose — there is no least-privilege member to
+fall back to; the class is part of the content-addressed version identity
+(ADR-0034), so a reclassification is a new version a receipt can name; and an empty
+accepted set accepts nothing, the fail-closed floor of an unranked dimension. It
+was chosen third, over valid time, because its omission is a disclosure the exit
+evidence tests — an inference surfaced where an assertion was asked for — and
+because it is self-contained, where valid time is bitemporal and its as-of instant
+is a clock value this store deliberately does not read.
+
 Two gaps are deliberate rather than pending. **Retrieval is not wired into
 `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
 Asha, so wiring it now would mean inventing a principal from whatever the run
 happens to know — the class of guess ADR-0022 exists to stop. **Temporal
-validity, evidence class, confidence and retention are not implemented** and
-still need their own record (item 7 below, less the sensitivity and purpose
-ADR-0042 and ADR-0043 settled); adding them as struct fields with nothing
+validity, confidence and retention are not implemented** and still need their own
+record (item 7 below, less the sensitivity, purpose and evidence class ADR-0042,
+ADR-0043 and ADR-0044 settled); adding them as struct fields with nothing
 authorizing them would be the "field nothing fails on" defect this corpus has
-now recorded four times.
+now recorded four times. Valid time is the last authorizing dimension, left for
+its own record because it is bitemporal and its as-of instant is a clock this
+store does not read; confidence and retention feed ranking and lifecycle rather
+than authorization.
 
 ## Phase 8 — First useful Asha vertical slice
 
