@@ -172,13 +172,15 @@ func TestCorrectionCarriesRetentionForward(t *testing.T) {
 	}
 }
 
-// TestExpiredEphemeralRecordDoesNotResurrect ties retention to the deletion
-// lineage the phase's exit evidence requires. Expiry is a tombstone, not an
-// unlink, so a record expired by a sweep must stay gone when the store is reopened
-// over the same directory -- a replica or backup holding the earlier versions
-// cannot bring it back. An unlink-based expiry would pass every in-memory check
-// and fail exactly here.
-func TestExpiredEphemeralRecordDoesNotResurrect(t *testing.T) {
+// TestExpiredEphemeralRecordLeavesATombstoneNotAHole ties retention to the
+// deletion lineage the phase's exit evidence requires. Expiry is a tombstone, not
+// an unlink: after a sweep the record's chain must carry a Deleted tip that
+// travels with the data, so a replica or backup holding the earlier versions
+// cannot resurrect it. An unlink-based expiry would drop the record from
+// retrieval too -- passing a naive "is it gone" check -- but leave no tombstone,
+// so this asserts the tombstone is present rather than only that the record is
+// absent, which is the difference a resurrection turns on.
+func TestExpiredEphemeralRecordLeavesATombstoneNotAHole(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("transient", user("ana"), memorystore.Public, memorystore.Operate,
 		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, "ana opened a file", "operator"); err != nil {
@@ -188,20 +190,32 @@ func TestExpiredEphemeralRecordDoesNotResurrect(t *testing.T) {
 		t.Fatalf("expire: %v", err)
 	}
 
-	reopened, err := memorystore.Open(store.Dir())
+	versions, err := store.Versions()
 	if err != nil {
-		t.Fatalf("reopen store: %v", err)
+		t.Fatalf("versions: %v", err)
 	}
-	got, _, err := reopened.Retrieve(memorystore.Query{
+	tombstoned := false
+	for _, v := range versions {
+		if v.RecordID == "transient" && v.Deleted {
+			tombstoned = true
+		}
+	}
+	if !tombstoned {
+		t.Fatal("Expire left no tombstone for the ephemeral record: the sweep unlinked it instead of " +
+			"superseding it with a deletion version, so a replica or backup still holding the earlier " +
+			"versions would resurrect it -- the resurrection the deletion guarantee forbids, reached " +
+			"through a sweep")
+	}
+
+	got, _, err := store.Retrieve(memorystore.Query{
 		Scopes:          []memorystore.Scope{user("ana")},
 		Purposes:        []memorystore.Purpose{memorystore.Operate},
 		EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated}})
 	if err != nil {
-		t.Fatalf("retrieve after reopen: %v", err)
+		t.Fatalf("retrieve: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("an expired ephemeral record reappeared after the store was reopened (got %d): expiry "+
-			"unlinked the record instead of tombstoning it, so the versions left on disk resurrected it "+
-			"-- the resurrection the deletion guarantee forbids, reached through a sweep", len(got))
+		t.Fatalf("an expired ephemeral record is still retrieved (got %d): the tombstone the sweep wrote "+
+			"is not suppressing it from retrieval", len(got))
 	}
 }
