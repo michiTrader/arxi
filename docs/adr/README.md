@@ -55,6 +55,7 @@ has to decide which — not ignore the contradiction.
 | [0043](0043-a-record-is-approved-for-a-purpose-authorized-before-ranking.md) | A memory record is approved for a purpose, authorized before it is ranked | accepted |
 | [0044](0044-a-record-carries-an-evidence-class-authorized-before-ranking.md) | A memory record carries an evidence class, authorized before it is ranked | accepted |
 | [0045](0045-a-record-carries-a-confidence-that-ranks-rather-than-authorizes.md) | A memory record carries a confidence, which ranks it rather than authorizing it | accepted |
+| [0046](0046-a-record-carries-a-retention-that-expires-rather-than-authorizes.md) | A memory record carries a retention, which expires it rather than authorizing it | accepted |
 
 ## Format
 

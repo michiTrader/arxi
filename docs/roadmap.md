@@ -597,20 +597,40 @@ stated one; and the level is part of the content-addressed version identity
 before retention because retention feeds lifecycle rather than ranking and needs a
 clock this store does not read, the same reason valid time is last.
 
-One gap is now closed and two remain deliberate rather than pending. **Retrieval is
+ADR-0046 adds retention, the first dimension on the lifecycle side of ADR-0043's
+line: the four authorization dimensions decide whether a record may be seen,
+confidence decides where it ranks, and retention decides neither — it decides when
+a record stops being kept. So its check is neither a leakage test nor a reordering
+one but an *expiry* test: a record carries a policy from a closed lifecycle
+vocabulary (`permanent`, `ephemeral`), and an `Expire` sweep tombstones the
+ephemeral records while leaving the permanent ones, so removing the permanent guard
+expires a record a user committed to keep. There is deliberately no retention field
+on the query — a stronger version of confidence's reason, because retention does
+not even change the order, so filtering by it would withhold a record the caller
+may see merely because it is expirable. `Validate` still refuses a record that
+names no retention, because an unstated retention is no lifecycle decision and both
+defaults are dishonest — `permanent` hoards a record meant to be transient,
+`ephemeral` expires one meant to be kept; and the policy is part of the
+content-addressed version identity (ADR-0034), so a re-tiering is a new version a
+receipt can name rather than an in-place edit a sweep could act on. It met the
+clock constraint that still defers valid time not by reading a clock but by being a
+policy the caller times: `Expire` takes no as-of instant — the store decides what
+may expire and the caller decides when. Expiry is a tombstone, not an unlink, so an
+expired record inherits the deletion lineage's no-resurrection guarantee.
+
+One gap remains open and two are deliberate rather than pending. **Retrieval is
 not wired into `internal/exec`**: which principals a run is authorized for is an
 identity question, and the boundary above assigns identity, authentication and
 consent to Asha, so wiring it now would mean inventing a principal from whatever
-the run happens to know — the class of guess ADR-0022 exists to stop. **Temporal
-validity and retention are not implemented** and still need their own record (item
-7 below, less the sensitivity, purpose, evidence class and confidence ADR-0042,
-ADR-0043, ADR-0044 and ADR-0045 settled); adding them as struct fields with nothing
-failing on them would be the "field nothing fails on" defect this corpus has now
-recorded four times. Valid time is the last authorizing dimension, left for its own
-record because it is bitemporal and its as-of instant is a clock this store does not
-read; retention feeds lifecycle rather than ranking or authorization, so a retention
-nothing expires on is the same defect one rank lower and it must arrive with the
-mechanism that fails on it.
+the run happens to know — the class of guess ADR-0022 exists to stop. **Valid time
+is not implemented** and still needs its own record (item 7 below, less the
+sensitivity, purpose, evidence class, confidence and retention that ADR-0042
+through ADR-0046 settled); adding it as a struct field with nothing failing on it
+would be the "field nothing fails on" defect this corpus keeps recording. Valid
+time is the last authorizing dimension, left for its own record because it is
+bitemporal and its as-of instant is a clock this store does not read — the one
+clock constraint retention sidestepped by being a policy the caller times, which
+valid time cannot do because an as-of query is a clock read by nature.
 
 ## Phase 8 — First useful Asha vertical slice
 
