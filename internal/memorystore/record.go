@@ -179,7 +179,7 @@ type identity struct {
 	// to ephemeral and tombstoned by the next sweep, expiring a version somebody
 	// was told would be kept. Making it identity forces a re-tier to be a visible
 	// new version.
-	Retention  Retention `json:"retention"`
+	Retention Retention `json:"retention"`
 	// Validity is part of the identity for the same reason the dimensions above are
 	// (ADR-0034): re-dating when a fact is true is a new version a receipt can name,
 	// not an in-place edit. It matters as much as retention here: if a validity
@@ -188,12 +188,12 @@ type identity struct {
 	// withheld it at a 2026 as-of would start returning it -- or the reverse -- with
 	// no version to show the window had moved. Making it identity forces a re-dating
 	// to be a visible new version.
-	Validity   Validity  `json:"validity"`
-	Body       string    `json:"body"`
-	Origin     string    `json:"origin"`
-	CreatedRun string    `json:"created_run,omitempty"`
-	CreatedSeq int64     `json:"created_seq,omitempty"`
-	Deleted    bool      `json:"deleted,omitempty"`
+	Validity   Validity `json:"validity"`
+	Body       string   `json:"body"`
+	Origin     string   `json:"origin"`
+	CreatedRun string   `json:"created_run,omitempty"`
+	CreatedSeq int64    `json:"created_seq,omitempty"`
+	Deleted    bool     `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
