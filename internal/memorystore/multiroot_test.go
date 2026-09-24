@@ -37,17 +37,17 @@ func TestApproveRefusesASecondRootForOneRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op"); err != nil {
 		t.Fatalf("first approve failed: %v", err)
 	}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, "body B is different", "op"); err == nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body B is different", "op"); err == nil {
 		t.Fatal("a second Approve for the same record with a different body succeeded: it creates a " +
 			"second root, and two versions that supersede nothing are both current with no rule to " +
 			"choose between them")
 	}
 	// An identical re-Approve is idempotent and must still succeed: version IDs
 	// are content-addressed, so re-applying the same approval is the same version.
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op"); err != nil {
 		t.Fatalf("an identical re-Approve was refused: %v: content-addressed writes are idempotent, "+
 			"and refusing a retry breaks every caller above it", err)
 	}
@@ -62,10 +62,10 @@ func TestApproveRefusesARootOverAProposedRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Propose("r1", sc, Public, Operate, Stated, Medium, "candidate body", "model", "run-1", 1); err != nil {
+	if _, err := s.Propose("r1", sc, Public, Operate, Stated, Medium, Permanent, "candidate body", "model", "run-1", 1); err != nil {
 		t.Fatalf("propose failed: %v", err)
 	}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, "approved body", "op"); err == nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "approved body", "op"); err == nil {
 		t.Fatal("approving a record that already exists as a candidate created a second root: promotion " +
 			"is the proposed-to-approved transition, and a fresh root forks the record instead")
 	}
@@ -81,11 +81,11 @@ func TestAnImportedRootForkIsContainedNotSilentlyPresented(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op"); err != nil {
 		t.Fatalf("approve failed: %v", err)
 	}
 	// A competing root arrives out of band (import/replica/concurrent write).
-	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Body: "body B", Origin: "import"})
+	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body B", Origin: "import"})
 
 	recs, ev, err := s.Retrieve(Query{EvidenceClasses: []EvidenceClass{Stated}, Purposes: []Purpose{Operate}, Scopes: []Scope{sc}})
 	if err != nil {
@@ -130,13 +130,13 @@ func TestHealthyRecordsAreUnaffectedByTheGeneralizedForkCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("keep", sc, Public, Operate, Stated, Medium, "original", "op"); err != nil {
+	if _, err := s.Approve("keep", sc, Public, Operate, Stated, Medium, Permanent, "original", "op"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Correct("keep", "corrected", "op"); err != nil {
 		t.Fatalf("correct failed: %v", err)
 	}
-	if _, err := s.Approve("gone", sc, Public, Operate, Stated, Medium, "temp", "op"); err != nil {
+	if _, err := s.Approve("gone", sc, Public, Operate, Stated, Medium, Permanent, "temp", "op"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Delete("gone", "op"); err != nil {
