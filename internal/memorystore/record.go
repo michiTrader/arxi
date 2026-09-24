@@ -81,7 +81,15 @@ type Record struct {
 	// once at creation and carried forward by every correction, like the scope,
 	// because a correction that dropped it would silently declassify the record.
 	Sensitivity Sensitivity `json:"sensitivity"`
-	Body        string      `json:"body"`
+	// Purpose is the use the record is approved for, the third dimension
+	// retrieval authorizes on beside the scope and the sensitivity. It is
+	// required (ADR-0043): an unstated use is unknown, and treating unknown as
+	// any purpose would surface the record for every use -- purpose creep by
+	// construction. Set once at creation and carried forward by every
+	// correction, like the scope and the sensitivity, because a correction that
+	// dropped it would silently re-purpose the record.
+	Purpose Purpose `json:"purpose"`
+	Body    string  `json:"body"`
 
 	// Origin records who or what produced this version: an authenticated
 	// principal, an import name, or the run that proposed it. The exit
@@ -118,6 +126,7 @@ type identity struct {
 	Scope       Scope       `json:"scope"`
 	Kind        string      `json:"kind"`
 	Sensitivity Sensitivity `json:"sensitivity"`
+	Purpose     Purpose     `json:"purpose"`
 	Body        string      `json:"body"`
 	Origin      string      `json:"origin"`
 	CreatedRun  string      `json:"created_run,omitempty"`
@@ -137,7 +146,7 @@ type identity struct {
 func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
 		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
-		Kind: r.Kind, Sensitivity: r.Sensitivity, Body: r.Body, Origin: r.Origin,
+		Kind: r.Kind, Sensitivity: r.Sensitivity, Purpose: r.Purpose, Body: r.Body, Origin: r.Origin,
 		CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
@@ -182,6 +191,13 @@ func (r Record) Validate() error {
 	// carries the tip's level forward, and a tombstone with no level would be a
 	// record whose classification became unknown at the moment it was removed.
 	if err := r.Sensitivity.Validate(); err != nil {
+		return err
+	}
+	// Purpose is validated for every record, tombstone included, for the same
+	// reason as the sensitivity: a deletion carries the tip's purpose forward,
+	// and a tombstone with no purpose would be a record whose approved use became
+	// unknown at the moment it was removed.
+	if err := r.Purpose.Validate(); err != nil {
 		return err
 	}
 	// A tombstone carries no body by design, so the body check is scoped to

@@ -26,6 +26,14 @@ type Query struct {
 	// public floor: a caller that names no clearance receives only material that
 	// needs none, which is the fail-closed default rather than a wildcard.
 	Clearance Sensitivity
+	// Purposes is the set of uses the caller is authorized to serve. A record is
+	// visible only if its purpose is in this set (ADR-0043). Empty authorizes
+	// nothing -- a caller that names no purpose is authorized for no purpose --
+	// which is the fail-closed default and the honest one for an unranked
+	// dimension: purpose has no floor member to fall back to, so this mirrors the
+	// scope rule (an empty scope set authorizes no holder) rather than the
+	// clearance rule (an empty clearance is the public floor).
+	Purposes []Purpose
 	// Limit caps the returned records. Zero means no cap.
 	Limit int
 }
@@ -46,12 +54,19 @@ type Retrieval struct {
 	// clearance, the "every influence identifies its source" requirement widened
 	// to the level that influence was cleared at.
 	Clearance string `json:"clearance"`
+	// Purposes is the set of uses the retrieval was authorized for, sorted.
+	// Recorded beside the clearance so an audit can answer not only which records
+	// were presented and under what clearance but for which use each was
+	// authorized -- the "every influence identifies its source" requirement,
+	// widened once more (ADR-0043).
+	Purposes []string `json:"authorized_purposes"`
 	// Considered is how many live versions existed before authorization,
 	// Authorized how many survived it. The pair is the leakage measurement:
 	// a cross-tenant test asserts Authorized is zero, and Considered proves
 	// the records were actually present to be leaked rather than absent.
-	// Authorization is scope and clearance together, so a record in the caller's
-	// scope but above its clearance is considered and not authorized -- the same
+	// Authorization is scope, purpose and clearance together, so a record in the
+	// caller's scope but approved for a use the caller is not authorized for, or
+	// above its clearance, is considered and not authorized -- the same
 	// contained-refusal witness as a cross-scope record, one dimension over.
 	Considered int         `json:"considered"`
 	Authorized int         `json:"authorized"`
@@ -71,6 +86,7 @@ type Selection struct {
 	VersionID   string `json:"version_id"`
 	Scope       string `json:"scope"`
 	Sensitivity string `json:"sensitivity"`
+	Purpose     string `json:"purpose"`
 	Reason      string `json:"reason"`
 }
 
@@ -120,6 +136,29 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 			"misspelled clearance would silently present a different set than intended",
 			q.Clearance, sensitivityVocabulary())
 	}
+	// The authorized purpose set is built and validated the same way. An unknown
+	// purpose is refused rather than dropped from the set, because silently
+	// dropping a misspelled purpose would narrow the caller's authorization with
+	// no error to say so -- the closed-vocabulary rule the record's own purpose
+	// obeys, applied to the query. The set is deduplicated for the same reason
+	// the scope set is. An empty set is not an error: it authorizes nothing,
+	// which is the fail-closed floor of an unranked dimension.
+	authorizedPurposes := make(map[Purpose]bool, len(q.Purposes))
+	purposeNames := make([]string, 0, len(q.Purposes))
+	for _, p := range q.Purposes {
+		if !p.Known() {
+			return nil, Retrieval{}, fmt.Errorf("memory query purpose %q is not one of %s: an "+
+				"unrecognized purpose is refused rather than dropped from the authorized set, because "+
+				"a misspelled purpose would silently narrow authorization and present a different set "+
+				"than intended", p, purposeVocabulary())
+		}
+		if authorizedPurposes[p] {
+			continue
+		}
+		authorizedPurposes[p] = true
+		purposeNames = append(purposeNames, string(p))
+	}
+	sort.Strings(purposeNames)
 	authorized := make(map[string]bool, len(q.Scopes))
 	names := make([]string, 0, len(q.Scopes))
 	for _, scope := range q.Scopes {
@@ -144,7 +183,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 	// argument violated from the other side.
 	live, forked := tips(versions)
 	evidence := Retrieval{Schema: Schema, RetrievalVersion: RetrievalVersion,
-		Scopes: names, Clearance: string(effectiveClearance),
+		Scopes: names, Clearance: string(effectiveClearance), Purposes: purposeNames,
 		Selections: []Selection{}, Forked: []string{}}
 
 	var kept []Record
@@ -157,6 +196,16 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		}
 		evidence.Considered++
 		if !authorized[r.Scope.String()] {
+			continue
+		}
+		// Purpose is the third authorization dimension (ADR-0043), checked in the
+		// same step as scope and clearance and before ranking. A record approved
+		// for a use the caller is not authorized to serve is withheld exactly as
+		// one outside its scope is, and for the same reason: a ranker that scored
+		// it would already have treated disallowed material as a candidate.
+		// Membership, not a ceiling -- the record's purpose must be in the query's
+		// authorized set, and an empty set authorizes nothing.
+		if !authorizedPurposes[r.Purpose] {
 			continue
 		}
 		// Clearance is the second authorization dimension (ADR-0042), checked in
@@ -230,7 +279,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		rank, _ := r.Scope.Principal.Specificity()
 		evidence.Selections = append(evidence.Selections, Selection{
 			RecordID: r.RecordID, VersionID: r.VersionID, Scope: r.Scope.String(),
-			Sensitivity: string(r.Sensitivity),
+			Sensitivity: string(r.Sensitivity), Purpose: string(r.Purpose),
 			Reason: fmt.Sprintf("scope specificity %d (%s), no semantic ranking in %s",
 				rank, r.Scope.Principal, RetrievalVersion),
 		})

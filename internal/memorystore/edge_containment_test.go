@@ -17,16 +17,16 @@ func TestARetireCannotRemoveAnotherRecordsHead(t *testing.T) {
 	victimScope := Scope{Principal: Tenant, ID: "acme"}
 	attackerScope := Scope{Principal: User, ID: "u1"}
 
-	victim, err := s.Approve("victim", victimScope, "important tenant memory", "op")
+	victim, err := s.Approve("victim", victimScope, Public, Operate, "important tenant memory", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Approve("attacker", attackerScope, "attacker body", "op"); err != nil {
+	if _, err := s.Approve("attacker", attackerScope, Public, Operate, "attacker body", "op"); err != nil {
 		t.Fatal(err)
 	}
 	// An imported/replicated/corrupt version of a different record names the
 	// victim's head in Retires.
-	writeRawVersion(t, s, Record{RecordID: "attacker", Scope: attackerScope, Kind: Approved,
+	writeRawVersion(t, s, Record{RecordID: "attacker", Scope: attackerScope, Kind: Approved, Sensitivity: Public, Purpose: Operate,
 		Body: "retires a foreign record", Origin: "import", Retires: []string{victim.VersionID}})
 
 	tip, err := s.tip("victim")
@@ -38,7 +38,7 @@ func TestARetireCannotRemoveAnotherRecordsHead(t *testing.T) {
 	if tip.Body != "important tenant memory" {
 		t.Fatalf("victim resolved to %q, not its own body: a foreign edge must not change what a record says", tip.Body)
 	}
-	recs, _, err := s.Retrieve(Query{Scopes: []Scope{victimScope}})
+	recs, _, err := s.Retrieve(Query{Purposes: []Purpose{Operate}, Scopes: []Scope{victimScope}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,11 +60,11 @@ func TestASupersedeCannotRemoveAnotherRecordsHead(t *testing.T) {
 	victimScope := Scope{Principal: Tenant, ID: "acme"}
 	attackerScope := Scope{Principal: User, ID: "u1"}
 
-	victim, err := s.Approve("victim", victimScope, "important tenant memory", "op")
+	victim, err := s.Approve("victim", victimScope, Public, Operate, "important tenant memory", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeRawVersion(t, s, Record{RecordID: "attacker", Scope: attackerScope, Kind: Approved,
+	writeRawVersion(t, s, Record{RecordID: "attacker", Scope: attackerScope, Kind: Approved, Sensitivity: Public, Purpose: Operate,
 		Body: "supersedes a foreign record", Origin: "import", Supersedes: victim.VersionID})
 
 	tip, err := s.tip("victim")
@@ -86,7 +86,7 @@ func TestSameRecordEdgesStillApplyAfterContainment(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, "original", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, "original", "op"); err != nil {
 		t.Fatal(err)
 	}
 	corrected, err := s.Correct("r1", "corrected", "op")
