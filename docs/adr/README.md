@@ -54,6 +54,7 @@ has to decide which — not ignore the contradiction.
 | [0042](0042-a-record-carries-a-sensitivity-authorized-before-ranking.md) | A memory record carries a sensitivity, authorized before it is ranked | accepted |
 | [0043](0043-a-record-is-approved-for-a-purpose-authorized-before-ranking.md) | A memory record is approved for a purpose, authorized before it is ranked | accepted |
 | [0044](0044-a-record-carries-an-evidence-class-authorized-before-ranking.md) | A memory record carries an evidence class, authorized before it is ranked | accepted |
+| [0045](0045-a-record-carries-a-confidence-that-ranks-rather-than-authorizes.md) | A memory record carries a confidence, which ranks it rather than authorizing it | accepted |
 
 ## Format
 
