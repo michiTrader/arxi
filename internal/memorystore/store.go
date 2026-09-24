@@ -404,8 +404,8 @@ func (s *Store) refuseSecondRoot(sealed Record) error {
 // Model-generated material must use Propose: the two entry points exist so the
 // containment rule Phase 7 opens with is a function signature rather than a
 // field the caller is trusted to set correctly.
-func (s *Store) Approve(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, body, origin string) (Record, error) {
-	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Kind: Approved, Body: body, Origin: origin})
+func (s *Store) Approve(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, retention Retention, body, origin string) (Record, error) {
+	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Retention: retention, Kind: Approved, Body: body, Origin: origin})
 }
 
 // Propose stores model-generated material as a candidate.
@@ -415,8 +415,8 @@ func (s *Store) Approve(recordID string, scope Scope, sensitivity Sensitivity, p
 // receipt at the barrier. Two independent refusals for one rule, because this
 // is the containment the phase names first and a single point of enforcement
 // would be a single point of regression.
-func (s *Store) Propose(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, body, origin, runID string, seq int64) (Record, error) {
-	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Kind: Candidate, Body: body,
+func (s *Store) Propose(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, retention Retention, body, origin, runID string, seq int64) (Record, error) {
+	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Retention: retention, Kind: Candidate, Body: body,
 		Origin: origin, CreatedRun: runID, CreatedSeq: seq})
 }
 
@@ -438,7 +438,7 @@ func (s *Store) Correct(recordID string, body, origin string) (Record, error) {
 			"resurrection the deletion guarantee forbids", recordID, tip.VersionID)
 	}
 	return s.Put(Record{RecordID: recordID, Supersedes: tip.VersionID, Scope: tip.Scope,
-		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Body: body, Origin: origin})
+		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Body: body, Origin: origin})
 }
 
 // Promote turns a candidate into an approved record by appending an approved
@@ -456,7 +456,7 @@ func (s *Store) Promote(recordID, origin string) (Record, error) {
 			"record that never was a candidate", recordID, tip.Kind, tip.VersionID)
 	}
 	return s.Put(Record{RecordID: recordID, Supersedes: tip.VersionID, Scope: tip.Scope,
-		Kind: Approved, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Body: tip.Body, Origin: origin})
+		Kind: Approved, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Body: tip.Body, Origin: origin})
 }
 
 // Delete appends a tombstone superseding the current tip.
@@ -477,7 +477,80 @@ func (s *Store) Delete(recordID, origin string) (Record, error) {
 		return tip, nil
 	}
 	return s.Put(Record{RecordID: recordID, Supersedes: tip.VersionID, Scope: tip.Scope,
-		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Origin: origin, Deleted: true})
+		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Origin: origin, Deleted: true})
+}
+
+// Expire tombstones every live record whose retention marks it expirable and
+// leaves the permanent ones untouched. It is the mechanism that fails on
+// retention, and its existence is what keeps retention from being the
+// field-nothing-fails-on defect: a lifecycle dimension with no sweep acting on it
+// would decide nothing, exactly as a confidence the ranker never read would order
+// nothing (ADR-0046).
+//
+// # The store decides what may expire; the caller decides when
+//
+// There is no clock here and there is no as-of argument, because this store
+// deliberately reads no clock (the same reason valid time is still deferred).
+// Retention is therefore not a duration the store counts down but a policy the
+// store honors: an ephemeral record is one a sweep may collect, a permanent one is
+// not. Deciding when to sweep -- at the end of a session, on a schedule -- is the
+// caller's, and the clock that triggers it lives outside this package, which is
+// the pure-reducer discipline applied to lifecycle: the policy is data the store
+// holds, the timing is an input the store is given.
+//
+// # Expiry is a tombstone, never an unlink
+//
+// Each expiry is an ordinary Delete: a tombstone superseding the tip, not a file
+// removed. Unlinking would drop the record from this copy and from nothing else,
+// so any replica or backup still holding the bytes would resurrect it -- the exact
+// argument Delete makes for the explicit case, and it holds identically when the
+// deletion is driven by a sweep rather than an operator. So an expired ephemeral
+// record inherits the whole no-resurrection guarantee, and a receipt that named an
+// earlier version of it still resolves against the versions left on disk.
+//
+// A forked record is skipped rather than expired: it has no single tip to
+// supersede, is already withheld from retrieval, and needs an operator's Resolve
+// before any verb can act on it. Expiring one head would deepen the fork, not
+// clear it.
+func (s *Store) Expire(origin string) ([]string, error) {
+	versions, err := s.Versions()
+	if err != nil {
+		return nil, err
+	}
+	live, _ := tips(versions)
+	// Collect the expirable record IDs from one snapshot before writing any
+	// tombstone. Each Delete appends a version, so re-reading mid-loop would see
+	// the tombstones this sweep is still writing; taking the set first keeps the
+	// sweep a function of the store as it stood when Expire was called.
+	var expirable []string
+	for _, r := range live {
+		// A tombstone is already the absence of a record; expiring it again would
+		// be a no-op tombstone superseding a tombstone. Skip it so the returned set
+		// names records this call actually removed.
+		if r.Deleted {
+			continue
+		}
+		// Expirability is read through the vocabulary, not compared against the
+		// Ephemeral literal, so the one place that decides what a sweep may remove is
+		// the retention map. A record whose retention is unknown reports not
+		// expirable and is left alone -- a deletion justified by a policy the
+		// vocabulary does not recognize is the fail-open direction Validate already
+		// closes on the way in, and Expire closes it again here so a value that
+		// somehow reached disk is still not swept.
+		if expire, _ := r.Retention.Expirable(); !expire {
+			continue
+		}
+		expirable = append(expirable, r.RecordID)
+	}
+	sort.Strings(expirable)
+	expired := make([]string, 0, len(expirable))
+	for _, recordID := range expirable {
+		if _, err := s.Delete(recordID, origin); err != nil {
+			return expired, fmt.Errorf("expire memory record %q: %w", recordID, err)
+		}
+		expired = append(expired, recordID)
+	}
+	return expired, nil
 }
 
 // Resolve heals a forked record by keeping one current version the operator
@@ -557,13 +630,13 @@ func (s *Store) Resolve(recordID, keepVersionID, origin string) (Record, error) 
 	sort.Strings(others)
 
 	// The survivor's body, scope, kind, sensitivity, purpose, evidence class,
-	// confidence and deletion state are carried forward verbatim: Resolve chooses
-	// which version wins, not what it says. Keeping a tombstone is allowed -- an
-	// operator may resolve a fork by deciding the record is deleted -- so Deleted
-	// is copied rather than forced false.
+	// confidence, retention and deletion state are carried forward verbatim:
+	// Resolve chooses which version wins, not what it says. Keeping a tombstone is
+	// allowed -- an operator may resolve a fork by deciding the record is deleted --
+	// so Deleted is copied rather than forced false.
 	return s.Put(Record{RecordID: recordID, Supersedes: keep.VersionID, Retires: others,
 		Scope: keep.Scope, Kind: keep.Kind, Sensitivity: keep.Sensitivity, Purpose: keep.Purpose,
-		EvidenceClass: keep.EvidenceClass, Confidence: keep.Confidence, Body: keep.Body, Deleted: keep.Deleted, Origin: origin})
+		EvidenceClass: keep.EvidenceClass, Confidence: keep.Confidence, Retention: keep.Retention, Body: keep.Body, Deleted: keep.Deleted, Origin: origin})
 }
 
 // Versions returns every stored version, in no meaningful order.
