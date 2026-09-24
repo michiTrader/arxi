@@ -31,13 +31,13 @@ func TestASelfReferentialRetireCannotFreezeARecord(t *testing.T) {
 
 	// The ID a plain version would have. An importer trying to make a version
 	// retire itself would aim at exactly this.
-	plain, err := Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Body: "body A", Origin: "op"}.Seal()
+	plain, err := Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body A", Origin: "op"}.Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Writing that same record but naming plain's ID in Retires produces a
 	// DIFFERENT version, because Retires is part of the identity.
-	written := writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium,
+	written := writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent,
 		Body: "body A", Origin: "op", Retires: []string{plain.VersionID}})
 	if written.VersionID == plain.VersionID {
 		t.Fatal("a version that lists a target in Retires kept the same version ID as one that does not: " +
@@ -67,17 +67,17 @@ func TestMutuallyRetiringRootsAreAVisibleForkNotAFrozenRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	a, err := Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Body: "body A", Origin: "op"}.Seal()
+	a, err := Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body A", Origin: "op"}.Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Body: "body B", Origin: "op"}.Seal()
+	b, err := Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body B", Origin: "op"}.Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Body: "body A",
+	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body A",
 		Origin: "op", Retires: []string{b.VersionID}})
-	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Body: "body B",
+	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body B",
 		Origin: "op", Retires: []string{a.VersionID}})
 
 	forks, err := s.Forks()

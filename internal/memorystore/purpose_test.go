@@ -17,7 +17,7 @@ import (
 func TestARecordOutsideTheQueryPurposeIsWithheld(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("promo", user("ana"), memorystore.Public, memorystore.Recommend,
-		memorystore.Stated, memorystore.Medium, "suggest the premium plan", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "suggest the premium plan", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
@@ -55,7 +55,7 @@ func TestAQueryAuthorizesOnlyItsDeclaredPurposes(t *testing.T) {
 		"re": memorystore.Recommend,
 	}
 	for id, use := range uses {
-		if _, err := store.Approve(id, user("ana"), memorystore.Public, use, memorystore.Stated, memorystore.Medium, "body of "+id, "operator"); err != nil {
+		if _, err := store.Approve(id, user("ana"), memorystore.Public, use, memorystore.Stated, memorystore.Medium, memorystore.Permanent, "body of "+id, "operator"); err != nil {
 			t.Fatalf("approve %s: %v", id, err)
 		}
 	}
@@ -91,7 +91,7 @@ func TestAQueryAuthorizesOnlyItsDeclaredPurposes(t *testing.T) {
 func TestAQueryWithNoPurposeAuthorizesNothing(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, "deploys land on Tuesdays", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "deploys land on Tuesdays", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
@@ -116,7 +116,7 @@ func TestAQueryWithNoPurposeAuthorizesNothing(t *testing.T) {
 // defaulted to a wildcard, and an unrecognized purpose gets no standing.
 func TestAnUnclassifiedOrUnknownPurposeIsRefusedAtValidate(t *testing.T) {
 	store := open(t)
-	_, err := store.Approve("unstated", user("ana"), memorystore.Public, "", memorystore.Stated, memorystore.Medium, "a fact approved for no stated use", "operator")
+	_, err := store.Approve("unstated", user("ana"), memorystore.Public, "", memorystore.Stated, memorystore.Medium, memorystore.Permanent, "a fact approved for no stated use", "operator")
 	if err == nil {
 		t.Fatal("a record with no purpose was stored: an unstated use is unknown, and treating " +
 			"unknown as any purpose would surface the record for every use -- purpose creep by " +
@@ -127,7 +127,7 @@ func TestAnUnclassifiedOrUnknownPurposeIsRefusedAtValidate(t *testing.T) {
 			"must tell the caller to approve the record for a known use, not report a bare invalid", err)
 	}
 	_, err = store.Approve("garbage", user("ana"), memorystore.Public, memorystore.Purpose("marketing"),
-		memorystore.Stated, memorystore.Medium, "body", "operator")
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "body", "operator")
 	if err == nil {
 		t.Fatal("a record with an unrecognized purpose was stored: the vocabulary is closed precisely " +
 			"so a use nobody enumerated gets no standing rather than the standing of whatever it is " +
@@ -144,7 +144,7 @@ func TestAnUnclassifiedOrUnknownPurposeIsRefusedAtValidate(t *testing.T) {
 func TestAnUnknownQueryPurposeIsRefused(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, "a fact", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "a fact", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	_, _, err := store.Retrieve(memorystore.Query{EvidenceClasses: []memorystore.EvidenceClass{memorystore.Stated},
@@ -194,7 +194,7 @@ func TestPurposeIsPartOfTheVersionIdentity(t *testing.T) {
 func TestCorrectionCarriesPurposeForward(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("pref", user("ana"), memorystore.Public, memorystore.Personalize,
-		memorystore.Stated, memorystore.Medium, "prefers dark mode", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "prefers dark mode", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	corrected, err := store.Correct("pref", "prefers dark mode and compact density", "ana")

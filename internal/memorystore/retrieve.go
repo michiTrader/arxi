@@ -50,6 +50,16 @@ type Query struct {
 	// confidence floor here would turn a ranking dimension into an authorization
 	// one and withhold material the caller may see merely because the writer was
 	// unsure -- the exact confusion this dimension is the worked example against.
+	//
+	// There is likewise no retention field here, and for a stronger version of
+	// the same reason (ADR-0046). Confidence at least changes the order of the
+	// result; retention does not touch retrieval at all -- it decides only
+	// whether a lifecycle sweep may expire a record, never whether a caller may
+	// see it or where it ranks. A query-side retention filter would withhold a
+	// record the caller is entitled to merely because it is expirable, conflating
+	// "may be swept" with "may not be read". A caller that wants only durable
+	// records is asking a lifecycle question the sweep answers, not a retrieval
+	// one this query answers.
 	// Limit caps the returned records. Zero means no cap.
 	Limit int
 }
