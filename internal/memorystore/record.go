@@ -97,7 +97,15 @@ type Record struct {
 	// correction, like the other three, because a correction that dropped it would
 	// silently reclassify what the record is evidence of.
 	EvidenceClass EvidenceClass `json:"evidence_class"`
-	Body          string        `json:"body"`
+	// Confidence is how far the writer vouches for the record, the first dimension
+	// that feeds ranking rather than authorization (ADR-0045). It is required: an
+	// unstated confidence is no assessment, and defaulting it would launder a
+	// missing judgment into a stated one. Set once at creation and carried forward
+	// by every correction, like the four authorization dimensions, because a
+	// correction that dropped it would silently restate how much to trust the
+	// record -- and unlike them it never withholds a record, it only orders it.
+	Confidence Confidence `json:"confidence"`
+	Body       string     `json:"body"`
 
 	// Origin records who or what produced this version: an authenticated
 	// principal, an import name, or the run that proposed it. The exit
@@ -136,11 +144,17 @@ type identity struct {
 	Sensitivity   Sensitivity   `json:"sensitivity"`
 	Purpose       Purpose       `json:"purpose"`
 	EvidenceClass EvidenceClass `json:"evidence_class"`
-	Body          string        `json:"body"`
-	Origin        string        `json:"origin"`
-	CreatedRun    string        `json:"created_run,omitempty"`
-	CreatedSeq    int64         `json:"created_seq,omitempty"`
-	Deleted       bool          `json:"deleted,omitempty"`
+	// Confidence is part of the identity for the same reason the four authorization
+	// dimensions are (ADR-0034): a re-rating is a new version a receipt can name,
+	// not an in-place edit that would silently change how a version already cited
+	// was ranked. It never authorizes, but it is still identity -- two records
+	// alike in everything but confidence are two different assertions about trust.
+	Confidence Confidence `json:"confidence"`
+	Body       string     `json:"body"`
+	Origin     string     `json:"origin"`
+	CreatedRun string     `json:"created_run,omitempty"`
+	CreatedSeq int64      `json:"created_seq,omitempty"`
+	Deleted    bool       `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
@@ -156,7 +170,7 @@ func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
 		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
 		Kind: r.Kind, Sensitivity: r.Sensitivity, Purpose: r.Purpose, EvidenceClass: r.EvidenceClass,
-		Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
+		Confidence: r.Confidence, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
@@ -214,6 +228,15 @@ func (r Record) Validate() error {
 	// class forward, and a tombstone with no class would be a record whose backing
 	// evidence became unknown at the moment it was removed.
 	if err := r.EvidenceClass.Validate(); err != nil {
+		return err
+	}
+	// Confidence is validated for every record, tombstone included, for the same
+	// reason as the four dimensions above: a deletion carries the tip's confidence
+	// forward, and a tombstone with no confidence would be a record whose stated
+	// trust became unknown at the moment it was removed. It is required here even
+	// though it never authorizes, because a record that cannot be ranked honestly
+	// is exactly the field-nothing-fails-on defect ADR-0045 refuses to add.
+	if err := r.Confidence.Validate(); err != nil {
 		return err
 	}
 	// A tombstone carries no body by design, so the body check is scoped to
