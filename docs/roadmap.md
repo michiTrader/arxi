@@ -575,19 +575,42 @@ evidence tests — an inference surfaced where an assertion was asked for — an
 because it is self-contained, where valid time is bitemporal and its as-of instant
 is a clock value this store deliberately does not read.
 
-Two gaps are deliberate rather than pending. **Retrieval is not wired into
-`internal/exec`**: which principals a run is authorized for is an identity
-question, and the boundary above assigns identity, authentication and consent to
-Asha, so wiring it now would mean inventing a principal from whatever the run
-happens to know — the class of guess ADR-0022 exists to stop. **Temporal
-validity, confidence and retention are not implemented** and still need their own
-record (item 7 below, less the sensitivity, purpose and evidence class ADR-0042,
-ADR-0043 and ADR-0044 settled); adding them as struct fields with nothing
-authorizing them would be the "field nothing fails on" defect this corpus has
-now recorded four times. Valid time is the last authorizing dimension, left for
-its own record because it is bitemporal and its as-of instant is a clock this
-store does not read; confidence and retention feed ranking and lifecycle rather
-than authorization.
+ADR-0045 adds confidence, and it is the first dimension on the ranking side of the
+line ADR-0043 drew: the four before it decide whether a record may be seen at all,
+confidence decides only where it ranks among the records already authorized. So it
+is the first that cannot borrow the authorization seam's witness — no query
+withholds a record for its confidence, so there is no cross-confidence leakage test
+— and its check is a *reordering* rather than a leakage one: a record carries a
+level from a closed ranked vocabulary (`low`, `medium`, `high`), and `Retrieve`
+orders the authorized set by it, highest first, after scope specificity and before
+the record-ID tie-break, so removing the clause presents a guess ahead of a
+vouched-for fact. It is the honest counterweight to evidence class: where that
+dimension *looked* ranked and was not, confidence genuinely is ranked, because a
+degree of belief in a record's own correctness does not invert with the question
+asked. There is deliberately no confidence field on the query — filtering by it
+would withhold material the caller may see merely because the writer was unsure,
+turning a ranking dimension into an authorization one. `Validate` still refuses a
+record that names no confidence, because an unstated confidence is no assessment
+rather than a low one and defaulting it would launder a missing judgment into a
+stated one; and the level is part of the content-addressed version identity
+(ADR-0034), so a re-rating is a new version a receipt can name. It was chosen
+before retention because retention feeds lifecycle rather than ranking and needs a
+clock this store does not read, the same reason valid time is last.
+
+One gap is now closed and two remain deliberate rather than pending. **Retrieval is
+not wired into `internal/exec`**: which principals a run is authorized for is an
+identity question, and the boundary above assigns identity, authentication and
+consent to Asha, so wiring it now would mean inventing a principal from whatever
+the run happens to know — the class of guess ADR-0022 exists to stop. **Temporal
+validity and retention are not implemented** and still need their own record (item
+7 below, less the sensitivity, purpose, evidence class and confidence ADR-0042,
+ADR-0043, ADR-0044 and ADR-0045 settled); adding them as struct fields with nothing
+failing on them would be the "field nothing fails on" defect this corpus has now
+recorded four times. Valid time is the last authorizing dimension, left for its own
+record because it is bitemporal and its as-of instant is a clock this store does not
+read; retention feeds lifecycle rather than ranking or authorization, so a retention
+nothing expires on is the same defect one rank lower and it must arrive with the
+mechanism that fails on it.
 
 ## Phase 8 — First useful Asha vertical slice
 
