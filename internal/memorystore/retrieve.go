@@ -41,6 +41,20 @@ type Query struct {
 	// to, and a caller that names no class accepts no evidence rather than all of
 	// it. This mirrors the scope and purpose rules, not the clearance floor.
 	EvidenceClasses []EvidenceClass
+	// AsOf is the instant in valid time the caller is asking about, and it is the one
+	// clock value this query carries -- supplied by the caller, never read by the
+	// store (ADR-0047). A record is visible only if its validity interval contains
+	// this instant, checked in the same pre-ranking step as scope, clearance, purpose
+	// and evidence class: a fact whose window ended before the as-of is withheld
+	// exactly as one outside the caller's scope is, because presenting it would assert
+	// as current something true only in the past. Empty is the timeless floor, not a
+	// wildcard: a caller that names no as-of receives only records that declared no
+	// validity window, never a bounded record it gave no instant to evaluate --
+	// fail-closed, and the reason it parallels the clearance floor rather than the
+	// purpose empty-set. There is no interval on the query and no "valid between"
+	// range, because a caller asks about one moment; a caller interested in a span
+	// asks about the moments in it.
+	AsOf Instant
 	// There is deliberately no confidence field here. Confidence ranks the
 	// authorized set, it does not authorize (ADR-0045), so there is nothing for a
 	// query to match against: a caller does not ask for "records of at least
@@ -92,6 +106,13 @@ type Retrieval struct {
 	// each rested -- the "every influence identifies its source" requirement,
 	// widened once more (ADR-0044).
 	EvidenceClasses []string `json:"authorized_evidence_classes"`
+	// AsOf is the instant in valid time the retrieval was authorized against,
+	// recorded beside the other authorization dimensions so an audit can answer not
+	// only which records were presented and for which use but as of when each was
+	// judged valid -- the "every influence identifies its source" requirement, widened
+	// to the moment the influence was current (ADR-0047). Empty records the timeless
+	// floor: the retrieval asked no temporal question and so saw only timeless records.
+	AsOf string `json:"as_of"`
 	// Considered is how many live versions existed before authorization,
 	// Authorized how many survived it. The pair is the leakage measurement:
 	// a cross-tenant test asserts Authorized is zero, and Considered proves
@@ -127,7 +148,16 @@ type Selection struct {
 	// was placed there for its confidence and not withheld, which is the whole
 	// distinction between a ranking dimension and an authorization one.
 	Confidence string `json:"confidence"`
-	Reason     string `json:"reason"`
+	// ValidFrom and ValidTo record the interval that admitted the record at the
+	// query's as-of, so an audit reading a selection can see the record was returned
+	// because its window contained the as-of and not in spite of it -- the
+	// authorization witness for valid time, the same shape as recording the record's
+	// sensitivity beside the retrieval's clearance (ADR-0047). Empty bounds render as
+	// empty strings: an omitted bound is the unbounded end of the interval, which the
+	// audit reads as "no known start" or "no known end".
+	ValidFrom string `json:"valid_from,omitempty"`
+	ValidTo   string `json:"valid_to,omitempty"`
+	Reason    string `json:"reason"`
 }
 
 // Retrieve returns the live, authorized, presentable records for a query,
@@ -221,6 +251,15 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		classNames = append(classNames, string(e))
 	}
 	sort.Strings(classNames)
+	// The query's as-of is validated the same way the clearance is: an ill-formed
+	// instant is refused rather than treated as the timeless floor, because a
+	// misspelled as-of silently narrowed to "timeless only" would present a
+	// different set than intended with no error to say so. An empty as-of is not an
+	// error -- it is the timeless floor, the temporal analogue of the public
+	// clearance floor -- so it is left as is and only a non-empty instant is checked.
+	if err := q.AsOf.canonical(); err != nil {
+		return nil, Retrieval{}, err
+	}
 	authorized := make(map[string]bool, len(q.Scopes))
 	names := make([]string, 0, len(q.Scopes))
 	for _, scope := range q.Scopes {
@@ -246,7 +285,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 	live, forked := tips(versions)
 	evidence := Retrieval{Schema: Schema, RetrievalVersion: RetrievalVersion,
 		Scopes: names, Clearance: string(effectiveClearance), Purposes: purposeNames,
-		EvidenceClasses: classNames, Selections: []Selection{}, Forked: []string{}}
+		EvidenceClasses: classNames, AsOf: string(q.AsOf), Selections: []Selection{}, Forked: []string{}}
 
 	var kept []Record
 	for _, r := range live {
@@ -289,6 +328,20 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 		// authorized, so the Considered/Authorized pair measures a clearance leak
 		// the same way it measures a scope one.
 		if !effectiveClearance.admits(r.Sensitivity) {
+			continue
+		}
+		// Valid time is the fifth and last authorization dimension (ADR-0047),
+		// checked in the same pre-ranking step as scope, purpose, class and
+		// clearance. A record whose validity interval does not contain the query's
+		// as-of is withheld exactly as one outside the caller's scope is: it is not
+		// true at the moment asked about, so presenting it would assert as current a
+		// fact true only in the past or not yet. It is filtered before Authorized++
+		// because a record the caller may not receive at this instant is not
+		// authorized at this instant, so the Considered/Authorized pair measures a
+		// stale-fact leak the same way it measures a scope one. An empty as-of admits
+		// only timeless records, the fail-closed floor contains() defines; the store
+		// reads no clock here, it compares against the instant the caller supplied.
+		if !r.Validity.contains(q.AsOf) {
 			continue
 		}
 		evidence.Authorized++
@@ -368,6 +421,7 @@ func (s *Store) Retrieve(q Query) ([]Record, Retrieval, error) {
 			RecordID: r.RecordID, VersionID: r.VersionID, Scope: r.Scope.String(),
 			Sensitivity: string(r.Sensitivity), Purpose: string(r.Purpose),
 			EvidenceClass: string(r.EvidenceClass), Confidence: string(r.Confidence),
+			ValidFrom: string(r.Validity.From), ValidTo: string(r.Validity.To),
 			Reason: fmt.Sprintf("scope specificity %d (%s), confidence %s, no semantic ranking in %s",
 				rank, r.Scope.Principal, r.Confidence, RetrievalVersion),
 		})
