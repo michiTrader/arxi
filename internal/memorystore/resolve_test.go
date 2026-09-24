@@ -15,7 +15,7 @@ func TestResolveHealsARootFork(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	keep, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op")
+	keep, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "body A", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestResolveHealsASupersessionFork(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "original", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "original", "op"); err != nil {
 		t.Fatal(err)
 	}
 	winner, err := s.Correct("r1", "the correction that wins", "op")
@@ -107,7 +107,7 @@ func TestResolveRefusesAVersionThatIsNotAHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "body A", "op"); err != nil {
 		t.Fatal(err)
 	}
 	writeRawVersion(t, s, Record{RecordID: "r1", Scope: sc, Kind: Approved, Sensitivity: Public, Purpose: Operate, EvidenceClass: Stated, Confidence: Medium, Retention: Permanent, Body: "body B", Origin: "import"})
@@ -127,7 +127,7 @@ func TestResolveRefusesAHealthyRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	head, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op")
+	head, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "body A", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestResolvingAnAlreadyResolvedForkIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	keep, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op")
+	keep, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "body A", "op")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestResolveKeepingATombstoneLeavesRecordDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := Scope{Principal: User, ID: "u1"}
-	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, "body A", "op"); err != nil {
+	if _, err := s.Approve("r1", sc, Public, Operate, Stated, Medium, Permanent, Validity{}, "body A", "op"); err != nil {
 		t.Fatal(err)
 	}
 	tomb, err := s.Delete("r1", "op")

@@ -17,7 +17,7 @@ import (
 func TestARecordOutsideTheQueryEvidenceClassesIsWithheld(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("inferred", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Observed, memorystore.Medium, memorystore.Permanent, "ana probably works in CET", "operator"); err != nil {
+		memorystore.Observed, memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "ana probably works in CET", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{
@@ -57,7 +57,7 @@ func TestAQueryAcceptsOnlyItsDeclaredEvidenceClasses(t *testing.T) {
 	}
 	for id, class := range classes {
 		if _, err := store.Approve(id, user("ana"), memorystore.Public, memorystore.Operate, class,
-			memorystore.Medium, memorystore.Permanent, "body of "+id, "operator"); err != nil {
+			memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "body of "+id, "operator"); err != nil {
 			t.Fatalf("approve %s: %v", id, err)
 		}
 	}
@@ -94,7 +94,7 @@ func TestAQueryAcceptsOnlyItsDeclaredEvidenceClasses(t *testing.T) {
 func TestAQueryWithNoEvidenceClassAcceptsNothing(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "deploys land on Tuesdays", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "deploys land on Tuesdays", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{
@@ -121,7 +121,7 @@ func TestAQueryWithNoEvidenceClassAcceptsNothing(t *testing.T) {
 func TestAnUnclassifiedOrUnknownEvidenceClassIsRefusedAtValidate(t *testing.T) {
 	store := open(t)
 	_, err := store.Approve("unstated", user("ana"), memorystore.Public, memorystore.Operate, "",
-		memorystore.Medium, memorystore.Permanent, "a fact backed by no stated evidence", "operator")
+		memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "a fact backed by no stated evidence", "operator")
 	if err == nil {
 		t.Fatal("a record with no evidence class was stored: unstated evidence is unknown, and treating " +
 			"unknown as any class would surface the record wherever any evidence is accepted -- the " +
@@ -132,7 +132,7 @@ func TestAnUnclassifiedOrUnknownEvidenceClassIsRefusedAtValidate(t *testing.T) {
 			"must tell the caller to record the evidence class as a known kind, not report a bare invalid", err)
 	}
 	_, err = store.Approve("garbage", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.EvidenceClass("rumored"), memorystore.Medium, memorystore.Permanent, "body", "operator")
+		memorystore.EvidenceClass("rumored"), memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "body", "operator")
 	if err == nil {
 		t.Fatal("a record with an unrecognized evidence class was stored: the vocabulary is closed " +
 			"precisely so a class nobody enumerated gets no standing rather than the standing of whatever " +
@@ -149,7 +149,7 @@ func TestAnUnclassifiedOrUnknownEvidenceClassIsRefusedAtValidate(t *testing.T) {
 func TestAnUnknownQueryEvidenceClassIsRefused(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "a fact", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "a fact", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	_, _, err := store.Retrieve(memorystore.Query{
@@ -202,7 +202,7 @@ func TestEvidenceClassIsPartOfTheVersionIdentity(t *testing.T) {
 func TestCorrectionCarriesEvidenceClassForward(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Imported, memorystore.Medium, memorystore.Permanent, "headcount is 240", "operator"); err != nil {
+		memorystore.Imported, memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "headcount is 240", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	corrected, err := store.Correct("fact", "headcount is 251", "ana")

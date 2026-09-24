@@ -21,11 +21,11 @@ import (
 func TestConfidenceOrdersRetrievalAtTheSameSpecificity(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("a-guess", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Low, memorystore.Permanent, "ana might prefer dark mode", "operator"); err != nil {
+		memorystore.Stated, memorystore.Low, memorystore.Permanent, memorystore.Validity{}, "ana might prefer dark mode", "operator"); err != nil {
 		t.Fatalf("approve low: %v", err)
 	}
 	if _, err := store.Approve("b-fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.High, memorystore.Permanent, "ana prefers dark mode", "operator"); err != nil {
+		memorystore.Stated, memorystore.High, memorystore.Permanent, memorystore.Validity{}, "ana prefers dark mode", "operator"); err != nil {
 		t.Fatalf("approve high: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{
@@ -61,7 +61,7 @@ func TestConfidenceOrdersRetrievalAtTheSameSpecificity(t *testing.T) {
 func TestConfidenceNeverWithholdsARecord(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("weak", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Low, memorystore.Permanent, "ana might work in CET", "operator"); err != nil {
+		memorystore.Stated, memorystore.Low, memorystore.Permanent, memorystore.Validity{}, "ana might work in CET", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{
@@ -95,7 +95,7 @@ func TestConfidenceNeverWithholdsARecord(t *testing.T) {
 func TestAnUnstatedOrUnknownConfidenceIsRefusedAtValidate(t *testing.T) {
 	store := open(t)
 	_, err := store.Approve("unrated", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, "", memorystore.Permanent, "a fact nobody rated", "operator")
+		memorystore.Stated, "", memorystore.Permanent, memorystore.Validity{}, "a fact nobody rated", "operator")
 	if err == nil {
 		t.Fatal("a record with no confidence was stored: an unstated confidence is no assessment, not a " +
 			"low one, and defaulting it would launder a missing judgment into a stated one -- the " +
@@ -106,7 +106,7 @@ func TestAnUnstatedOrUnknownConfidenceIsRefusedAtValidate(t *testing.T) {
 			"tell the caller to state the confidence as a known level, not report a bare invalid", err)
 	}
 	_, err = store.Approve("garbage", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Confidence("certain"), memorystore.Permanent, "body", "operator")
+		memorystore.Stated, memorystore.Confidence("certain"), memorystore.Permanent, memorystore.Validity{}, "body", "operator")
 	if err == nil {
 		t.Fatal("a record with an unrecognized confidence was stored: the vocabulary is closed precisely " +
 			"so a level nobody defined gets no standing rather than the standing of whatever it sorts beside")
@@ -156,7 +156,7 @@ func TestConfidenceIsPartOfTheVersionIdentity(t *testing.T) {
 func TestCorrectionCarriesConfidenceForward(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Imported, memorystore.High, memorystore.Permanent, "headcount is 240", "operator"); err != nil {
+		memorystore.Imported, memorystore.High, memorystore.Permanent, memorystore.Validity{}, "headcount is 240", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	corrected, err := store.Correct("fact", "headcount is 251", "ana")
@@ -180,11 +180,11 @@ func TestCorrectionCarriesConfidenceForward(t *testing.T) {
 func TestRankOrderReadsTheVocabularyNotTheString(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("a-low", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Low, memorystore.Permanent, "weak guess", "operator"); err != nil {
+		memorystore.Stated, memorystore.Low, memorystore.Permanent, memorystore.Validity{}, "weak guess", "operator"); err != nil {
 		t.Fatalf("approve low: %v", err)
 	}
 	if _, err := store.Approve("z-high", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.High, memorystore.Permanent, "vouched-for fact", "operator"); err != nil {
+		memorystore.Stated, memorystore.High, memorystore.Permanent, memorystore.Validity{}, "vouched-for fact", "operator"); err != nil {
 		t.Fatalf("approve high: %v", err)
 	}
 	got, _, err := store.Retrieve(memorystore.Query{

@@ -115,7 +115,19 @@ type Record struct {
 	// dimensions it never withholds a record and unlike confidence it never orders
 	// one; it only decides whether an automated sweep may expire it.
 	Retention Retention `json:"retention"`
-	Body      string    `json:"body"`
+	// Validity is the interval in valid time during which the record's assertion is
+	// true in the modeled world, the fifth and last dimension retrieval authorizes on
+	// (ADR-0047). It is the store's second time axis: the version chain records
+	// transaction time -- when the store came to believe a thing -- and this records
+	// when the thing is true, which the chain cannot. Retrieval withholds a record
+	// whose interval does not contain the query's as-of instant, in the same
+	// pre-ranking step as scope, clearance, purpose and evidence class. Both bounds
+	// are optional -- an empty bound is the honest "no known start/end" rather than an
+	// unknown to refuse -- and it is carried forward by every correction like the
+	// dimensions above, because a correction that dropped it would silently re-date
+	// when the fact was true.
+	Validity Validity `json:"validity"`
+	Body     string   `json:"body"`
 
 	// Origin records who or what produced this version: an authenticated
 	// principal, an import name, or the run that proposed it. The exit
@@ -167,12 +179,21 @@ type identity struct {
 	// to ephemeral and tombstoned by the next sweep, expiring a version somebody
 	// was told would be kept. Making it identity forces a re-tier to be a visible
 	// new version.
-	Retention  Retention `json:"retention"`
-	Body       string    `json:"body"`
-	Origin     string    `json:"origin"`
-	CreatedRun string    `json:"created_run,omitempty"`
-	CreatedSeq int64     `json:"created_seq,omitempty"`
-	Deleted    bool      `json:"deleted,omitempty"`
+	Retention Retention `json:"retention"`
+	// Validity is part of the identity for the same reason the dimensions above are
+	// (ADR-0034): re-dating when a fact is true is a new version a receipt can name,
+	// not an in-place edit. It matters as much as retention here: if a validity
+	// window could be edited in place, a record a receipt named as true through 2026
+	// could be silently narrowed to end in 2025, so a retrieval that correctly
+	// withheld it at a 2026 as-of would start returning it -- or the reverse -- with
+	// no version to show the window had moved. Making it identity forces a re-dating
+	// to be a visible new version.
+	Validity   Validity `json:"validity"`
+	Body       string   `json:"body"`
+	Origin     string   `json:"origin"`
+	CreatedRun string   `json:"created_run,omitempty"`
+	CreatedSeq int64    `json:"created_seq,omitempty"`
+	Deleted    bool     `json:"deleted,omitempty"`
 }
 
 // Seal computes the content digest and the content-addressed version ID.
@@ -188,7 +209,7 @@ func (r Record) Seal() (Record, error) {
 	body, err := json.Marshal(identity{
 		RecordID: r.RecordID, Supersedes: r.Supersedes, Retires: r.Retires, Scope: r.Scope,
 		Kind: r.Kind, Sensitivity: r.Sensitivity, Purpose: r.Purpose, EvidenceClass: r.EvidenceClass,
-		Confidence: r.Confidence, Retention: r.Retention, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
+		Confidence: r.Confidence, Retention: r.Retention, Validity: r.Validity, Body: r.Body, Origin: r.Origin, CreatedRun: r.CreatedRun, CreatedSeq: r.CreatedSeq, Deleted: r.Deleted,
 	})
 	if err != nil {
 		return Record{}, fmt.Errorf("encode memory record identity: %w", err)
@@ -265,6 +286,16 @@ func (r Record) Validate() error {
 	// to expire is exactly the field-nothing-fails-on defect ADR-0046 refuses to
 	// add.
 	if err := r.Retention.Validate(); err != nil {
+		return err
+	}
+	// Validity is validated for every record, tombstone included, for the same
+	// reason as the dimensions above: a deletion carries the tip's window forward,
+	// and a tombstone with no valid window would be a record whose truth interval
+	// became unknown at the moment it was removed. Unlike the vocabulary dimensions
+	// this refuses only a garbage instant or an empty interval, not an absent one --
+	// a timeless record is a legitimate always-valid assertion (ADR-0047), so the
+	// requirement is that a stated window be a real one, not that a window be stated.
+	if err := r.Validity.Validate(); err != nil {
 		return err
 	}
 	// A tombstone carries no body by design, so the body check is scoped to

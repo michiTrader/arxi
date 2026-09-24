@@ -19,11 +19,11 @@ import (
 func TestExpireTombstonesEphemeralAndKeepsPermanent(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("kept", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Permanent, "ana works in Madrid", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent, memorystore.Validity{}, "ana works in Madrid", "operator"); err != nil {
 		t.Fatalf("approve permanent: %v", err)
 	}
 	if _, err := store.Approve("transient", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, "ana opened a file", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, memorystore.Validity{}, "ana opened a file", "operator"); err != nil {
 		t.Fatalf("approve ephemeral: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestExpireTombstonesEphemeralAndKeepsPermanent(t *testing.T) {
 func TestRetentionNeverWithholdsARecord(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("transient", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, "ana opened a file", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, memorystore.Validity{}, "ana opened a file", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, evidence, err := store.Retrieve(memorystore.Query{
@@ -94,7 +94,7 @@ func TestRetentionNeverWithholdsARecord(t *testing.T) {
 func TestAnUnstatedOrUnknownRetentionIsRefusedAtValidate(t *testing.T) {
 	store := open(t)
 	_, err := store.Approve("unset", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, "", "a record nobody assigned a lifecycle", "operator")
+		memorystore.Stated, memorystore.Medium, "", memorystore.Validity{}, "a record nobody assigned a lifecycle", "operator")
 	if err == nil {
 		t.Fatal("a record with no retention was stored: an unstated retention is no lifecycle decision, " +
 			"and defaulting it would either hoard a record meant to be transient or expire one meant to " +
@@ -105,7 +105,7 @@ func TestAnUnstatedOrUnknownRetentionIsRefusedAtValidate(t *testing.T) {
 			"tell the caller to state the retention as a known policy, not report a bare invalid", err)
 	}
 	_, err = store.Approve("garbage", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Retention("forever"), "body", "operator")
+		memorystore.Stated, memorystore.Medium, memorystore.Retention("forever"), memorystore.Validity{}, "body", "operator")
 	if err == nil {
 		t.Fatal("a record with an unrecognized retention was stored: the vocabulary is closed precisely " +
 			"so a policy nobody defined gets no standing rather than being expired on the strength of a " +
@@ -158,7 +158,7 @@ func TestRetentionIsPartOfTheVersionIdentity(t *testing.T) {
 func TestCorrectionCarriesRetentionForward(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Imported, memorystore.High, memorystore.Permanent, "headcount is 240", "operator"); err != nil {
+		memorystore.Imported, memorystore.High, memorystore.Permanent, memorystore.Validity{}, "headcount is 240", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	corrected, err := store.Correct("fact", "headcount is 251", "ana")
@@ -183,7 +183,7 @@ func TestCorrectionCarriesRetentionForward(t *testing.T) {
 func TestExpiredEphemeralRecordLeavesATombstoneNotAHole(t *testing.T) {
 	store := open(t)
 	if _, err := store.Approve("transient", user("ana"), memorystore.Public, memorystore.Operate,
-		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, "ana opened a file", "operator"); err != nil {
+		memorystore.Stated, memorystore.Medium, memorystore.Ephemeral, memorystore.Validity{}, "ana opened a file", "operator"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := store.Expire("lifecycle"); err != nil {

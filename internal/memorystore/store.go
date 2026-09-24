@@ -404,8 +404,8 @@ func (s *Store) refuseSecondRoot(sealed Record) error {
 // Model-generated material must use Propose: the two entry points exist so the
 // containment rule Phase 7 opens with is a function signature rather than a
 // field the caller is trusted to set correctly.
-func (s *Store) Approve(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, retention Retention, body, origin string) (Record, error) {
-	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Retention: retention, Kind: Approved, Body: body, Origin: origin})
+func (s *Store) Approve(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, retention Retention, validity Validity, body, origin string) (Record, error) {
+	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Retention: retention, Validity: validity, Kind: Approved, Body: body, Origin: origin})
 }
 
 // Propose stores model-generated material as a candidate.
@@ -415,8 +415,8 @@ func (s *Store) Approve(recordID string, scope Scope, sensitivity Sensitivity, p
 // receipt at the barrier. Two independent refusals for one rule, because this
 // is the containment the phase names first and a single point of enforcement
 // would be a single point of regression.
-func (s *Store) Propose(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, retention Retention, body, origin, runID string, seq int64) (Record, error) {
-	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Retention: retention, Kind: Candidate, Body: body,
+func (s *Store) Propose(recordID string, scope Scope, sensitivity Sensitivity, purpose Purpose, evidenceClass EvidenceClass, confidence Confidence, retention Retention, validity Validity, body, origin, runID string, seq int64) (Record, error) {
+	return s.Put(Record{RecordID: recordID, Scope: scope, Sensitivity: sensitivity, Purpose: purpose, EvidenceClass: evidenceClass, Confidence: confidence, Retention: retention, Validity: validity, Kind: Candidate, Body: body,
 		Origin: origin, CreatedRun: runID, CreatedSeq: seq})
 }
 
@@ -438,7 +438,7 @@ func (s *Store) Correct(recordID string, body, origin string) (Record, error) {
 			"resurrection the deletion guarantee forbids", recordID, tip.VersionID)
 	}
 	return s.Put(Record{RecordID: recordID, Supersedes: tip.VersionID, Scope: tip.Scope,
-		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Body: body, Origin: origin})
+		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Validity: tip.Validity, Body: body, Origin: origin})
 }
 
 // Promote turns a candidate into an approved record by appending an approved
@@ -456,7 +456,7 @@ func (s *Store) Promote(recordID, origin string) (Record, error) {
 			"record that never was a candidate", recordID, tip.Kind, tip.VersionID)
 	}
 	return s.Put(Record{RecordID: recordID, Supersedes: tip.VersionID, Scope: tip.Scope,
-		Kind: Approved, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Body: tip.Body, Origin: origin})
+		Kind: Approved, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Validity: tip.Validity, Body: tip.Body, Origin: origin})
 }
 
 // Delete appends a tombstone superseding the current tip.
@@ -477,7 +477,7 @@ func (s *Store) Delete(recordID, origin string) (Record, error) {
 		return tip, nil
 	}
 	return s.Put(Record{RecordID: recordID, Supersedes: tip.VersionID, Scope: tip.Scope,
-		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Origin: origin, Deleted: true})
+		Kind: tip.Kind, Sensitivity: tip.Sensitivity, Purpose: tip.Purpose, EvidenceClass: tip.EvidenceClass, Confidence: tip.Confidence, Retention: tip.Retention, Validity: tip.Validity, Origin: origin, Deleted: true})
 }
 
 // Expire tombstones every live record whose retention marks it expirable and
@@ -630,13 +630,13 @@ func (s *Store) Resolve(recordID, keepVersionID, origin string) (Record, error) 
 	sort.Strings(others)
 
 	// The survivor's body, scope, kind, sensitivity, purpose, evidence class,
-	// confidence, retention and deletion state are carried forward verbatim:
-	// Resolve chooses which version wins, not what it says. Keeping a tombstone is
-	// allowed -- an operator may resolve a fork by deciding the record is deleted --
-	// so Deleted is copied rather than forced false.
+	// confidence, retention, validity and deletion state are carried forward
+	// verbatim: Resolve chooses which version wins, not what it says. Keeping a
+	// tombstone is allowed -- an operator may resolve a fork by deciding the record
+	// is deleted -- so Deleted is copied rather than forced false.
 	return s.Put(Record{RecordID: recordID, Supersedes: keep.VersionID, Retires: others,
 		Scope: keep.Scope, Kind: keep.Kind, Sensitivity: keep.Sensitivity, Purpose: keep.Purpose,
-		EvidenceClass: keep.EvidenceClass, Confidence: keep.Confidence, Retention: keep.Retention, Body: keep.Body, Deleted: keep.Deleted, Origin: origin})
+		EvidenceClass: keep.EvidenceClass, Confidence: keep.Confidence, Retention: keep.Retention, Validity: keep.Validity, Body: keep.Body, Deleted: keep.Deleted, Origin: origin})
 }
 
 // Versions returns every stored version, in no meaningful order.
