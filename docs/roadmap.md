@@ -661,6 +661,20 @@ one verb over; `Delete` appends a tombstone, so its dropped window is a lineage 
 ADR-0048 adds a guard per verb and records the asymmetry, so the other dimensions are
 not each given a redundant test asserting what `Validate` already enforces.
 
+Probing ADR-0048's delivery in turn found the same failure shape one artifact over, in
+the retrieval evidence ADR-0049 closes. The `Retrieval.Selection` records, per returned
+record, its identity and the full classification it was admitted under — scope,
+sensitivity, purpose, evidence class, confidence and valid-time interval — the audit
+trail this phase's exit evidence rests on, and the field ADR-0042 through ADR-0047 each
+added claiming an audit could read it. No test asserted any of those structured fields:
+blanking all nine of them at once left the whole suite green, so the witness was the
+field nothing fails on, across every dimension. This is deliberately wider than valid
+time — asserting only the valid-time bounds would repeat the verified-at-its-narrowest
+error one more time — so ADR-0049 adds a single guard that reads the expected values off
+the returned record and asserts every `Selection` field describes the record it names.
+Like ADR-0048 it changes no production code: the witness was built correctly and only
+unverified.
+
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
