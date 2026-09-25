@@ -307,3 +307,128 @@ func TestCorrectionCarriesValidityForward(t *testing.T) {
 			"re-dating the carry-forward exists to prevent", mid26)
 	}
 }
+
+// TestPromotionCarriesValidityForward guards the second of ADR-0047's four
+// carry-forward verbs, unproven until now. Promotion turns a candidate into an
+// approved, retrievable record, so a dropped window is the same stale-fact
+// disclosure the headline leakage test prevents, one verb over: a fact true only
+// in a past interval becomes timeless and is presented as current. Unlike the five
+// required dimensions, dropping validity here is not caught by Validate -- an empty
+// window is the legal timeless record, so nothing fails at the write; the leak
+// surfaces only at retrieval, which is where this checks it.
+func TestPromotionCarriesValidityForward(t *testing.T) {
+	store := open(t)
+	if _, err := store.Propose("guess", user("ana"), memorystore.Public, memorystore.Operate,
+		memorystore.Stated, memorystore.Medium, memorystore.Permanent,
+		memorystore.Validity{From: y2025, To: y2026}, "headcount was 200 in 2025", "operator", "run-1", 1); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	promoted, err := store.Promote("guess", "operator")
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if promoted.Validity.From != y2025 || promoted.Validity.To != y2026 {
+		t.Fatalf("the promoted version has window [%s, %s), want [%s, %s): promotion dropped the valid-time "+
+			"window, so a candidate true only in 2025 became a timeless approved fact", promoted.Validity.From,
+			promoted.Validity.To, y2025, y2026)
+	}
+	inWindow, _, err := store.Retrieve(timeQuery(y2025))
+	if err != nil {
+		t.Fatalf("retrieve in window: %v", err)
+	}
+	if len(inWindow) != 1 || inWindow[0].RecordID != "guess" {
+		t.Fatalf("as of %s the promoted record was not returned (%v): promotion must make the record "+
+			"retrievable inside its window, or the out-of-window check below passes for the wrong reason",
+			y2025, recordIDs(inWindow))
+	}
+	outWindow, _, err := store.Retrieve(timeQuery(mid26))
+	if err != nil {
+		t.Fatalf("retrieve out of window: %v", err)
+	}
+	if len(outWindow) != 0 {
+		t.Fatalf("as of %s the promoted record was returned: promotion did not carry the candidate's window "+
+			"forward, so a fact true only in 2025 is presented as current in 2026 -- the stale-fact "+
+			"disclosure the carry-forward exists to prevent, reached through Promote rather than at creation",
+			mid26)
+	}
+}
+
+// TestDeletionCarriesValidityForward guards the third carry-forward verb. A
+// tombstone is never retrieved, so a dropped window here is not a disclosure but a
+// lineage loss: Delete carries the tip's classification forward precisely so an
+// audit reading the deletion can still see what the record was when it was removed,
+// which is why Validate already requires every other dimension on a tombstone.
+// Valid time is the one dimension Validate cannot enforce that way -- an empty
+// window is legal -- so this reads the window off the returned tombstone directly,
+// there being no retrieval to read it through.
+func TestDeletionCarriesValidityForward(t *testing.T) {
+	store := open(t)
+	if _, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
+		memorystore.Stated, memorystore.High, memorystore.Permanent,
+		memorystore.Validity{From: y2025, To: y2026}, "headcount was 200 in 2025", "operator"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	tombstone, err := store.Delete("fact", "operator")
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if !tombstone.Deleted {
+		t.Fatalf("Delete returned a version that is not a tombstone: %+v", tombstone)
+	}
+	if tombstone.Validity.From != y2025 || tombstone.Validity.To != y2026 {
+		t.Fatalf("the tombstone has window [%s, %s), want [%s, %s): deletion dropped the valid-time window, "+
+			"so the record's valid-time span became unknown at the moment it was removed -- the lineage a "+
+			"tombstone carries every other dimension forward to preserve", tombstone.Validity.From,
+			tombstone.Validity.To, y2025, y2026)
+	}
+}
+
+// TestResolutionCarriesValidityForward guards the fourth carry-forward verb.
+// Resolve appends a live, retrievable survivor, so a dropped window is a stale-fact
+// disclosure of the same shape as Promote's. The fork is a root fork -- a bounded
+// Approve and a timeless imported root competing for one record -- and the operator
+// keeps the bounded one, so the resolved record must retain that window; dropping it
+// re-dates the survivor to always-valid. Checked through an as-of the window
+// excludes, the leak's own shape.
+func TestResolutionCarriesValidityForward(t *testing.T) {
+	store := open(t)
+	keep, err := store.Approve("fact", user("ana"), memorystore.Public, memorystore.Operate,
+		memorystore.Stated, memorystore.High, memorystore.Permanent,
+		memorystore.Validity{From: y2025, To: y2026}, "headcount was 200 in 2025", "operator")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	// A competing root arrives out of band -- the fork the write guard cannot stop --
+	// so the record has two heads and Resolve is the only verb that can heal it. The
+	// import is timeless, so if Resolve keeps its window instead of the survivor's the
+	// bounded assertion below would still fail, but the operator names the bounded head.
+	importFork(t, store, "fact", user("ana"), "", "a competing root")
+	resolved, err := store.Resolve("fact", keep.VersionID, "operator")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved.Validity.From != y2025 || resolved.Validity.To != y2026 {
+		t.Fatalf("the resolved version has window [%s, %s), want [%s, %s): resolution dropped the survivor's "+
+			"valid-time window, so a fact true only in 2025 became a timeless current fact", resolved.Validity.From,
+			resolved.Validity.To, y2025, y2026)
+	}
+	inWindow, _, err := store.Retrieve(timeQuery(y2025))
+	if err != nil {
+		t.Fatalf("retrieve in window: %v", err)
+	}
+	if len(inWindow) != 1 || inWindow[0].RecordID != "fact" {
+		t.Fatalf("as of %s the resolved record was not returned (%v): resolution must leave one retrievable "+
+			"current version, or the out-of-window check below passes for the wrong reason", y2025,
+			recordIDs(inWindow))
+	}
+	outWindow, _, err := store.Retrieve(timeQuery(mid26))
+	if err != nil {
+		t.Fatalf("retrieve out of window: %v", err)
+	}
+	if len(outWindow) != 0 {
+		t.Fatalf("as of %s the resolved record was returned: resolution did not carry the survivor's window "+
+			"forward, so a fact true only in 2025 is presented as current in 2026 -- the stale-fact "+
+			"disclosure the carry-forward exists to prevent, reached through Resolve rather than at creation",
+			mid26)
+	}
+}
