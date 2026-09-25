@@ -675,6 +675,21 @@ the returned record and asserts every `Selection` field describes the record it 
 Like ADR-0048 it changes no production code: the witness was built correctly and only
 unverified.
 
+Probing ADR-0049's delivery found the companion gap one level up, which ADR-0050
+closes. ADR-0049 witnessed each returned record; the `Retrieval` header — the
+authorization envelope the whole retrieval ran under: `authorized_scopes`, `clearance`,
+`authorized_purposes`, `authorized_evidence_classes` and `as_of`, the fields ADR-0027,
+ADR-0042, ADR-0043, ADR-0044 and ADR-0047 each added claiming an audit could read them —
+was almost entirely unasserted. Dropping the three set fields to nil or cross-wiring
+them passed, and forcing clearance to the public floor passed because the one prior
+assertion covers only the empty-query floor a floored bug satisfies; only `as_of` was
+defended. So three of five envelope dimensions had no coverage and a fourth only its
+narrowest point — the failure shape this repository keeps finding. ADR-0050 adds one
+guard over the whole envelope, under a query with a non-public clearance and
+multi-valued, duplicated, unsorted sets so a dropped, mis-sourced, undeduplicated,
+unsorted or floored field is caught, with expectations derived from the query values.
+Like ADR-0049 it changes no production code.
+
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
