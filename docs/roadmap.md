@@ -690,6 +690,21 @@ multi-valued, duplicated, unsorted sets so a dropped, mis-sourced, undeduplicate
 unsorted or floored field is caught, with expectations derived from the query values.
 Like ADR-0049 it changes no production code.
 
+Probing ADR-0050's delivery closed the last unwitnessed content on the receipt, which
+ADR-0051 guards. ADR-0049 witnessed each returned record and ADR-0050 the query
+envelope; what remained was the receipt's own provenance — `schema`, the tag an audit
+tool parses it by, and `retrieval_version`, the ranker identity Phase 7's exit evidence
+names as the "ranking version". Blanking `schema` in the header left the whole suite
+green, and the one prior check on `retrieval_version` asserts only non-emptiness, so a
+wrong non-empty ranker name — a ranking credited to code that never ran — passed too;
+only an empty version was caught. So one provenance field had no coverage and the other
+only its floor, the same shape one field over. ADR-0051 adds one guard pinning both to
+the package constants they must reflect, derived from the constants rather than
+hand-copied so a const bump moves output and expectation together. Like ADR-0049 and
+ADR-0050 it changes no production code, and with it every content field of the
+`Retrieval` receipt — selected records, authorizing query, and the evidence's own
+identity — is defended.
+
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
