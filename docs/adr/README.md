@@ -59,6 +59,7 @@ has to decide which — not ignore the contradiction.
 | [0047](0047-a-record-carries-a-valid-time-authorized-against-a-query-as-of.md) | A memory record carries a valid-time interval, authorized against a query as-of instant the caller supplies | accepted |
 | [0048](0048-valid-time-carry-forward-is-guarded-at-every-derived-verb.md) | Valid time's carry-forward is guarded at every derived verb, the one dimension Validate does not cover | accepted |
 | [0049](0049-the-retrieval-selection-witness-is-guarded-across-every-dimension.md) | The retrieval selection witness is guarded across every dimension, because the audit trail's structured fields are the field nothing fails on | accepted |
+| [0050](0050-the-retrieval-authorization-envelope-is-guarded-across-every-dimension.md) | The retrieval authorization envelope is guarded across every dimension, because the receipt header's authorization sets are the field nothing fails on | accepted |
 
 ## Format
 
