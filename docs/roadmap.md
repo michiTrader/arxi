@@ -723,6 +723,22 @@ drift from. Like ADR-0049 through ADR-0051 it changes no production code, and wi
 it every content field of the `Retrieval` receipt — structured and free-text alike
 — is defended.
 
+Probing ADR-0052's completeness claim found that "every content field is defended"
+had itself been verified at its narrowest point: ADR-0049 (the structured fields)
+and ADR-0052 (the reason) each approve one record and retrieve it, so both assert
+against the first selection alone — the only one a one-record retrieval produces. A
+retrieval receipt is a slice whose purpose beyond one record is to explain an
+ordering, and the correspondence between a selection's position and the record it
+describes was unwitnessed: building every selection from the winning record left the
+whole suite green, so a retrieval of two records could emit two selections both
+naming the winner while the record ranked second left no trace of its own
+classification. ADR-0053 adds one guard that retrieves two records differing in
+scope specificity, principal and confidence and asserts each selection, at each
+position, describes the record placed there — deriving every expected value from
+that record or the exported ranker constant. Like ADR-0049 through ADR-0052 it
+changes no production code, and with it the receipt is defended across the slice
+rather than only at its first element.
+
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
