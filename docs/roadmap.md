@@ -739,6 +739,29 @@ that record or the exported ranker constant. Like ADR-0049 through ADR-0052 it
 changes no production code, and with it the receipt is defended across the slice
 rather than only at its first element.
 
+Probing ADR-0053's "across the slice" claim found it verified at its widest-looking
+point but its narrowest real one, which ADR-0054 closes. ADR-0053's two-record
+fixture differs in every *ranking* fact — scope specificity, principal, confidence
+and identity — and is identical in the four *non-ranking* classification dimensions:
+both records are approved `public`, `operate`, `stated`, with an empty validity. A
+field the two records share cannot expose a selection that copied it from the wrong
+record, because the wrong record's value is the same value, so the per-position
+correspondence of sensitivity, purpose, evidence class and the valid-time bounds —
+the fields ADR-0042, ADR-0043, ADR-0044 and ADR-0047 each added to the selection —
+was witnessed only at the first selection by ADR-0049 and generalised to the slice.
+Sourcing those five fields from the winning record left the whole suite green,
+including ADR-0053's own guard, so a retrieval of two records differing in
+classification emitted a second selection describing the winner's clearance, use,
+class and window: the disclosure those four records each added their field to make
+visible, made invisible again past the first position. ADR-0054 adds one guard that
+retrieves two records differing in the non-ranking classification as well as the
+ranking, under a query authorizing both records' values and an as-of inside both
+intervals, and asserts each selection at each position names its own record's
+sensitivity, purpose, evidence class and valid-time bounds. Like ADR-0049 through
+ADR-0053 it changes no production code, and with it every content field a selection
+carries — identity, ranking facts and classification alike — is defended across the
+slice rather than only for the fields a single fixture happened to vary.
+
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
 question, and the boundary above assigns identity, authentication and consent to
