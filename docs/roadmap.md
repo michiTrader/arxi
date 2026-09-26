@@ -701,9 +701,27 @@ only an empty version was caught. So one provenance field had no coverage and th
 only its floor, the same shape one field over. ADR-0051 adds one guard pinning both to
 the package constants they must reflect, derived from the constants rather than
 hand-copied so a const bump moves output and expectation together. Like ADR-0049 and
-ADR-0050 it changes no production code, and with it every content field of the
-`Retrieval` receipt — selected records, authorizing query, and the evidence's own
-identity — is defended.
+ADR-0050 it changes no production code, and with it every *structured* content
+field of the `Retrieval` receipt — selected records, authorizing query, and the
+evidence's own identity — is defended.
+
+Probing ADR-0051's delivery found that "every content field is defended" had itself
+outrun its evidence by one field: the receipt's one free-text field, the `reason`
+on each selection, was still witnessed only at a single substring — the shape this
+project keeps recording, a claim verified in one place and generalised to a whole
+capability. ADR-0052 closes it. The exit evidence names "ranking/index versions and
+reasons"; ADR-0051 pinned the versions, and the reason is the *reasons*. Each reason
+carries four facts — the specificity rank, the principal, the tie-breaking
+confidence, and the ranker version — but only the `confidence high` substring was
+checked. With that substring left intact, crediting the ordering to a ranker that
+never ran, printing the wrong specificity, and naming the wrong principal each left
+the suite green: three of four facts unwitnessed and the fourth only a substring.
+ADR-0052 adds one guard over every fact the reason names, each derived from the
+returned record or the exported ranker constant so it witnesses the reason
+describes the record it explains rather than matching a template a reword could
+drift from. Like ADR-0049 through ADR-0051 it changes no production code, and with
+it every content field of the `Retrieval` receipt — structured and free-text alike
+— is defended.
 
 One gap remains, and it is deliberate rather than pending. **Retrieval is not wired
 into `internal/exec`**: which principals a run is authorized for is an identity
