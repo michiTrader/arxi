@@ -61,6 +61,7 @@ has to decide which — not ignore the contradiction.
 | [0049](0049-the-retrieval-selection-witness-is-guarded-across-every-dimension.md) | The retrieval selection witness is guarded across every dimension, because the audit trail's structured fields are the field nothing fails on | accepted |
 | [0050](0050-the-retrieval-authorization-envelope-is-guarded-across-every-dimension.md) | The retrieval authorization envelope is guarded across every dimension, because the receipt header's authorization sets are the field nothing fails on | accepted |
 | [0051](0051-the-retrieval-receipt-provenance-is-guarded-across-schema-and-ranking-version.md) | The retrieval receipt's provenance is guarded across schema and ranking version, because the evidence's own identity is the field nothing fails on | accepted |
+| [0052](0052-the-selection-reason-is-guarded-across-every-ranking-fact-it-carries.md) | The selection reason is guarded across every ranking fact it carries, because the receipt's one free-text field named by the exit evidence was witnessed at a single substring | accepted |
 
 ## Format
 
