@@ -14,9 +14,12 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	hostv1 "github.com/michiTrader/arxi/host/v1"
 	"github.com/michiTrader/arxi/internal/blueprint"
+	"github.com/michiTrader/arxi/internal/model"
+	"github.com/michiTrader/arxi/internal/modelstore"
 	"github.com/michiTrader/arxi/internal/surface"
 )
 
@@ -364,6 +367,10 @@ func defaultProtoHost() (*hostv1.Host, error) {
 var protoHandlers = map[string]protoHandler{
 	"schema":             handleSchema,
 	"blueprint.validate": handleBlueprintValidate,
+	"provider.add":       handleProviderAdd,
+	"model.list":         handleModelList,
+	"model.enable":       handleModelEnable,
+	"model.disable":      handleModelDisable,
 }
 
 // serveConn runs the protocol over one reader/writer pair.
@@ -764,6 +771,138 @@ func checkType(c surface.Cmd, pp surface.Param, v any) error {
 // surface is the failure this whole design is arranged to prevent.
 func handleSchema(map[string]any) (any, error) {
 	return surface.BuildManifest(), nil
+}
+
+// handleProviderAdd answers `provider.add` by registering a provider in the
+// same on-disk modelstore the CLI writes, through the same model.New ->
+// store.Add path cmdProviderAdd uses. It is a protoHandler, not a lifecycle
+// verb: it computes a result from the params and the store, with no host,
+// principal or job — the shape blueprint.validate already has.
+//
+// The api_key_env invariant holds here only because model.New enforces it. The
+// wire carries the NAME of an environment variable, never a key, and a
+// secret-shaped value is refused by validateKeyEnv inside model.New before
+// anything touches disk. The TUI adds no second validator: the core is the
+// single enforcement site, so a client that mistakes a key for a var name is
+// refused identically whether the request arrived over the wire or off the
+// command line. That identity is the whole reason this verb reuses model.New
+// rather than reimplementing the registration against the store.
+//
+// It opens the store with modelstore.Open directly rather than through
+// openProviders(), because openProviders() calls fatal() on a store-open error
+// and fatal() exits the process. A protocol handler that cannot open the store
+// must answer the one client with a failed response, not kill the server and
+// every other connection with it.
+func handleProviderAdd(params map[string]any) (any, error) {
+	// Names arrive normalized to underscores: WireParams() maps the surface's
+	// `base-url`/`api-key-env` to `base_url`/`api_key_env`, and validateParams
+	// has already refused any key not in that set, so reading the underscore
+	// spellings is reading exactly what a well-formed request carries.
+	name := stringParam(params, "name")
+	baseURL := stringParam(params, "base_url")
+	keyEnv := stringParam(params, "api_key_env")
+
+	p, err := model.New(name, baseURL, keyEnv, nowFunc().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	store, err := modelstore.Open(providerDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.Add(p); err != nil {
+		return nil, err
+	}
+	// model.Provider marshals to exactly the frozen result shape
+	// {name, protocol, base_url, api_key_env, models:[{id, enabled}]}, so the
+	// snapshot the client reads back is the record on disk, not a reprojection
+	// that could drift from it.
+	return p, nil
+}
+
+// handleModelList answers `model.list` with the rows the store holds, flattened
+// to {provider, id, enabled}. It takes no params (Idempotent, no mutation) and
+// an empty store is a valid empty list, not a failure: a user who has registered
+// no provider yet asked a well-formed question and gets a well-formed empty
+// answer.
+//
+// The result emits the model identifier under `id`, deliberately NOT the `name`
+// key the CLI's --json projection uses. The protocol audience is the TUI, whose
+// row model is {provider, id, enabled}; keeping the wire key `id` means the
+// frozen schema and the client agree without a translation layer that could
+// drift. The CLI projection stays as it is for its human-facing `arxi model
+// list --json`; the two audiences differ, so the two projections may.
+func handleModelList(map[string]any) (any, error) {
+	store, err := modelstore.Open(providerDir)
+	if err != nil {
+		return nil, err
+	}
+	ps, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		Provider string `json:"provider"`
+		ID       string `json:"id"`
+		Enabled  bool   `json:"enabled"`
+	}
+	rows := model.Rows(ps)
+	out := make([]row, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, row{Provider: r.Provider, ID: r.Name, Enabled: r.Enabled})
+	}
+	return struct {
+		Models []row `json:"models"`
+	}{Models: out}, nil
+}
+
+// handleModelEnable and handleModelDisable share one implementation differing by
+// a bool, mirroring cmdModelEnable. They resolve the ref with store.Owner, flip
+// SetEnabled and Save, through the same path the CLI uses.
+//
+// store.Owner, not store.Resolve: Resolve refuses a disabled model, which would
+// make `model.enable` structurally unable to enable the one thing it exists to
+// enable. Owner returns the provider regardless of the model's current state and
+// errors only on a genuinely ambiguous ref (two providers offering the id).
+//
+// changed:false is a success, not a failure: a model already in the requested
+// state is the idempotent no-op the Idempotent flag promises, and reporting it
+// as an error would make a client that retries a flip see a failure where
+// nothing is wrong. The result carries changed so the client can tell "I flipped
+// it" from "it was already there" without a second read.
+func handleModelEnable(params map[string]any) (any, error) {
+	return setModelEnabled(params, true)
+}
+
+func handleModelDisable(params map[string]any) (any, error) {
+	return setModelEnabled(params, false)
+}
+
+func setModelEnabled(params map[string]any, on bool) (any, error) {
+	ref := stringParam(params, "model")
+	store, err := modelstore.Open(providerDir)
+	if err != nil {
+		return nil, err
+	}
+	p, id, err := store.Owner(ref)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := p.SetEnabled(id, on)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		if err := store.Save(p); err != nil {
+			return nil, err
+		}
+	}
+	return struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Enabled  bool   `json:"enabled"`
+		Changed  bool   `json:"changed"`
+	}{Provider: p.Name, Model: id, Enabled: on, Changed: changed}, nil
 }
 
 // handleBlueprintValidate answers `blueprint.validate` with a STRUCTURED result,

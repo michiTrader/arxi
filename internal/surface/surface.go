@@ -145,17 +145,25 @@ func enum(pp Param, v ...string) Param { pp.Enum = v; return pp }
 // Registry is the complete surface.
 var Registry = []Cmd{
 	// ---- core: providers and models ----------------------------------------
+	// Protocol but deliberately NOT AgentTool, the same shape run.attach uses:
+	// the TUI drives provider and model management on the user's behalf over the
+	// wire, but an agent must not register a provider or flip a model on its own.
+	// Registering a provider names a credential env var and changes which models
+	// a run can bill against; that is an owner decision, not a tool call. So these
+	// three carry Protocol (reachable from the host) without AgentTool (never
+	// offered to the loop), and therefore no ToolPolicy — ToolPolicy only governs
+	// the AgentTool door, which is closed here.
 	{Path: []string{"provider", "add"}, Desc: "register a model provider",
-		Kind: CLIOnly, Mutates: true, Since: 1,
+		Kind: CLIOnly | Protocol, Mutates: true, Since: 1,
 		Params: []Param{pos(p("name", "string", "provider name")),
 			p("base-url", "string", "OpenAI-compatible endpoint"),
 			p("api-key-env", "string", "environment variable holding the key")}},
 	{Path: []string{"model", "list"}, Desc: "list available models",
 		Kind: CLIOnly | AgentTool | Protocol, ToolPolicy: PolicyAllow, Idempotent: true, Since: 1},
 	{Path: []string{"model", "enable"}, Desc: "enable a model",
-		Kind: CLIOnly, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "model id"))}},
+		Kind: CLIOnly | Protocol, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "model id"))}},
 	{Path: []string{"model", "disable"}, Desc: "disable a model",
-		Kind: CLIOnly, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "model id"))}},
+		Kind: CLIOnly | Protocol, Mutates: true, Since: 1, Params: []Param{pos(p("model", "string", "model id"))}},
 
 	// ---- run: the central verb ---------------------------------------------
 	// A single namespace: `run <actor>`. There is no `run team` nor `run agent`,
