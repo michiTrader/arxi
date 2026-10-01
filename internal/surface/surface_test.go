@@ -352,8 +352,17 @@ func TestLookupProtocolIsTheInverseOfProtocolType(t *testing.T) {
 // does — would let a socket client reach both. The Kind check is the boundary,
 // so it is checked here rather than trusted to the caller: a server that has to
 // remember to re-check has a hole the day somebody adds a second dispatch site.
+//
+// provider.add and model.enable/disable were on this list and are deliberately
+// off it now (K2): the TUI drives provider and model management on the user's
+// behalf over the wire, so the host must be able to reach them. The threat this
+// test names — "an agent can widen its own tool policy" — is about AgentTool,
+// not Protocol, and those three carry Protocol WITHOUT AgentTool. The sibling
+// test below pins exactly that: on the wire for the host, never offered to the
+// agent loop. The entries kept here (agent.tool.policy, role.define, blueprint
+// install/create) stay CLIOnly outright, reachable over no socket at all.
 func TestLookupProtocolRefusesWhatIsNotOnTheWire(t *testing.T) {
-	for _, name := range []string{"design", "serve", "provider.add", "model.enable",
+	for _, name := range []string{"design", "serve",
 		"agent.tool.policy", "role.define", "blueprint.create", "blueprint.install"} {
 		if c := LookupProtocol(name); c != nil {
 			t.Errorf("LookupProtocol(%q) resolved to %s, which is not Kind|Protocol.\n"+
@@ -373,6 +382,40 @@ func TestLookupProtocolRefusesWhatIsNotOnTheWire(t *testing.T) {
 	}
 	if LookupProtocol("...") != nil {
 		t.Error("a type of nothing but separators resolved to a command")
+	}
+}
+
+// TestProviderAndModelManagementIsOnTheWireButNotAnAgentTool pins the K2
+// decision that let the three verbs above leave the denylist: provider.add,
+// model.enable and model.disable are reachable over the protocol (so the TUI can
+// manage providers and models on the user's behalf) but are NOT AgentTool (so no
+// agent loop is ever offered them).
+//
+// The two halves are a single decision and must not drift apart. Dropping
+// Protocol would strand the TUI with no way to register a provider, reintroducing
+// the CLI the frontend exists to replace. Adding AgentTool would let an agent
+// register a provider — naming a credential env var — or flip a model on its own,
+// which is the self-escalation the sibling test's "widen its own tool policy"
+// warning is about. Registering a provider and enabling a model are owner
+// decisions, not tool calls, so the state the frontend needs is exactly the state
+// the agent must not have, and this test is where that line is drawn.
+func TestProviderAndModelManagementIsOnTheWireButNotAnAgentTool(t *testing.T) {
+	for _, name := range []string{"provider.add", "model.enable", "model.disable"} {
+		c := LookupProtocol(name)
+		if c == nil {
+			t.Errorf("LookupProtocol(%q) found nothing, but K2 put it on the wire.\n"+
+				"  consequence: the TUI has no protocol verb to manage providers or "+
+				"models with, so the user is pushed back to the CLI the frontend "+
+				"exists to replace.", name)
+			continue
+		}
+		if c.Kind&AgentTool != 0 {
+			t.Errorf("%s is AgentTool, but it must be Protocol-only.\n"+
+				"  consequence: an agent can register a provider (naming a credential "+
+				"env var) or flip a model on its own. Registering a provider and "+
+				"enabling a model are owner decisions, not tool calls; AgentTool here "+
+				"is the self-escalation the wire boundary exists to prevent.", c.CLI())
+		}
 	}
 }
 
